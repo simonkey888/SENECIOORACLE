@@ -272,7 +272,7 @@ class ExchangeConnector:
     """
 
     # Exchange names we support
-    SUPPORTED_EXCHANGES = ("binance", "bybit", "binance_testnet")
+    SUPPORTED_EXCHANGES = ("binance", "binanceus", "bybit", "binance_testnet")
 
     def __init__(self, symbol: str = "BTC/USDT", config: dict = None):
         """Initialize the dual-exchange connector.
@@ -325,6 +325,10 @@ class ExchangeConnector:
 
         exchange_configs = {
             "binance": {
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            },
+            "binanceus": {
                 "enableRateLimit": True,
                 "options": {"defaultType": "spot"},
             },
