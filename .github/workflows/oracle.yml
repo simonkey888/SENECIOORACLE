@@ -37,9 +37,6 @@ jobs:
         run: |
           echo "=== SENECIO ORACLE — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
           python3 predict_only.py --symbol ETH/USDT --timeframe 15m --exchange okx --json 2>&1 | tee oracle_cycle.log
-          echo ""
-          echo "=== Predictions count ==="
-          wc -l senecio_output/predictions.jsonl
 
       - name: Run Oracle — BTC/USDT
         run: |
@@ -48,7 +45,7 @@ jobs:
       - name: Data quality gate — remove garbage entries
         run: |
           python3 -c "
-          import json, sys
+          import json
           with open('senecio_output/predictions.jsonl') as f:
               lines = [l.strip() for l in f if l.strip()]
           clean = []
@@ -57,16 +54,36 @@ jobs:
               p = json.loads(line)
               if p.get('price_now', 0) == 0 and p.get('confidence', 0) == 0:
                   removed += 1
-                  print(f'  REMOVING: {p.get(\"symbol\")} @ {p.get(\"timestamp\")} (price=0, confidence=0)')
               else:
                   clean.append(line)
           if removed > 0:
               with open('senecio_output/predictions.jsonl', 'w') as f:
                   for line in clean:
                       f.write(line + '\n')
-              print(f'Data quality gate: removed {removed} garbage entries, kept {len(clean)}')
+              print(f'Data quality gate: removed {removed} garbage, kept {len(clean)}')
           else:
               print(f'Data quality gate: all {len(clean)} entries clean')
+          "
+
+      - name: Health check — verify new predictions exist
+        run: |
+          python3 -c "
+          import json
+          from datetime import datetime, timezone, timedelta
+          with open('senecio_output/predictions.jsonl') as f:
+              preds = [json.loads(l.strip()) for l in f if l.strip()]
+          now = datetime.now(timezone.utc)
+          one_hour_ago = now - timedelta(hours=1)
+          recent = [p for p in preds
+                    if p.get('timestamp') and
+                    datetime.fromisoformat(p['timestamp'].replace('Z','+00:00')) > one_hour_ago
+                    and p.get('price_now', 0) > 0]
+          if len(recent) == 0:
+              print(f'HEALTH CHECK FAILED: No valid predictions in the last hour')
+              print(f'Total predictions: {len(preds)}, Recent valid: {len(recent)}')
+              exit(1)
+          else:
+              print(f'HEALTH CHECK OK: {len(recent)} valid prediction(s) in the last hour')
           "
 
       - name: Generate Oracle Lab report
