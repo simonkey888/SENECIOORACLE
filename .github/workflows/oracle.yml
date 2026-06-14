@@ -30,20 +30,20 @@ jobs:
       - name: Verify past predictions
         run: |
           echo "=== VERIFY — filling outcomes for past predictions ==="
-          python3 predict_only.py --verify --symbol ETH/USDT --exchange bybit 2>&1 || true
-          python3 predict_only.py --verify --symbol BTC/USDT --exchange bybit 2>&1 || true
+          python3 predict_only.py --verify --symbol ETH/USDT --exchange okx 2>&1 || true
+          python3 predict_only.py --verify --symbol BTC/USDT --exchange okx 2>&1 || true
 
       - name: Run Oracle — ETH/USDT
         run: |
           echo "=== SENECIO ORACLE — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
-          python3 predict_only.py --symbol ETH/USDT --timeframe 15m --exchange bybit --json 2>&1 | tee oracle_cycle.log
+          python3 predict_only.py --symbol ETH/USDT --timeframe 15m --exchange okx --json 2>&1 | tee oracle_cycle.log
           echo ""
           echo "=== Predictions count ==="
           wc -l senecio_output/predictions.jsonl
 
       - name: Run Oracle — BTC/USDT
         run: |
-          python3 predict_only.py --symbol BTC/USDT --timeframe 15m --exchange bybit --json 2>&1 | tee oracle_cycle_btc.log || true
+          python3 predict_only.py --symbol BTC/USDT --timeframe 15m --exchange okx --json 2>&1 | tee oracle_cycle_btc.log || true
 
       - name: Data quality gate — remove garbage entries
         run: |
@@ -55,7 +55,6 @@ jobs:
           removed = 0
           for line in lines:
               p = json.loads(line)
-              # Remove entries where API failed (price=0 AND confidence=0)
               if p.get('price_now', 0) == 0 and p.get('confidence', 0) == 0:
                   removed += 1
                   print(f'  REMOVING: {p.get(\"symbol\")} @ {p.get(\"timestamp\")} (price=0, confidence=0)')
