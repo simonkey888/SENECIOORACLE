@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "generated_at": "2026-06-14T20:53:57.163349+00:00",
+    "source": "predictions.jsonl",
+    "total_predictions": 4,
+    "directional": 1,
+    "flat": 3,
+    "verified": 0,
+    "verified_directional": 0
+  },
+  "classification": {
+    "n_directional": 0,
+    "accuracy": null,
+    "precision_long": null,
+    "precision_short": null,
+    "recall_long": null,
+    "recall_short": null,
+    "f1_long": null,
+    "f1_short": null,
+    "confusion_matrix": null,
+    "note": "No verified directional predictions available"
+  },
+  "probabilistic": {
+    "brier_score": null,
+    "ece": {
+      "ece": null,
+      "bins": [],
+      "note": "No verified directional predictions"
+    }
+  },
+  "ev_analysis": {
+    "by_confidence_bucket": {
+      "buckets": [],
+      "note": "No verified predictions with price data"
+    },
+    "by_regime": {
+      "regimes": [],
+      "note": "No verified predictions with price data"
+    },
+    "by_symbol": {
+      "symbols": [],
+      "note": "No verified predictions with price data"
+    }
+  },
+  "sharpe": {
+    "sharpe": null,
+    "note": "Need at least 2 verified predictions"
+  },
+  "signal_rankings": {
+    "most_predictive": [],
+    "most_destructive": [],
+    "note": "No verified predictions"
+  },
+  "top_predictions": {
+    "top_best": [],
+    "top_worst": []
+  }
+}
