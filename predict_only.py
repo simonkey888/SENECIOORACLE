@@ -727,7 +727,7 @@ def main():
             "outcome": None,
             "error": "MARKET_DATA_UNAVAILABLE",
         }, indent=2))
-        return 1
+        sys.exit(1)
 
     # Step 1b: Candle deduplication — skip if same candle already predicted
     candle_ts = market_data.get("candle_ts", 0)
