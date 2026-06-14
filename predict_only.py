@@ -366,7 +366,8 @@ def log_prediction(prediction: dict, path: str = DEFAULT_PREDICTIONS_PATH):
 def verify_predictions(symbol: str = "ETH/USDT", timeframe: str = "15m",
                        path: str = DEFAULT_PREDICTIONS_PATH,
                        max_age_minutes: int = 1440,
-                       current_price: float = None):
+                       current_price: float = None,
+                       exchange: str = "okx"):
     """Verify past predictions by filling price_15m_later and outcome.
 
     For each prediction in the JSONL that has price_15m_later=null,
@@ -412,7 +413,7 @@ def verify_predictions(symbol: str = "ETH/USDT", timeframe: str = "15m",
 
     # Use provided price or fetch fresh one
     if current_price is None or current_price <= 0:
-        market = fetch_market_snapshot(symbol, timeframe, exchange="binance")
+        market = fetch_market_snapshot(symbol, timeframe, exchange=exchange)
         if market:
             current_price = market.get("ticker", {}).get("bid", 0.0)
             if current_price == 0:
@@ -694,7 +695,7 @@ def main():
 
     # ── Verify mode ──
     if args.verify:
-        verify_predictions(args.symbol, args.timeframe, args.log_path)
+        verify_predictions(args.symbol, args.timeframe, args.log_path, exchange=args.exchange)
         score = compute_oracle_score(args.log_path)
         print(json.dumps(score, indent=2))
         return 0
@@ -705,7 +706,7 @@ def main():
     # This is the KEY fix — every cycle checks if previous predictions
     # now have enough age (>=15 min) to verify against current price.
     logger.info("Auto-verifying previous predictions...")
-    n_verified = verify_predictions(args.symbol, args.timeframe, args.log_path)
+    n_verified = verify_predictions(args.symbol, args.timeframe, args.log_path, exchange=args.exchange)
     if n_verified > 0:
         logger.info(f"Auto-verified {n_verified} previous predictions")
 
