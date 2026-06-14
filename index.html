@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SENECIO Oracle — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --surface2: #1a2332;
+    --border: #1e2d3d;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --accent: #22d3ee;
+    --green: #34d399;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --purple: #a78bfa;
+    --blue: #60a5fa;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Inter', 'SF Pro Display', -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(135deg, #0a0e17 0%, #111827 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 1.5rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .logo-icon {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.3rem; font-weight: 800; color: #000;
+  }
+  .logo h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    background: linear-gradient(90deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .logo span { font-size: 0.8rem; color: var(--text-dim); }
+  .status-badge {
+    padding: 0.4rem 1rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .status-live { background: rgba(34,211,238,0.15); color: var(--accent); border: 1px solid rgba(34,211,238,0.3); }
+  .status-nodata { background: rgba(251,191,36,0.15); color: var(--yellow); border: 1px solid rgba(251,191,36,0.3); }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+
+  /* KPI row */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .kpi {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    transition: border-color 0.2s;
+  }
+  .kpi:hover { border-color: var(--accent); }
+  .kpi-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+  .kpi-value { font-size: 1.75rem; font-weight: 700; }
+  .kpi-sub { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.25rem; }
+  .kpi-value.green { color: var(--green); }
+  .kpi-value.red { color: var(--red); }
+  .kpi-value.yellow { color: var(--yellow); }
+  .kpi-value.accent { color: var(--accent); }
+  .kpi-value.purple { color: var(--purple); }
+
+  /* Charts */
+  .charts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+  }
+  .chart-card h3 {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 1rem;
+  }
+  .chart-wrap { position: relative; width: 100%; }
+
+  /* Tables */
+  .table-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+    overflow-x: auto;
+  }
+  .table-card h3 {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 1rem;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { text-align: left; color: var(--text-dim); padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(30,45,61,0.5); }
+  tr:hover td { background: rgba(34,211,238,0.03); }
+  .tag { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+  .tag-long { background: rgba(52,211,153,0.15); color: var(--green); }
+  .tag-short { background: rgba(248,113,113,0.15); color: var(--red); }
+  .tag-flat { background: rgba(148,163,184,0.15); color: var(--text-dim); }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--text-dim);
+  }
+  .empty-state .icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.4; }
+  .empty-state p { font-size: 0.9rem; }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 768px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    header { flex-direction: column; gap: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">S</div>
+    <div>
+      <h1>SENECIO Oracle</h1>
+      <span>Prediction Performance Dashboard</span>
+    </div>
+  </div>
+  <div id="status-badge" class="status-badge status-nodata">Loading...</div>
+</header>
+
+<div class="container">
+  <!-- KPI Row -->
+  <div class="kpi-row" id="kpi-row"></div>
+
+  <!-- Charts -->
+  <div class="charts-grid" id="charts-grid"></div>
+
+  <!-- Signal Rankings -->
+  <div class="table-card" id="signal-rankings"></div>
+
+  <!-- Predictions Table -->
+  <div class="table-card" id="predictions-table"></div>
+</div>
+
+<footer>
+  SENECIO ORACLE — Primero medir. Despues decidir.<br>
+  Automated via GitHub Actions &middot; Updated every 15 min
+</footer>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA LOADING
+// ═══════════════════════════════════════════════════════════════════════════
+
+const RAW_BASE = 'senecio_output';
+let reportData = null;
+let predictionsData = [];
+
+async function loadData() {
+  try {
+    const [reportRes, predRes] = await Promise.all([
+      fetch(`${RAW_BASE}/oracle_report.json?t=${Date.now()}`),
+      fetch(`${RAW_BASE}/predictions.jsonl?t=${Date.now()}`)
+    ]);
+
+    reportData = await reportRes.json();
+
+    const predText = await predRes.text();
+    predictionsData = predText.trim().split('\n')
+      .filter(l => l.trim())
+      .map(l => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean);
+
+    document.getElementById('status-badge').textContent = 'LIVE';
+    document.getElementById('status-badge').className = 'status-badge status-live';
+  } catch (e) {
+    console.error('Data load error:', e);
+    document.getElementById('status-badge').textContent = 'NO DATA';
+    document.getElementById('status-badge').className = 'status-badge status-nodata';
+  }
+  render();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER
+// ═══════════════════════════════════════════════════════════════════════════
+
+function fmt(v, decimals = 4) {
+  if (v === null || v === undefined) return '—';
+  return Number(v).toFixed(decimals);
+}
+
+function fmtPct(v) {
+  if (v === null || v === undefined) return '—';
+  return (Number(v) * 100).toFixed(1) + '%';
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+  } catch { return iso; }
+}
+
+function render() {
+  if (!reportData) {
+    document.getElementById('kpi-row').innerHTML = `
+      <div class="empty-state" style="grid-column:1/-1">
+        <div class="icon">📡</div>
+        <p>Waiting for oracle_report.json — predictions are being collected.<br>Dashboard will populate once verified outcomes exist.</p>
+      </div>`;
+    return;
+  }
+
+  const meta = reportData.meta || {};
+  const cls = reportData.classification || {};
+  const prob = reportData.probabilistic || {};
+  const ev = reportData.ev_analysis || {};
+  const sharpe = reportData.sharpe || {};
+  const signals = reportData.signal_rankings || {};
+  const topPred = reportData.top_predictions || {};
+
+  const hasVerified = (meta.verified || 0) > 0;
+
+  renderKPIs(meta, cls, prob, sharpe, hasVerified);
+  renderCharts(cls, prob, ev, hasVerified);
+  renderSignalRankings(signals);
+  renderPredictionsTable();
+}
+
+// ─── KPIs ────────────────────────────────────────────────────────────────
+
+function renderKPIs(meta, cls, prob, sharpe, hasVerified) {
+  const kpis = [
+    { label:'Total Predictions', value: meta.total_predictions || 0, cls:'' },
+    { label:'Verified', value: meta.verified || 0, cls:'', sub: `${meta.verified_directional || 0} directional` },
+    { label:'Accuracy', value: hasVerified ? fmtPct(cls.accuracy) : '—', cls: hasVerified && cls.accuracy >= 0.55 ? 'green' : hasVerified ? 'red' : '' },
+    { label:'Brier Score', value: prob.brier_score !== null ? fmt(prob.brier_score) : '—', cls: '', sub: 'lower = better' },
+    { label:'Sharpe Ratio', value: sharpe.sharpe !== null ? fmt(sharpe.sharpe, 2) : '—', cls: sharpe.sharpe !== null && sharpe.sharpe > 1 ? 'green' : '' },
+    { label:'Directional', value: meta.directional || 0, cls: 'accent', sub: `${meta.flat || 0} flat` },
+  ];
+
+  document.getElementById('kpi-row').innerHTML = kpis.map(k => `
+    <div class="kpi">
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value ${k.cls}">${k.value}</div>
+      ${k.sub ? `<div class="kpi-sub">${k.sub}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+// ─── CHARTS ──────────────────────────────────────────────────────────────
+
+const chartInstances = [];
+
+function destroyCharts() {
+  chartInstances.forEach(c => c.destroy());
+  chartInstances.length = 0;
+}
+
+function renderCharts(cls, prob, ev, hasVerified) {
+  destroyCharts();
+  const grid = document.getElementById('charts-grid');
+  grid.innerHTML = '';
+
+  // 1) Confusion Matrix Heatmap (if available)
+  if (cls.confusion_matrix) {
+    const card = createChartCard('Confusion Matrix');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawConfusionMatrix(ctx, cls.confusion_matrix);
+  }
+
+  // 2) ECE Calibration (if available)
+  if (prob.ece && prob.ece.bins && prob.ece.bins.length > 0) {
+    const card = createChartCard('Calibration — ECE');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawCalibration(ctx, prob.ece);
+  }
+
+  // 3) EV by Confidence Bucket
+  if (ev.by_confidence_bucket && ev.by_confidence_bucket.buckets && ev.by_confidence_bucket.buckets.length > 0) {
+    const card = createChartCard('EV by Confidence Bucket');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawEVByBucket(ctx, ev.by_confidence_bucket.buckets);
+  }
+
+  // 4) EV by Regime
+  if (ev.by_regime && ev.by_regime.regimes && ev.by_regime.regimes.length > 0) {
+    const card = createChartCard('EV by Market Regime');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawEVByRegime(ctx, ev.by_regime.regimes);
+  }
+
+  // 5) EV by Symbol
+  if (ev.by_symbol && ev.by_symbol.symbols && ev.by_symbol.symbols.length > 0) {
+    const card = createChartCard('EV by Symbol');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawEVBySymbol(ctx, ev.by_symbol.symbols);
+  }
+
+  // 6) Prediction Timeline (always available from raw predictions)
+  if (predictionsData.length > 0) {
+    const card = createChartCard('Prediction Timeline');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawTimeline(ctx);
+  }
+
+  // 7) Confidence Distribution (always available from raw predictions)
+  if (predictionsData.length > 0) {
+    const card = createChartCard('Confidence Distribution');
+    grid.appendChild(card);
+    const ctx = card.querySelector('canvas').getContext('2d');
+    drawConfidenceDist(ctx);
+  }
+
+  // No-data charts
+  if (!hasVerified && predictionsData.length <= 4) {
+    const card = document.createElement('div');
+    card.className = 'chart-card';
+    card.style.gridColumn = '1 / -1';
+    card.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">📊</div>
+        <p>Charts will populate as verified predictions accumulate.<br>
+        Current: ${meta.total_predictions || 0} predictions, ${meta.verified || 0} verified.</p>
+      </div>`;
+    grid.appendChild(card);
+  }
+}
+
+function createChartCard(title) {
+  const card = document.createElement('div');
+  card.className = 'chart-card';
+  card.innerHTML = `<h3>${title}</h3><div class="chart-wrap"><canvas></canvas></div>`;
+  return card;
+}
+
+// ─── Chart: Confusion Matrix ─────────────────────────────────────────────
+
+function drawConfusionMatrix(ctx, cm) {
+  const labels = ['LONG', 'SHORT'];
+  const data = {
+    labels: labels,
+    datasets: [{
+      label: 'Predicted LONG',
+      data: [{ x: 'LONG', y: 'LONG', v: cm[0][0] }, { x: 'LONG', y: 'SHORT', v: cm[0][1] }],
+      backgroundColor: ctx2 => {
+        // simple heat — just use a matrix bar chart
+      }
+    }]
+  };
+
+  // Use grouped bar chart for confusion matrix
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Actual LONG', 'Actual SHORT'],
+      datasets: [
+        { label: 'Predicted LONG', data: [cm[0][0], cm[0][1]], backgroundColor: 'rgba(34,211,238,0.7)', borderColor: 'rgba(34,211,238,1)', borderWidth: 1 },
+        { label: 'Predicted SHORT', data: [cm[1][0], cm[1][1]], backgroundColor: 'rgba(167,139,250,0.7)', borderColor: 'rgba(167,139,250,1)', borderWidth: 1 }
+      ]
+    },
+    options: chartOptions('Count')
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Chart: Calibration (ECE) ────────────────────────────────────────────
+
+function drawCalibration(ctx, ece) {
+  const bins = ece.bins;
+  const labels = bins.map(b => b.range || b.bucket || '');
+  const perfect = bins.map(b => b.midpoint || b.range_val || 0);
+  const actual = bins.map(b => b.accuracy || b.empirical || 0);
+
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Perfect Calibration', data: perfect, borderColor: 'rgba(148,163,184,0.5)', borderDash: [6,4], pointRadius: 0, borderWidth: 2, fill: false },
+        { label: 'Actual', data: actual, borderColor: '#22d3ee', backgroundColor: 'rgba(34,211,238,0.1)', borderWidth: 2, fill: true, tension: 0.3, pointBackgroundColor: '#22d3ee' }
+      ]
+    },
+    options: chartOptions('Accuracy', true, 0, 1)
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Chart: EV by Bucket ─────────────────────────────────────────────────
+
+function drawEVByBucket(ctx, buckets) {
+  const labels = buckets.map(b => b.bucket || b.range || '');
+  const values = buckets.map(b => b.avg_ev || b.ev || 0);
+  const colors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.7)' : 'rgba(248,113,113,0.7)');
+  const borders = values.map(v => v >= 0 ? '#34d399' : '#f87171');
+
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'Avg EV', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
+    },
+    options: chartOptions('Expected Value')
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Chart: EV by Regime ─────────────────────────────────────────────────
+
+function drawEVByRegime(ctx, regimes) {
+  const labels = regimes.map(r => r.regime || r.name || '');
+  const values = regimes.map(r => r.avg_ev || r.ev || 0);
+  const colors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.7)' : 'rgba(248,113,113,0.7)');
+  const borders = values.map(v => v >= 0 ? '#34d399' : '#f87171');
+
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'Avg EV', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
+    },
+    options: chartOptions('Expected Value')
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Chart: EV by Symbol ─────────────────────────────────────────────────
+
+function drawEVBySymbol(ctx, symbols) {
+  const labels = symbols.map(s => s.symbol || s.name || '');
+  const values = symbols.map(s => s.avg_ev || s.ev || 0);
+  const colors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.7)' : 'rgba(248,113,113,0.7)');
+  const borders = values.map(v => v >= 0 ? '#34d399' : '#f87171');
+
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'Avg EV', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
+    },
+    options: chartOptions('Expected Value')
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Chart: Prediction Timeline ──────────────────────────────────────────
+
+function drawTimeline(ctx) {
+  const sorted = [...predictionsData].sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const labels = sorted.map(p => fmtDate(p.timestamp));
+  const evs = sorted.map(p => p.ev || 0);
+  const confs = sorted.map(p => p.confidence || 0);
+
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Confidence',
+          data: confs,
+          borderColor: '#22d3ee',
+          backgroundColor: 'rgba(34,211,238,0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: '#22d3ee',
+          yAxisID: 'y'
+        },
+        {
+          label: 'EV',
+          data: evs,
+          borderColor: '#a78bfa',
+          backgroundColor: 'rgba(167,139,250,0.1)',
+          borderWidth: 2,
+          fill: false,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: '#a78bfa',
+          yAxisID: 'y1'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      aspectRatio: 2,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(30,45,61,0.5)' } },
+        y: { type: 'linear', position: 'left', title: { display: true, text: 'Confidence', color: '#22d3ee' }, ticks: { color: '#22d3ee' }, grid: { color: 'rgba(30,45,61,0.5)' }, min: 0, max: 1 },
+        y1: { type: 'linear', position: 'right', title: { display: true, text: 'EV', color: '#a78bfa' }, ticks: { color: '#a78bfa' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Chart: Confidence Distribution ───────────────────────────────────────
+
+function drawConfidenceDist(ctx) {
+  // Histogram of confidence values
+  const bins = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+  const counts = new Array(bins.length - 1).fill(0);
+  const labels = bins.slice(0, -1).map((b, i) => `${b.toFixed(1)}-${bins[i+1].toFixed(1)}`);
+
+  predictionsData.forEach(p => {
+    const c = p.confidence || 0;
+    for (let i = 0; i < bins.length - 1; i++) {
+      if (c >= bins[i] && c < bins[i+1]) { counts[i]++; break; }
+      if (i === bins.length - 2 && c === bins[i+1]) { counts[i]++; }
+    }
+  });
+
+  const colors = counts.map((_, i) => {
+    const mid = (bins[i] + bins[i+1]) / 2;
+    return mid >= 0.6 ? 'rgba(34,211,238,0.7)' : mid >= 0.4 ? 'rgba(251,191,36,0.7)' : 'rgba(148,163,184,0.4)';
+  });
+  const borders = counts.map((_, i) => {
+    const mid = (bins[i] + bins[i+1]) / 2;
+    return mid >= 0.6 ? '#22d3ee' : mid >= 0.4 ? '#fbbf24' : '#94a3b8';
+  });
+
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'Count', data: counts, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
+    },
+    options: chartOptions('Count')
+  });
+  chartInstances.push(chart);
+}
+
+// ─── Shared Chart Options ─────────────────────────────────────────────────
+
+function chartOptions(yLabel, isPercent = false, yMin = undefined, yMax = undefined) {
+  return {
+    responsive: true,
+    maintainAspectRatio: true,
+    aspectRatio: 2,
+    plugins: {
+      legend: { labels: { color: '#94a3b8', font: { size: 11 } } }
+    },
+    scales: {
+      x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(30,45,61,0.5)' } },
+      y: {
+        title: { display: true, text: yLabel, color: '#94a3b8' },
+        ticks: {
+          color: '#94a3b8',
+          callback: isPercent ? v => (v * 100).toFixed(0) + '%' : undefined
+        },
+        grid: { color: 'rgba(30,45,61,0.5)' },
+        min: yMin,
+        max: yMax
+      }
+    }
+  };
+}
+
+// ─── Signal Rankings Table ───────────────────────────────────────────────
+
+function renderSignalRankings(signals) {
+  const container = document.getElementById('signal-rankings');
+  const predictive = signals.most_predictive || [];
+  const destructive = signals.most_destructive || [];
+
+  if (predictive.length === 0 && destructive.length === 0) {
+    container.innerHTML = `
+      <h3>Signal Rankings</h3>
+      <div class="empty-state">
+        <p>Signal rankings will appear once verified directional predictions accumulate.</p>
+      </div>`;
+    return;
+  }
+
+  let html = '<h3>Signal Rankings</h3><table><thead><tr><th>Signal</th><th>Type</th><th>Correlation</th><th>n</th></tr></thead><tbody>';
+
+  predictive.forEach(s => {
+    html += `<tr><td>${s.signal || s.name}</td><td><span class="tag tag-long">PREDICTIVE</span></td><td class="green">${fmt(s.correlation || s.value)}</td><td>${s.count || '—'}</td></tr>`;
+  });
+
+  destructive.forEach(s => {
+    html += `<tr><td>${s.signal || s.name}</td><td><span class="tag tag-short">DESTRUCTIVE</span></td><td class="red">${fmt(s.correlation || s.value)}</td><td>${s.count || '—'}</td></tr>`;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ─── Predictions Table ────────────────────────────────────────────────────
+
+function renderPredictionsTable() {
+  const container = document.getElementById('predictions-table');
+
+  if (predictionsData.length === 0) {
+    container.innerHTML = `
+      <h3>Recent Predictions</h3>
+      <div class="empty-state">
+        <p>No predictions recorded yet.</p>
+      </div>`;
+    return;
+  }
+
+  // Show latest 50, reverse chronological
+  const recent = [...predictionsData].reverse().slice(0, 50);
+
+  let html = `<h3>Recent Predictions <span style="color:var(--text-dim);font-weight:400;font-size:0.75rem;">(${predictionsData.length} total, showing latest 50)</span></h3>`;
+  html += '<table><thead><tr><th>Time</th><th>Symbol</th><th>Direction</th><th>Confidence</th><th>EV</th><th>Price</th><th>Outcome</th></tr></thead><tbody>';
+
+  recent.forEach(p => {
+    const dir = (p.prediction || '').toUpperCase();
+    const tagClass = dir === 'LONG' ? 'tag-long' : dir === 'SHORT' ? 'tag-short' : 'tag-flat';
+    const outcome = p.outcome !== null ? (p.outcome ? '<span class="green">WIN</span>' : '<span class="red">LOSS</span>') : '<span style="color:var(--text-dim)">pending</span>';
+    const evColor = (p.ev || 0) >= 0 ? 'green' : 'red';
+
+    html += `<tr>
+      <td>${fmtDate(p.timestamp)}</td>
+      <td>${p.symbol || '—'}</td>
+      <td><span class="tag ${tagClass}">${dir}</span></td>
+      <td>${fmt(p.confidence || 0)}</td>
+      <td class="${evColor}">${fmt(p.ev || 0)}</td>
+      <td>${p.price_now ? Number(p.price_now).toFixed(2) : '—'}</td>
+      <td>${outcome}</td>
+    </tr>`;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════════════
+
+loadData();
+
+// Auto-refresh every 5 min
+setInterval(loadData, 5 * 60 * 1000);
+</script>
+</body>
+</html>
