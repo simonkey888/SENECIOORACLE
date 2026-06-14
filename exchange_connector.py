@@ -272,7 +272,7 @@ class ExchangeConnector:
     """
 
     # Exchange names we support
-    SUPPORTED_EXCHANGES = ("binance", "binanceus", "bybit", "binance_testnet")
+    SUPPORTED_EXCHANGES = ("binance", "binanceus", "bybit", "okx", "kraken", "binance_testnet")
 
     def __init__(self, symbol: str = "BTC/USDT", config: dict = None):
         """Initialize the dual-exchange connector.
@@ -335,6 +335,13 @@ class ExchangeConnector:
             "bybit": {
                 "enableRateLimit": True,
                 "options": {"defaultType": "spot"},
+            },
+            "okx": {
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            },
+            "kraken": {
+                "enableRateLimit": True,
             },
             "binance_testnet": {
                 "enableRateLimit": True,
@@ -2299,3 +2306,4 @@ if __name__ == "__main__":
         # Run mock tests only (default)
         mock_ok = _run_mock_tests()
         sys.exit(0 if mock_ok else 1)
+
