@@ -1,0 +1,38 @@
+# Environment
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+
+# Database
+*.db
+
+# Archives
+*.zip
+*.tar.gz
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Synthetic data
+senecio_output/predictions_synthetic_*.jsonl
+
+# Runtime state
+senecio_output/events.jsonl
+senecio_output/cron.log
+senecio_output/scheduler.log
+senecio_output/cycle_state.json
+senecio_output/senecio_state.json
+senecio_output/senecio_trades.json
