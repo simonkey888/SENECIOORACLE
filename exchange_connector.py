@@ -272,7 +272,7 @@ class ExchangeConnector:
     """
 
     # Exchange names we support
-    SUPPORTED_EXCHANGES = ("binance", "binanceus", "bybit", "okx", "kraken", "binance_testnet")
+    SUPPORTED_EXCHANGES = ("okx", "kraken", "gate", "mexc", "bitget", "binance", "bybit", "binance_testnet")
 
     def __init__(self, symbol: str = "BTC/USDT", config: dict = None):
         """Initialize the dual-exchange connector.
@@ -324,24 +324,30 @@ class ExchangeConnector:
         enabled = config.get("exchanges", list(self.SUPPORTED_EXCHANGES))
 
         exchange_configs = {
-            "binance": {
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-            },
-            "binanceus": {
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-            },
-            "bybit": {
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-            },
             "okx": {
                 "enableRateLimit": True,
                 "options": {"defaultType": "spot"},
             },
             "kraken": {
                 "enableRateLimit": True,
+            },
+            "gate": {
+                "enableRateLimit": True,
+            },
+            "mexc": {
+                "enableRateLimit": True,
+            },
+            "bitget": {
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            },
+            "binance": {
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            },
+            "bybit": {
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
             },
             "binance_testnet": {
                 "enableRateLimit": True,
@@ -2285,6 +2291,162 @@ def _run_live_tests():
     print("=" * 70)
 
     return failed == 0
+
+
+# ===========================================================================
+# Multi-Exchange Fallback Chain
+# ===========================================================================
+
+DEFAULT_FALLBACK_CHAIN = ["okx", "kraken", "gate", "mexc", "bitget"]
+
+
+def fetch_market_snapshot_with_fallback(
+    symbol: str = "BTC/USDT",
+    timeframe: str = "15m",
+    fallback_chain: list = None,
+) -> tuple:
+    """Try each exchange in the fallback chain until one succeeds.
+
+    Returns:
+        (market_data_dict, exchange_used_str) on success.
+        (None, None) if ALL exchanges fail.
+    """
+    chain = fallback_chain or DEFAULT_FALLBACK_CHAIN
+    last_error = None
+
+    for exchange_name in chain:
+        try:
+            logger.info(f"Fallback chain: trying {exchange_name} for {symbol}")
+            connector = ExchangeConnector(
+                symbol=symbol,
+                config={
+                    "exchanges": [exchange_name],
+                    "timeframe": timeframe,
+                    "ohlcv_limit": 100,
+                },
+            )
+
+            if exchange_name not in connector.exchanges:
+                logger.warning(f"  {exchange_name}: not initialized, skipping")
+                continue
+
+            # Fetch all data types
+            ohlcv = connector.fetch_ohlcv(exchange_name, timeframe=timeframe, limit=100)
+            ticker = connector.fetch_ticker(exchange_name)
+            orderbook = connector.fetch_orderbook(exchange_name)
+            funding = connector.fetch_funding_rate(exchange_name)
+            oi = connector.fetch_open_interest(exchange_name)
+
+            # Validate: price must be > 0
+            bid = 0.0
+            ask = 0.0
+            if ticker:
+                bid = float(ticker.get("bid") or 0)
+                ask = float(ticker.get("ask") or 0)
+            if bid == 0 and orderbook:
+                raw_bids = orderbook.get("bids", [])
+                raw_asks = orderbook.get("asks", [])
+                if raw_bids:
+                    bid = float(raw_bids[0][0])
+                if raw_asks:
+                    ask = float(raw_asks[0][0])
+            if bid == 0 and ohlcv:
+                bid = ohlcv[-1][4]
+                ask = bid
+
+            mid = (bid + ask) / 2.0 if (bid + ask) > 0 else 0
+
+            if mid <= 0:
+                logger.warning(f"  {exchange_name}: price=0 (geo-blocked or failed), skipping")
+                try:
+                    connector.close()
+                except Exception:
+                    pass
+                continue
+
+            # Build market data (same structure as predict_only.py fetch_market_snapshot)
+            candle_ts = ohlcv[-1][0] if ohlcv else 0
+            spread = ask - bid
+            spread_pct = spread / mid if mid > 0 else 0
+            spread_bps = spread_pct * 10000.0
+
+            bid_depth = 0.0
+            ask_depth = 0.0
+            if orderbook:
+                bid_depth = float(orderbook.get("bid_depth_usdt", 0) or orderbook.get("bid_depth", 0) or 0)
+                ask_depth = float(orderbook.get("ask_depth_usdt", 0) or orderbook.get("ask_depth", 0) or 0)
+                if bid_depth == 0 and ask_depth == 0:
+                    raw_bids = orderbook.get("bids", [])
+                    raw_asks = orderbook.get("asks", [])
+                    for b in (raw_bids or [])[:20]:
+                        if len(b) >= 2:
+                            bid_depth += float(b[1])
+                    for a in (raw_asks or [])[:20]:
+                        if len(a) >= 2:
+                            ask_depth += float(a[1])
+
+            funding_rate = 0.0
+            next_funding_ms = 0
+            if funding:
+                funding_rate = float(funding.get("rate") or 0)
+                next_funding_ms = int(funding.get("next_funding_ms") or 0)
+
+            oi_value = 0.0
+            oi_change_pct = 0.0
+            if oi:
+                oi_value = float(oi.get("oi_value") or 0)
+                oi_change_pct = float(oi.get("oi_change_24h_pct") or 0)
+
+            volume_24h = float(ticker.get("quote_volume", 0) or 0) if ticker else 0
+            liquidity_quality = max(0.0, 1.0 - spread_pct * 100)
+
+            market_data = {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "ohlcv": ohlcv or [],
+                "ticker": {
+                    "bid": round(bid, 2),
+                    "ask": round(ask, 2),
+                    "spread": round(spread, 2),
+                    "spread_pct": round(spread_pct, 8),
+                    "spread_bps": round(spread_bps, 2),
+                    "volume_24h": round(volume_24h, 2),
+                },
+                "orderbook": {
+                    "bid_depth": round(bid_depth, 4),
+                    "ask_depth": round(ask_depth, 4),
+                    "spread": round(spread, 2),
+                },
+                "funding": {
+                    "rate": funding_rate,
+                    "next_funding_ms": next_funding_ms,
+                    "predicted_rate": 0.0,
+                },
+                "open_interest": {
+                    "oi_value": oi_value,
+                    "oi_change_24h_pct": oi_change_pct,
+                },
+                "timestamp": int(time.time() * 1000),
+                "candle_ts": candle_ts,
+                "liquidity_quality": round(liquidity_quality, 4),
+                "exchange_used": exchange_name,
+            }
+
+            try:
+                connector.close()
+            except Exception:
+                pass
+
+            logger.info(f"  {exchange_name}: SUCCESS (price={mid:.2f})")
+            return market_data, exchange_name
+
+        except Exception as e:
+            last_error = e
+            logger.warning(f"  {exchange_name}: FAILED — {e}")
+            continue
+
+    logger.error(f"ALL exchanges failed for {symbol}. Last error: {last_error}")
+    return None, None
 
 
 # ===========================================================================

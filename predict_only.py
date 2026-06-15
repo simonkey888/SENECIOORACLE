@@ -78,20 +78,35 @@ logger = logging.getLogger("senecio.oracle")
 # MARKET DATA — Public Binance only, no auth, no testnet
 # ═══════════════════════════════════════════════════════════════════════════
 
-def fetch_market_snapshot(symbol: str, timeframe: str, exchange: str = "binance") -> Optional[dict]:
-    """Fetch a complete market snapshot from Binance public endpoints.
+DEFAULT_EXCHANGE_FALLBACK_CHAIN = ["okx", "kraken", "gate", "mexc", "bitget"]
 
-    Uses ExchangeConnector with 'binance' exchange (real mainnet public data).
+
+def fetch_market_snapshot(symbol: str, timeframe: str, exchange: str = None) -> Optional[dict]:
+    """Fetch a complete market snapshot using fallback chain or single exchange.
+
+    If exchange is None (default), uses the full 5-exchange fallback chain
+    (okx -> kraken -> gate -> mexc -> bitget) for survivability.
+    If a specific exchange is provided, uses only that exchange.
+
     No API keys needed — all endpoints are public (orderbook, ticker, OHLCV, funding, OI).
 
     Args:
         symbol: Trading pair (e.g. "ETH/USDT").
         timeframe: Candle interval (e.g. "15m").
-        exchange: Exchange name (default: "binance" — real mainnet public data).
+        exchange: Exchange name, or None for full fallback chain.
 
     Returns:
         Market data dict or None on failure.
     """
+    # --- Fallback chain path (default) ---
+    if exchange is None:
+        from exchange_connector import fetch_market_snapshot_with_fallback
+        result, used = fetch_market_snapshot_with_fallback(
+            symbol=symbol, timeframe=timeframe
+        )
+        return result
+
+    # --- Single-exchange path (explicit --exchange) ---
     try:
         from exchange_connector import ExchangeConnector
 
@@ -215,7 +230,7 @@ def fetch_market_snapshot(symbol: str, timeframe: str, exchange: str = "binance"
         return market_data
 
     except Exception as e:
-        logger.error(f"fetch_market_snapshot failed: {e}")
+        logger.error(f"fetch_market_snapshot failed ({exchange}): {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -367,7 +382,7 @@ def verify_predictions(symbol: str = "ETH/USDT", timeframe: str = "15m",
                        path: str = DEFAULT_PREDICTIONS_PATH,
                        max_age_minutes: int = 1440,
                        current_price: float = None,
-                       exchange: str = "okx"):
+                       exchange: str = None):
     """Verify past predictions by filling price_15m_later and outcome.
 
     For each prediction in the JSONL that has price_15m_later=null,
@@ -675,8 +690,8 @@ def main():
                         help="Trading pair (default: ETH/USDT)")
     parser.add_argument("--timeframe", type=str, default="15m",
                         help="Candle timeframe (default: 15m)")
-    parser.add_argument("--exchange", type=str, default="binance",
-                        help="Exchange for public data (default: binance)")
+    parser.add_argument("--exchange", type=str, default=None,
+                        help="Exchange for public data (default: fallback chain okx->kraken->gate->mexc->bitget)")
     parser.add_argument("--json", action="store_true",
                         help="Output only JSON (no formatting)")
     parser.add_argument("--verify", action="store_true",
@@ -711,11 +726,15 @@ def main():
         logger.info(f"Auto-verified {n_verified} previous predictions")
 
     # Step 1: Fetch live market data
-    logger.info(f"Fetching market snapshot: {args.symbol} @ {args.timeframe} from {args.exchange}")
+    exchange_desc = args.exchange or "fallback chain (okx->kraken->gate->mexc->bitget)"
+    logger.info(f"Fetching market snapshot: {args.symbol} @ {args.timeframe} from {exchange_desc}")
     market_data = fetch_market_snapshot(args.symbol, args.timeframe, args.exchange)
 
+    # Extract exchange provenance
+    exchange_used = market_data.get("exchange_used", args.exchange or "NONE_ALL_FAILED") if market_data else "NONE_ALL_FAILED"
+
     if market_data is None:
-        logger.error("Failed to fetch market data — aborting")
+        logger.error("Failed to fetch market data — all exchanges failed, aborting")
         print(json.dumps({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": args.symbol.replace("/", ""),
@@ -725,6 +744,7 @@ def main():
             "price_now": 0.0,
             "price_15m_later": None,
             "outcome": None,
+            "exchange_used": "NONE_ALL_FAILED",
             "error": "MARKET_DATA_UNAVAILABLE",
         }, indent=2))
         sys.exit(1)
@@ -750,8 +770,26 @@ def main():
         if n_auto > 0:
             logger.info(f"Auto-verified {n_auto} more predictions using current price")
 
+    # Step 2b: Add exchange provenance to prediction
+    prediction["exchange_used"] = exchange_used
+
     # Step 3: Log to audit trail
     log_prediction(prediction, args.log_path)
+
+    # Step 3b: Write heartbeat file
+    heartbeat_path = os.path.join(os.path.dirname(args.log_path), "last_heartbeat.json")
+    try:
+        heartbeat = {
+            "last_prediction_ts": prediction["timestamp"],
+            "exchange_used": exchange_used,
+            "price_now": prediction.get("price_now", 0),
+            "prediction": prediction.get("prediction", "FLAT"),
+        }
+        with open(heartbeat_path, "w") as f:
+            json.dump(heartbeat, f)
+        logger.info(f"Heartbeat written to {heartbeat_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write heartbeat: {e}")
 
     # Step 4: Output
     # Clean output (without _audit) for --json mode
