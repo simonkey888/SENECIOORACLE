@@ -36,3 +36,9 @@ senecio_output/scheduler.log
 senecio_output/cycle_state.json
 senecio_output/senecio_state.json
 senecio_output/senecio_trades.json
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
