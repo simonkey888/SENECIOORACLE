@@ -1,6 +1,6 @@
 # SENECIO ORACLE_LAB — Statistical Evidence Report
 
-**Generated:** 2026-06-16T12:30:49.740157+00:00
+**Generated:** 2026-06-16T12:31:50.762323+00:00
 **Source:** predictions.jsonl
 
 ## Dataset Overview
