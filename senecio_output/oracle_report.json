@@ -1,56 +1,49 @@
 {
   "meta": {
-    "generated_at": "2026-06-17T20:30:47.691530+00:00",
+    "generated_at": "2026-06-16T05:23:12.031220+00:00",
     "source": "predictions.jsonl",
-    "total_predictions": 187,
-    "directional": 18,
-    "flat": 169,
-    "verified": 18,
-    "verified_directional": 18
+    "total_predictions": 14,
+    "directional": 3,
+    "flat": 11,
+    "verified": 3,
+    "verified_directional": 3
   },
   "classification": {
-    "n_directional": 18,
-    "accuracy": 0.611111,
-    "precision_long": 0.636364,
-    "precision_short": 0.571429,
-    "recall_long": 0.7,
-    "recall_short": 0.5,
-    "f1_long": 0.666667,
-    "f1_short": 0.533333,
+    "n_directional": 3,
+    "accuracy": 0.333333,
+    "precision_long": 0.333333,
+    "precision_short": 0.0,
+    "recall_long": 1.0,
+    "recall_short": 0.0,
+    "f1_long": 0.5,
+    "f1_short": 0.0,
     "confusion_matrix": {
-      "predicted_long_actual_up": 7,
-      "predicted_long_actual_down": 4,
-      "predicted_short_actual_down": 4,
-      "predicted_short_actual_up": 3
+      "predicted_long_actual_up": 1,
+      "predicted_long_actual_down": 2,
+      "predicted_short_actual_down": 0,
+      "predicted_short_actual_up": 0
     },
     "counts": {
-      "tp_long": 7,
-      "fp_long": 4,
-      "tp_short": 4,
-      "fp_short": 3,
-      "fn_long": 3,
-      "fn_short": 4
+      "tp_long": 1,
+      "fp_long": 2,
+      "tp_short": 0,
+      "fp_short": 0,
+      "fn_long": 0,
+      "fn_short": 2
     }
   },
   "probabilistic": {
-    "brier_score": 0.241232,
+    "brier_score": 0.298422,
     "ece": {
-      "ece": 0.047767,
-      "n_bins_with_data": 2,
+      "ece": 0.279,
+      "n_bins_with_data": 1,
       "bins": [
         {
-          "range": "[0.50, 0.60)",
-          "count": 6,
-          "avg_confidence": 0.5832,
-          "accuracy": 0.6667,
-          "gap": 0.0835
-        },
-        {
           "range": "[0.60, 0.70)",
-          "count": 12,
-          "avg_confidence": 0.6132,
-          "accuracy": 0.5833,
-          "gap": 0.0299
+          "count": 3,
+          "avg_confidence": 0.6123,
+          "accuracy": 0.3333,
+          "gap": 0.279
         }
       ]
     }
@@ -59,18 +52,11 @@
     "by_confidence_bucket": {
       "buckets": [
         {
-          "bucket": "0.50-0.60",
-          "count": 6,
-          "avg_model_ev": 0.00064233,
-          "avg_realized_ev": 0.00204781,
-          "win_rate": 0.6667
-        },
-        {
           "bucket": "0.60-0.70",
-          "count": 12,
-          "avg_model_ev": 0.00058437,
-          "avg_realized_ev": -0.04916097,
-          "win_rate": 0.5833
+          "count": 3,
+          "avg_model_ev": 0.00105325,
+          "avg_realized_ev": 0.01055413,
+          "win_rate": 0.3333
         }
       ]
     },
@@ -78,10 +64,10 @@
       "regimes": [
         {
           "regime": "RANGING",
-          "count": 18,
-          "avg_model_ev": 0.00060369,
-          "avg_realized_ev": -0.03209138,
-          "win_rate": 0.6111
+          "count": 3,
+          "avg_model_ev": 0.00105325,
+          "avg_realized_ev": 0.01055413,
+          "win_rate": 0.3333
         }
       ]
     },
@@ -89,62 +75,52 @@
       "symbols": [
         {
           "symbol": "ETHUSDT",
-          "count": 18,
-          "avg_model_ev": 0.00060369,
-          "avg_realized_ev": -0.03209138,
-          "win_rate": 0.6111
+          "count": 3,
+          "avg_model_ev": 0.00105325,
+          "avg_realized_ev": 0.01055413,
+          "win_rate": 0.3333
         }
       ]
     }
   },
   "sharpe": {
-    "sharpe": -0.5038,
-    "mean_return": -0.03209138,
-    "std_return": 11.92348547,
-    "n_returns": 18,
+    "sharpe": 111.7442,
+    "mean_return": 0.01055413,
+    "std_return": 0.01767988,
+    "n_returns": 3,
     "cycles_per_year": 35040
   },
   "signal_rankings": {
     "most_predictive": [
       {
         "signal": "orderflow",
-        "agreed_total": 18,
-        "agreed_accuracy": 0.6111,
+        "agreed_total": 3,
+        "agreed_accuracy": 0.3333,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 13.5138,
-        "predictive_score": 0.458803,
-        "destructive_score": 0.291966
+        "total_influence": 2.3354,
+        "predictive_score": 0.259488,
+        "destructive_score": 0.518977
       },
       {
         "signal": "bidask",
-        "agreed_total": 18,
-        "agreed_accuracy": 0.6111,
+        "agreed_total": 3,
+        "agreed_accuracy": 0.3333,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 5.8646,
-        "predictive_score": 0.199106,
-        "destructive_score": 0.126704
+        "total_influence": 1.1233,
+        "predictive_score": 0.124816,
+        "destructive_score": 0.249633
       },
       {
         "signal": "volume_delta",
-        "agreed_total": 6,
+        "agreed_total": 1,
         "agreed_accuracy": 1.0,
-        "disagreed_total": 12,
-        "disagreed_accuracy": 0.4167,
-        "total_influence": 0.0157,
-        "predictive_score": 0.00087,
+        "disagreed_total": 2,
+        "disagreed_accuracy": 0.0,
+        "total_influence": 0.0028,
+        "predictive_score": 0.000946,
         "destructive_score": 0.0
-      },
-      {
-        "signal": "price_momentum",
-        "agreed_total": 12,
-        "agreed_accuracy": 0.4167,
-        "disagreed_total": 6,
-        "disagreed_accuracy": 1.0,
-        "total_influence": 0.0149,
-        "predictive_score": 0.000346,
-        "destructive_score": 0.000484
       },
       {
         "signal": "funding",
@@ -155,38 +131,48 @@
         "total_influence": 0.0004,
         "predictive_score": 0.0,
         "destructive_score": 0.000352
+      },
+      {
+        "signal": "price_momentum",
+        "agreed_total": 2,
+        "agreed_accuracy": 0.0,
+        "disagreed_total": 1,
+        "disagreed_accuracy": 1.0,
+        "total_influence": 0.003,
+        "predictive_score": 0.0,
+        "destructive_score": 0.000992
       }
     ],
     "most_destructive": [
       {
         "signal": "orderflow",
-        "agreed_total": 18,
-        "agreed_accuracy": 0.6111,
+        "agreed_total": 3,
+        "agreed_accuracy": 0.3333,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 13.5138,
-        "predictive_score": 0.458803,
-        "destructive_score": 0.291966
+        "total_influence": 2.3354,
+        "predictive_score": 0.259488,
+        "destructive_score": 0.518977
       },
       {
         "signal": "bidask",
-        "agreed_total": 18,
-        "agreed_accuracy": 0.6111,
+        "agreed_total": 3,
+        "agreed_accuracy": 0.3333,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 5.8646,
-        "predictive_score": 0.199106,
-        "destructive_score": 0.126704
+        "total_influence": 1.1233,
+        "predictive_score": 0.124816,
+        "destructive_score": 0.249633
       },
       {
         "signal": "price_momentum",
-        "agreed_total": 12,
-        "agreed_accuracy": 0.4167,
-        "disagreed_total": 6,
+        "agreed_total": 2,
+        "agreed_accuracy": 0.0,
+        "disagreed_total": 1,
         "disagreed_accuracy": 1.0,
-        "total_influence": 0.0149,
-        "predictive_score": 0.000346,
-        "destructive_score": 0.000484
+        "total_influence": 0.003,
+        "predictive_score": 0.0,
+        "destructive_score": 0.000992
       },
       {
         "signal": "funding",
@@ -200,12 +186,12 @@
       },
       {
         "signal": "volume_delta",
-        "agreed_total": 6,
+        "agreed_total": 1,
         "agreed_accuracy": 1.0,
-        "disagreed_total": 12,
-        "disagreed_accuracy": 0.4167,
-        "total_influence": 0.0157,
-        "predictive_score": 0.00087,
+        "disagreed_total": 2,
+        "disagreed_accuracy": 0.0,
+        "total_influence": 0.0028,
+        "predictive_score": 0.000946,
         "destructive_score": 0.0
       }
     ]
@@ -213,17 +199,6 @@
   "top_predictions": {
     "top_best": [
       {
-        "timestamp": "2026-06-17T19:15:36.173110+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6126,
-        "ev": 0.00061427,
-        "price_now": 1768.56,
-        "price_15m_later": 64474.1,
-        "outcome": "CORRECT",
-        "realized_return": 35.455704
-      },
-      {
         "timestamp": "2026-06-13T02:57:57.297353+00:00",
         "symbol": "ETHUSDT",
         "prediction": "LONG",
@@ -233,116 +208,6 @@
         "price_15m_later": 1726.36,
         "outcome": "CORRECT",
         "realized_return": 0.035547
-      },
-      {
-        "timestamp": "2026-06-17T12:30:47.298386+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.5754,
-        "ev": 0.00055654,
-        "price_now": 1746.23,
-        "price_15m_later": 1758.34,
-        "outcome": "CORRECT",
-        "realized_return": 0.006935
-      },
-      {
-        "timestamp": "2026-06-17T13:45:38.805917+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5672,
-        "ev": 0.00042356,
-        "price_now": 1769.01,
-        "price_15m_later": 1759.88,
-        "outcome": "CORRECT",
-        "realized_return": 0.005161
-      },
-      {
-        "timestamp": "2026-06-17T16:30:50.750153+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5986,
-        "ev": 0.00102708,
-        "price_now": 1779.83,
-        "price_15m_later": 1772.08,
-        "outcome": "CORRECT",
-        "realized_return": 0.004354
-      },
-      {
-        "timestamp": "2026-06-16T15:45:40.263451+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6097,
-        "ev": 0.00033186,
-        "price_now": 1776.56,
-        "price_15m_later": 1783.04,
-        "outcome": "CORRECT",
-        "realized_return": 0.003647
-      },
-      {
-        "timestamp": "2026-06-16T14:31:03.110477+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6156,
-        "ev": 0.00042092,
-        "price_now": 1774.0,
-        "price_15m_later": 1780.1,
-        "outcome": "CORRECT",
-        "realized_return": 0.003439
-      },
-      {
-        "timestamp": "2026-06-16T14:45:51.610098+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5764,
-        "ev": 0.00095314,
-        "price_now": 1783.59,
-        "price_15m_later": 1780.58,
-        "outcome": "CORRECT",
-        "realized_return": 0.001688
-      },
-      {
-        "timestamp": "2026-06-17T08:45:46.615010+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.613,
-        "ev": 0.00027052,
-        "price_now": 1764.99,
-        "price_15m_later": 1767.79,
-        "outcome": "CORRECT",
-        "realized_return": 0.001586
-      },
-      {
-        "timestamp": "2026-06-17T09:00:47.246136+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6083,
-        "ev": 0.00022359,
-        "price_now": 1767.79,
-        "price_15m_later": 1770.22,
-        "outcome": "CORRECT",
-        "realized_return": 0.001375
-      },
-      {
-        "timestamp": "2026-06-16T10:30:46.526582+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.6142,
-        "ev": 0.00075779,
-        "price_now": 1794.97,
-        "price_15m_later": 1794.68,
-        "outcome": "CORRECT",
-        "realized_return": 0.000162
-      },
-      {
-        "timestamp": "2026-06-16T16:20:44.441189+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5845,
-        "ev": 0.00047773,
-        "price_now": 1776.77,
-        "price_15m_later": 1778.95,
-        "outcome": "WRONG",
-        "realized_return": -0.001227
       },
       {
         "timestamp": "2026-06-14T22:01:54.628203+00:00",
@@ -356,17 +221,6 @@
         "realized_return": -0.001315
       },
       {
-        "timestamp": "2026-06-16T19:00:59.247322+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.6155,
-        "ev": 0.00040185,
-        "price_now": 1795.96,
-        "price_15m_later": 1798.39,
-        "outcome": "WRONG",
-        "realized_return": -0.001353
-      },
-      {
         "timestamp": "2026-06-14T22:22:00.707172+00:00",
         "symbol": "ETHUSDT",
         "prediction": "LONG",
@@ -376,76 +230,10 @@
         "price_15m_later": 1719.66,
         "outcome": "WRONG",
         "realized_return": -0.002569
-      },
-      {
-        "timestamp": "2026-06-16T02:30:43.751435+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6161,
-        "ev": 0.00024142,
-        "price_now": 1775.01,
-        "price_15m_later": 1768.88,
-        "outcome": "WRONG",
-        "realized_return": -0.003454
-      },
-      {
-        "timestamp": "2026-06-17T14:15:43.947373+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.5972,
-        "ev": 0.00041595,
-        "price_now": 1764.64,
-        "price_15m_later": 1756.48,
-        "outcome": "WRONG",
-        "realized_return": -0.004624
-      },
-      {
-        "timestamp": "2026-06-16T09:15:42.177441+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.6163,
-        "ev": 0.00059051,
-        "price_now": 1796.73,
-        "price_15m_later": 66627.6,
-        "outcome": "WRONG",
-        "realized_return": -36.0827
       }
     ],
     "top_worst": [
       {
-        "timestamp": "2026-06-16T09:15:42.177441+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.6163,
-        "ev": 0.00059051,
-        "price_now": 1796.73,
-        "price_15m_later": 66627.6,
-        "outcome": "WRONG",
-        "realized_return": -36.0827
-      },
-      {
-        "timestamp": "2026-06-17T14:15:43.947373+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.5972,
-        "ev": 0.00041595,
-        "price_now": 1764.64,
-        "price_15m_later": 1756.48,
-        "outcome": "WRONG",
-        "realized_return": -0.004624
-      },
-      {
-        "timestamp": "2026-06-16T02:30:43.751435+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6161,
-        "ev": 0.00024142,
-        "price_now": 1775.01,
-        "price_15m_later": 1768.88,
-        "outcome": "WRONG",
-        "realized_return": -0.003454
-      },
-      {
         "timestamp": "2026-06-14T22:22:00.707172+00:00",
         "symbol": "ETHUSDT",
         "prediction": "LONG",
@@ -455,17 +243,6 @@
         "price_15m_later": 1719.66,
         "outcome": "WRONG",
         "realized_return": -0.002569
-      },
-      {
-        "timestamp": "2026-06-16T19:00:59.247322+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.6155,
-        "ev": 0.00040185,
-        "price_now": 1795.96,
-        "price_15m_later": 1798.39,
-        "outcome": "WRONG",
-        "realized_return": -0.001353
       },
       {
         "timestamp": "2026-06-14T22:01:54.628203+00:00",
@@ -479,116 +256,6 @@
         "realized_return": -0.001315
       },
       {
-        "timestamp": "2026-06-16T16:20:44.441189+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5845,
-        "ev": 0.00047773,
-        "price_now": 1776.77,
-        "price_15m_later": 1778.95,
-        "outcome": "WRONG",
-        "realized_return": -0.001227
-      },
-      {
-        "timestamp": "2026-06-16T10:30:46.526582+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.6142,
-        "ev": 0.00075779,
-        "price_now": 1794.97,
-        "price_15m_later": 1794.68,
-        "outcome": "CORRECT",
-        "realized_return": 0.000162
-      },
-      {
-        "timestamp": "2026-06-17T09:00:47.246136+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6083,
-        "ev": 0.00022359,
-        "price_now": 1767.79,
-        "price_15m_later": 1770.22,
-        "outcome": "CORRECT",
-        "realized_return": 0.001375
-      },
-      {
-        "timestamp": "2026-06-17T08:45:46.615010+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.613,
-        "ev": 0.00027052,
-        "price_now": 1764.99,
-        "price_15m_later": 1767.79,
-        "outcome": "CORRECT",
-        "realized_return": 0.001586
-      },
-      {
-        "timestamp": "2026-06-16T14:45:51.610098+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5764,
-        "ev": 0.00095314,
-        "price_now": 1783.59,
-        "price_15m_later": 1780.58,
-        "outcome": "CORRECT",
-        "realized_return": 0.001688
-      },
-      {
-        "timestamp": "2026-06-16T14:31:03.110477+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6156,
-        "ev": 0.00042092,
-        "price_now": 1774.0,
-        "price_15m_later": 1780.1,
-        "outcome": "CORRECT",
-        "realized_return": 0.003439
-      },
-      {
-        "timestamp": "2026-06-16T15:45:40.263451+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6097,
-        "ev": 0.00033186,
-        "price_now": 1776.56,
-        "price_15m_later": 1783.04,
-        "outcome": "CORRECT",
-        "realized_return": 0.003647
-      },
-      {
-        "timestamp": "2026-06-17T16:30:50.750153+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5986,
-        "ev": 0.00102708,
-        "price_now": 1779.83,
-        "price_15m_later": 1772.08,
-        "outcome": "CORRECT",
-        "realized_return": 0.004354
-      },
-      {
-        "timestamp": "2026-06-17T13:45:38.805917+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "SHORT",
-        "confidence": 0.5672,
-        "ev": 0.00042356,
-        "price_now": 1769.01,
-        "price_15m_later": 1759.88,
-        "outcome": "CORRECT",
-        "realized_return": 0.005161
-      },
-      {
-        "timestamp": "2026-06-17T12:30:47.298386+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.5754,
-        "ev": 0.00055654,
-        "price_now": 1746.23,
-        "price_15m_later": 1758.34,
-        "outcome": "CORRECT",
-        "realized_return": 0.006935
-      },
-      {
         "timestamp": "2026-06-13T02:57:57.297353+00:00",
         "symbol": "ETHUSDT",
         "prediction": "LONG",
@@ -598,17 +265,6 @@
         "price_15m_later": 1726.36,
         "outcome": "CORRECT",
         "realized_return": 0.035547
-      },
-      {
-        "timestamp": "2026-06-17T19:15:36.173110+00:00",
-        "symbol": "ETHUSDT",
-        "prediction": "LONG",
-        "confidence": 0.6126,
-        "ev": 0.00061427,
-        "price_now": 1768.56,
-        "price_15m_later": 64474.1,
-        "outcome": "CORRECT",
-        "realized_return": 35.455704
       }
     ]
   }
