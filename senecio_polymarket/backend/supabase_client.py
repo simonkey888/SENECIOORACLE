@@ -106,22 +106,25 @@ async def fetch_predictions(limit: int = 50, symbol: Optional[str] = None) -> li
 
 
 async def count_predictions() -> int:
-    """Get total prediction count (uses Prefer header to get count without fetching rows)."""
+    """Get total prediction count by fetching all IDs (works around content-range header issues)."""
     try:
         c = _get_client()
+        # Fetch just the id column, limit to 10k (we won't exceed this for a long time)
         r = await c.get(
             f"/{SUPABASE_TABLE}",
-            params={"select": "id", "limit": "1"},
-            headers={"Prefer": "count=exact"},
+            params={"select": "id", "limit": "10000"},
         )
         if r.status_code == 200:
-            range_header = r.headers.get("content-range", "")
-            # Format: "0-0/1234" or "*/0"
-            if "/" in range_header:
-                total = range_header.split("/")[-1]
-                return int(total) if total.isdigit() else 0
+            data = r.json()
+            return len(data) if isinstance(data, list) else 0
+        # Fallback: try content-range header
+        range_header = r.headers.get("content-range", "")
+        if "/" in range_header:
+            total = range_header.split("/")[-1]
+            return int(total) if total.isdigit() else 0
         return 0
-    except Exception:
+    except Exception as e:
+        log.debug("supabase count error: %s", e)
         return 0
 
 
