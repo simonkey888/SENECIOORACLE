@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SENECIO ORACLE — Polymarket Cockpit</title>
+<meta name="oracle-version" content="ACT-XX-POLYMARKET-STYLE" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <div class="logo">⬡</div>
+      <div>
+        <div class="title">SENECIO ORACLE</div>
+        <div class="subtitle">Polymarket-style autonomous trading intelligence stack</div>
+      </div>
+    </div>
+    <div id="conn-status" class="pill pill-amber">connecting…</div>
+    <div class="topbar-stats">
+      <span id="stat-events" class="stat">events: <b>0</b></span>
+      <span id="stat-ticks"   class="stat">ticks: <b>0</b></span>
+      <span id="stat-signals" class="stat">signals: <b>0</b></span>
+      <span id="stat-fills"   class="stat">fills: <b>0</b></span>
+      <span id="stat-equity"  class="stat">equity: <b>$10,000</b></span>
+    </div>
+  </header>
+
+  <main>
+    <!-- LEFT COLUMN: live feed -->
+    <section class="col col-left">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Live Event Stream</h2>
+          <div class="filter-chips" id="filter-chips">
+            <button class="chip active" data-type="">ALL</button>
+            <button class="chip" data-type="MARKET_TICK">TICK</button>
+            <button class="chip" data-type="WALLET_ALERT">WALLET</button>
+            <button class="chip" data-type="MARKET_CANDIDATE">CANDIDATE</button>
+            <button class="chip" data-type="SIGNAL">SIGNAL</button>
+            <button class="chip" data-type="EXECUTION_SIM">EXEC</button>
+            <button class="chip" data-type="RISK_STATE">RISK</button>
+            <button class="chip" data-type="AUDIT_TRACE">AUDIT</button>
+          </div>
+        </div>
+        <div id="feed" class="feed"></div>
+      </div>
+    </section>
+
+    <!-- MIDDLE COLUMN: scanner + brain -->
+    <section class="col col-mid">
+      <div class="panel">
+        <div class="panel-head"><h2>Scanner Ranking</h2><span id="scanner-meta" class="meta">—</span></div>
+        <table id="scanner-table" class="table">
+          <thead>
+            <tr>
+              <th>#</th><th>SYM</th><th>SCANNER</th><th>SCORE</th><th>REASONS</th><th>TS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Wallet Activity</h2><span id="wallet-meta" class="meta">—</span></div>
+        <table id="wallet-table" class="table">
+          <thead>
+            <tr>
+              <th>WALLET</th><th>SYM</th><th>ACTION</th><th>SIZE USD</th><th>LABEL</th><th>TS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Decision Trace (Latest Signal)</h2></div>
+        <div id="decision-trace" class="decision-trace">
+          <div class="placeholder">Awaiting first signal…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN: positions + risk + charts -->
+    <section class="col col-right">
+      <div class="panel">
+        <div class="panel-head"><h2>Open Positions (paper)</h2></div>
+        <table id="positions-table" class="table">
+          <thead>
+            <tr><th>SYM</th><th>QTY</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>TS</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Risk & Calibration</h2></div>
+        <div id="risk-grid" class="risk-grid"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Equity Curve (paper)</h2></div>
+        <canvas id="equity-chart" width="320" height="140"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Confidence Distribution</h2></div>
+        <canvas id="confidence-chart" width="320" height="140"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>SENECIO ORACLE • ACT XX • Polymarket-style stack • paper-only • all events auditable</span>
+    <span id="cursor-display">cursor: clob=0 / onchain=0</span>
+  </footer>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
