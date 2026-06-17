@@ -94,9 +94,16 @@ app.include_router(make_ws_router(_bus))
 async def health():
     """Real health check — includes oracle runner state."""
     oracle_state = oracle_runner.get_state()
+    # Best-effort Supabase count (don't fail health if DB unreachable)
+    sb_total = 0
+    try:
+        from . import supabase_client
+        sb_total = await supabase_client.count_predictions()
+    except Exception:
+        pass
     return {
         "status": "ok",
-        "version": "ACT-XIX-unified-oracle",
+        "version": "ACT-XIX-unified-oracle-supabase",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -108,6 +115,7 @@ async def health():
             "last_cycle_at": oracle_state.get("last_cycle_at"),
             "next_cycle_at": oracle_state.get("next_cycle_at"),
             "exchange_used_last": oracle_state.get("exchange_used_last"),
+            "supabase_total": sb_total,
         },
     }
 
@@ -144,6 +152,39 @@ async def oracle_predictions(limit: int = Query(default=20, le=200)):
     # strip _audit for slim view (client can request /api/oracle/predictions/full for it)
     slim = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows[:limit]]
     return {"count": len(slim), "total_in_file": len(rows), "predictions": slim}
+
+
+@app.get("/api/oracle/predictions/db")
+async def oracle_predictions_db(limit: int = Query(default=50, le=500), symbol: str | None = None):
+    """Read predictions directly from Supabase — survives container redeploys."""
+    from . import supabase_client
+    rows = await supabase_client.fetch_predictions(limit=limit, symbol=symbol)
+    total = await supabase_client.count_predictions()
+    return {
+        "source": "supabase",
+        "count": len(rows),
+        "total_in_db": total,
+        "predictions": rows,
+    }
+
+
+@app.get("/api/oracle/score")
+async def oracle_score():
+    """Oracle accuracy score computed from Supabase (verified predictions only)."""
+    from . import supabase_client
+    # Get all predictions with outcome filled
+    rows = await supabase_client.fetch_predictions(limit=500)
+    verified = [r for r in rows if r.get("outcome") in ("WIN", "LOSS")]
+    wins = sum(1 for r in verified if r.get("outcome") == "WIN")
+    losses = sum(1 for r in verified if r.get("outcome") == "LOSS")
+    win_rate = (wins / len(verified) * 100) if verified else 0.0
+    return {
+        "total_predictions": len(rows),
+        "verified": len(verified),
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": round(win_rate, 2),
+    }
 
 
 @app.get("/api/stats")

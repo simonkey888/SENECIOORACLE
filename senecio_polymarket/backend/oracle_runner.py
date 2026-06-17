@@ -155,6 +155,17 @@ async def _run_one_prediction(symbol: str) -> Optional[dict]:
         # Persist
         await asyncio.to_thread(log_prediction, prediction, str(PREDICTIONS_PATH))
 
+        # Dual-write to Supabase (best-effort — failure doesn't block the cycle)
+        try:
+            from . import supabase_client
+            sb_row = await supabase_client.insert_prediction(prediction)
+            if sb_row:
+                log.info("supabase insert OK id=%s", sb_row.get("id"))
+            else:
+                log.warning("supabase insert returned None — predictions.jsonl is source of truth")
+        except Exception as sb_err:
+            log.warning("supabase insert failed (continuing): %s", sb_err)
+
         # Update runtime state
         _state["last_prediction_ts"] = prediction.get("timestamp")
         _state["last_prediction_symbol"] = prediction.get("symbol")
@@ -236,4 +247,10 @@ async def stop() -> None:
         except asyncio.CancelledError:
             pass
     _tasks.clear()
+    # Close Supabase HTTP client
+    try:
+        from . import supabase_client
+        await supabase_client.close()
+    except Exception:
+        pass
     log.info("oracle_runner stopped")
