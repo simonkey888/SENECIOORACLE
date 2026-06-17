@@ -1,0 +1,47 @@
+# SENECIO ORACLE — .dockerignore
+# Exclude anything that shouldn't enter the image
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Local data (Fly mounts its own volume)
+senecio_polymarket/data/audit/*.jsonl
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/tmp/
+
+# Tests / scripts we don't need in production
+senecio_polymarket/scripts/test_run.py
+senecio_polymarket/scripts/run.sh
+
+# Dockerfile companions
+Dockerfile
+.dockerignore
+fly.toml
+
+# Docs
+README.md
