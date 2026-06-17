@@ -1,0 +1,37 @@
+# SENECIO ORACLE — Fly.io config
+# Free-tier friendly: shared-cpu-1x, 256MB RAM, single machine in ams
+app = "seneciooracle"
+primary_region = "ams"
+
+[build]
+  # No buildpack — we use the Dockerfile in repo root of senecio_polymarket/
+  dockerfile = "senecio_polymarket/Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # keep running (event stream needs to stay live)
+  auto_start_machines = true
+  min_machines_running = 1     # always-on 1 machine so scheduler loop runs
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 500
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/api/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+# Persistent volume for audit JSONL log (so events survive redeploy)
+[mounts]
+  source = "senecio_data"
+  destination = "/app/data"
