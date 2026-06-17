@@ -2,9 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#07090d" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <title>SENECIO ORACLE — Polymarket Cockpit</title>
-<meta name="oracle-version" content="ACT-XX-POLYMARKET-STYLE" />
+<meta name="oracle-version" content="ACT-XX-POLYMARKET-STYLE-V2-RESPONSIVE" />
 <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -28,7 +31,7 @@
   </header>
 
   <main>
-    <!-- LEFT COLUMN: live feed -->
+    <!-- LEFT COLUMN: live feed (full-height scroll, no other panels) -->
     <section class="col col-left">
       <div class="panel">
         <div class="panel-head">
@@ -37,41 +40,45 @@
             <button class="chip active" data-type="">ALL</button>
             <button class="chip" data-type="MARKET_TICK">TICK</button>
             <button class="chip" data-type="WALLET_ALERT">WALLET</button>
-            <button class="chip" data-type="MARKET_CANDIDATE">CANDIDATE</button>
-            <button class="chip" data-type="SIGNAL">SIGNAL</button>
+            <button class="chip" data-type="MARKET_CANDIDATE">CAND</button>
+            <button class="chip" data-type="SIGNAL">SIG</button>
             <button class="chip" data-type="EXECUTION_SIM">EXEC</button>
             <button class="chip" data-type="RISK_STATE">RISK</button>
-            <button class="chip" data-type="AUDIT_TRACE">AUDIT</button>
+            <button class="chip" data-type="AUDIT_TRACE">AUD</button>
           </div>
         </div>
         <div id="feed" class="feed"></div>
       </div>
     </section>
 
-    <!-- MIDDLE COLUMN: scanner + brain -->
+    <!-- MIDDLE COLUMN: scanner + wallet + decision trace -->
     <section class="col col-mid">
       <div class="panel">
         <div class="panel-head"><h2>Scanner Ranking</h2><span id="scanner-meta" class="meta">—</span></div>
-        <table id="scanner-table" class="table">
-          <thead>
-            <tr>
-              <th>#</th><th>SYM</th><th>SCANNER</th><th>SCORE</th><th>REASONS</th><th>TS</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table id="scanner-table" class="table">
+            <thead>
+              <tr>
+                <th>#</th><th>SYM</th><th>SCAN</th><th>SCORE</th><th>REASONS</th><th>TS</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="panel">
         <div class="panel-head"><h2>Wallet Activity</h2><span id="wallet-meta" class="meta">—</span></div>
-        <table id="wallet-table" class="table">
-          <thead>
-            <tr>
-              <th>WALLET</th><th>SYM</th><th>ACTION</th><th>SIZE USD</th><th>LABEL</th><th>TS</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table id="wallet-table" class="table">
+            <thead>
+              <tr>
+                <th>WALLET</th><th>SYM</th><th>ACTION</th><th>SIZE</th><th>LABEL</th><th>TS</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="panel">
@@ -86,12 +93,14 @@
     <section class="col col-right">
       <div class="panel">
         <div class="panel-head"><h2>Open Positions (paper)</h2></div>
-        <table id="positions-table" class="table">
-          <thead>
-            <tr><th>SYM</th><th>QTY</th><th>ENTRY</th><th>STOP</th><th>TARGET</th><th>TS</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table id="positions-table" class="table">
+            <thead>
+              <tr><th>SYM</th><th>QTY</th><th>ENTRY</th><th>STOP</th><th>TGT</th><th>TS</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="panel">
@@ -101,12 +110,16 @@
 
       <div class="panel">
         <div class="panel-head"><h2>Equity Curve (paper)</h2></div>
-        <canvas id="equity-chart" width="320" height="140"></canvas>
+        <div class="chart-wrap">
+          <canvas id="equity-chart"></canvas>
+        </div>
       </div>
 
       <div class="panel">
         <div class="panel-head"><h2>Confidence Distribution</h2></div>
-        <canvas id="confidence-chart" width="320" height="140"></canvas>
+        <div class="chart-wrap">
+          <canvas id="confidence-chart"></canvas>
+        </div>
       </div>
     </section>
   </main>
