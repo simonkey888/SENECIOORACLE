@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <title>SENECIO ORACLE — Polymarket Cockpit</title>
-<meta name="oracle-version" content="ACT-XX-POLYMARKET-STYLE-V2-RESPONSIVE" />
+<meta name="oracle-version" content="ACT-XX-ORACLE-FIRST-V3" />
 <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -31,7 +31,61 @@
   </header>
 
   <main>
-    <!-- LEFT COLUMN: live feed (full-height scroll, no other panels) -->
+    <!-- FIRST COLUMN (was 4th): REAL ORACLE — Supabase-backed predictions -->
+    <section class="col col-oracle">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Oracle Score</h2>
+          <span id="oracle-score-meta" class="meta">live</span>
+        </div>
+        <div id="oracle-score" class="oracle-score-grid">
+          <div class="score-card">
+            <div class="score-label">Total</div>
+            <div class="score-value" id="score-total">—</div>
+          </div>
+          <div class="score-card">
+            <div class="score-label">Verified</div>
+            <div class="score-value" id="score-verified">—</div>
+          </div>
+          <div class="score-card score-win">
+            <div class="score-label">Win rate</div>
+            <div class="score-value" id="score-winrate">—</div>
+          </div>
+          <div class="score-card">
+            <div class="score-label">Next cycle</div>
+            <div class="score-value" id="score-next" style="font-size:13px">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Oracle Predictions (live DB)</h2>
+          <span id="oracle-pred-meta" class="meta">—</span>
+        </div>
+        <div class="table-wrap">
+          <table id="oracle-table" class="table">
+            <thead>
+              <tr>
+                <th>TS</th><th>SYM</th><th>PRED</th><th>CONF</th><th>EV</th><th>PRICE</th><th>EX</th><th>OUT</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="8" class="placeholder">loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Confidence Trend (last 50)</h2></div>
+        <div class="chart-wrap">
+          <canvas id="oracle-conf-chart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECOND COLUMN: live feed -->
     <section class="col col-left">
       <div class="panel">
         <div class="panel-head">
@@ -51,7 +105,7 @@
       </div>
     </section>
 
-    <!-- MIDDLE COLUMN: scanner + wallet + decision trace -->
+    <!-- THIRD COLUMN: scanner + wallet + decision trace -->
     <section class="col col-mid">
       <div class="panel">
         <div class="panel-head"><h2>Scanner Ranking</h2><span id="scanner-meta" class="meta">—</span></div>
@@ -123,59 +177,6 @@
       </div>
     </section>
 
-    <!-- FOURTH COLUMN: real Oracle (Supabase-backed) -->
-    <section class="col col-oracle">
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Oracle Score</h2>
-          <span id="oracle-score-meta" class="meta">live</span>
-        </div>
-        <div id="oracle-score" class="oracle-score-grid">
-          <div class="score-card">
-            <div class="score-label">Total</div>
-            <div class="score-value" id="score-total">—</div>
-          </div>
-          <div class="score-card">
-            <div class="score-label">Verified</div>
-            <div class="score-value" id="score-verified">—</div>
-          </div>
-          <div class="score-card score-win">
-            <div class="score-label">Win rate</div>
-            <div class="score-value" id="score-winrate">—</div>
-          </div>
-          <div class="score-card">
-            <div class="score-label">Next cycle</div>
-            <div class="score-value" id="score-next" style="font-size:13px">—</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Oracle Predictions (live DB)</h2>
-          <span id="oracle-pred-meta" class="meta">—</span>
-        </div>
-        <div class="table-wrap">
-          <table id="oracle-table" class="table">
-            <thead>
-              <tr>
-                <th>TS</th><th>SYM</th><th>PRED</th><th>CONF</th><th>EV</th><th>PRICE</th><th>EX</th><th>OUT</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr><td colspan="8" class="placeholder">loading…</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-head"><h2>Confidence Trend (last 50)</h2></div>
-        <div class="chart-wrap">
-          <canvas id="oracle-conf-chart"></canvas>
-        </div>
-      </div>
-    </section>
   </main>
 
   <footer>
