@@ -3,736 +3,1258 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SENECIO Oracle — Dashboard</title>
+<title>SENECIO Oracle — Live Decision Observability</title>
+<meta name="oracle-version" content="V4-REACTIVE">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
-  :root {
-    --bg: #0a0e17;
-    --surface: #111827;
-    --surface2: #1a2332;
-    --border: #1e2d3d;
-    --text: #e2e8f0;
-    --text-dim: #94a3b8;
-    --accent: #22d3ee;
-    --green: #34d399;
-    --red: #f87171;
-    --yellow: #fbbf24;
-    --purple: #a78bfa;
-    --blue: #60a5fa;
-  }
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    font-family: 'Inter', 'SF Pro Display', -apple-system, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-  }
-  header {
-    background: linear-gradient(135deg, #0a0e17 0%, #111827 100%);
-    border-bottom: 1px solid var(--border);
-    padding: 1.5rem 2rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  .logo-icon {
-    width: 40px; height: 40px;
-    background: linear-gradient(135deg, var(--accent), var(--purple));
-    border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 1.3rem; font-weight: 800; color: #000;
-  }
-  .logo h1 {
-    font-size: 1.5rem;
-    font-weight: 700;
-    background: linear-gradient(90deg, var(--accent), var(--purple));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  .logo span { font-size: 0.8rem; color: var(--text-dim); }
-  .status-badge {
-    padding: 0.4rem 1rem;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .status-live { background: rgba(34,211,238,0.15); color: var(--accent); border: 1px solid rgba(34,211,238,0.3); }
-  .status-nodata { background: rgba(251,191,36,0.15); color: var(--yellow); border: 1px solid rgba(251,191,36,0.3); }
-  .status-stale { background: rgba(248,113,113,0.15); color: var(--red); border: 1px solid rgba(248,113,113,0.3); }
+/* ═══════════════════════════════════════════════════════════════════════════
+   REACTIVE ORACLE UI — Mission Telemetry + Live Stream Aesthetic
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+  --bg:#060a12; --bg-alt:#080c16; --surface:#0d1220; --surface2:#111827;
+  --surface3:#161f30; --border:#1a2640; --border-active:#264060;
+  --border-glow:#22d3ee33; --text:#e2e8f0; --text-dim:#64748b; --text-mid:#94a3b8;
+  --accent:#22d3ee; --accent-dim:#22d3ee44;
+  --green:#34d399; --green-dim:#34d39933;
+  --red:#f87171; --red-dim:#f8717133;
+  --yellow:#fbbf24; --yellow-dim:#fbbf2433;
+  --purple:#a78bfa; --purple-dim:#a78bfa33;
+  --blue:#60a5fa; --blue-dim:#60a5fa33;
+  --orange:#fb923c; --orange-dim:#fb923c33;
+  --teal:#2dd4bf; --teal-dim:#2dd4bf33;
+  --mono:'SF Mono','Fira Code','Cascadia Code',monospace;
+  --sans:'Inter','SF Pro Display',-apple-system,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}
 
-  /* Staleness sentinel banner */
-  .staleness-banner {
-    background: rgba(248,113,113,0.1);
-    border: 1px solid rgba(248,113,113,0.3);
-    border-radius: 8px;
-    padding: 0.75rem 1.25rem;
-    margin-bottom: 1rem;
-    display: none;
-    align-items: center;
-    gap: 0.75rem;
-    font-size: 0.85rem;
-    color: var(--red);
-  }
-  .staleness-banner.visible { display: flex; }
-  .staleness-banner .icon { font-size: 1.2rem; }
+/* ═══ PULSE OVERLAY (regime shift) ═══ */
+.regime-pulse{
+  position:fixed;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:9999;
+  opacity:0;transition:opacity 0.3s;
+}
+.regime-pulse.active{animation:regimeFlash 1.5s ease-out;}
+@keyframes regimeFlash{
+  0%{opacity:0.25;background:radial-gradient(ellipse at center,var(--accent-dim) 0%,transparent 70%);}
+  100%{opacity:0;background:transparent;}
+}
 
-  .container { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+/* ═══ HEADER ═══ */
+header{
+  background:linear-gradient(180deg,#0a0f1a 0%,var(--bg) 100%);
+  border-bottom:1px solid var(--border);padding:0.6rem 1.25rem;
+  display:flex;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:100;
+}
+.logo{display:flex;align-items:center;gap:0.6rem;}
+.logo-icon{
+  width:34px;height:34px;
+  background:linear-gradient(135deg,var(--accent),var(--purple));
+  border-radius:7px;display:flex;align-items:center;justify-content:center;
+  font-size:1rem;font-weight:800;color:#000;
+  box-shadow:0 0 12px var(--accent-dim);
+}
+.logo h1{font-size:1.05rem;font-weight:700;letter-spacing:0.02em;background:linear-gradient(90deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.logo .tagline{font-size:0.58rem;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;}
+.header-right{display:flex;align-items:center;gap:0.6rem;}
+.sync-indicator{
+  display:flex;align-items:center;gap:0.35rem;
+  padding:0.25rem 0.6rem;border-radius:999px;font-size:0.6rem;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.05em;
+  transition:all 0.3s;
+}
+.sync-indicator .sync-dot{
+  width:6px;height:6px;border-radius:50%;
+  animation:syncPulse 2s infinite;
+}
+@keyframes syncPulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+.sync-ok{background:var(--green-dim);color:var(--green);border:1px solid rgba(52,211,153,0.3);}
+.sync-ok .sync-dot{background:var(--green);}
+.sync-warn{background:var(--yellow-dim);color:var(--yellow);border:1px solid rgba(251,191,36,0.3);}
+.sync-warn .sync-dot{background:var(--yellow);}
+.sync-err{background:var(--red-dim);color:var(--red);border:1px solid rgba(248,113,113,0.3);}
+.sync-err .sync-dot{background:var(--red);}
+.sync-delta{font-size:0.58rem;color:var(--text-dim);font-family:var(--mono);}
+.deploy-badge{
+  padding:0.2rem 0.5rem;border-radius:3px;font-size:0.55rem;font-weight:600;
+  text-transform:uppercase;letter-spacing:0.04em;font-family:var(--mono);
+}
+.deploy-ok{background:var(--green-dim);color:var(--green);border:1px solid rgba(52,211,153,0.2);}
+.deploy-out{background:var(--red-dim);color:var(--red);border:1px solid rgba(248,113,113,0.2);}
+.deploy-unknown{background:rgba(100,116,139,0.15);color:var(--text-dim);border:1px solid rgba(100,116,139,0.2);}
 
-  /* KPI row */
-  .kpi-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .kpi {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.25rem;
-    transition: border-color 0.2s;
-  }
-  .kpi:hover { border-color: var(--accent); }
-  .kpi-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
-  .kpi-value { font-size: 1.75rem; font-weight: 700; }
-  .kpi-sub { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.25rem; }
-  .kpi-value.green { color: var(--green); }
-  .kpi-value.red { color: var(--red); }
-  .kpi-value.yellow { color: var(--yellow); }
-  .kpi-value.accent { color: var(--accent); }
-  .kpi-value.purple { color: var(--purple); }
+/* ═══ STALENESS ═══ */
+.staleness-banner{
+  background:var(--red-dim);border:1px solid rgba(248,113,113,0.3);
+  border-radius:6px;padding:0.5rem 0.85rem;margin-bottom:0.6rem;
+  display:none;align-items:center;gap:0.5rem;font-size:0.72rem;color:var(--red);
+}
+.staleness-banner.visible{display:flex;}
 
-  /* Charts */
-  .charts-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .chart-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.25rem;
-  }
-  .chart-card h3 {
-    font-size: 0.85rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 1rem;
-  }
-  .chart-wrap { position: relative; width: 100%; }
+.container{max-width:1480px;margin:0 auto;padding:0.6rem 0.85rem;}
 
-  /* Tables */
-  .table-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.25rem;
-    margin-bottom: 1.5rem;
-    overflow-x: auto;
-  }
-  .table-card h3 {
-    font-size: 0.85rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 1rem;
-  }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th { text-align: left; color: var(--text-dim); padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(30,45,61,0.5); }
-  tr:hover td { background: rgba(34,211,238,0.03); }
-  .tag { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
-  .tag-long { background: rgba(52,211,153,0.15); color: var(--green); }
-  .tag-short { background: rgba(248,113,113,0.15); color: var(--red); }
-  .tag-flat { background: rgba(148,163,184,0.15); color: var(--text-dim); }
+/* ═══ LIVE FEED TICKER ═══ */
+.feed-ticker{
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:0.5rem 0.75rem;margin-bottom:0.6rem;
+  display:flex;align-items:stretch;gap:0.75rem;overflow:hidden;
+  min-height:72px;
+}
+.feed-label{
+  writing-mode:vertical-lr;text-orientation:mixed;
+  font-size:0.5rem;color:var(--text-dim);text-transform:uppercase;
+  letter-spacing:0.08em;font-weight:700;transform:rotate(180deg);
+  display:flex;align-items:center;padding:0 0.15rem;
+  background:var(--surface2);border-radius:3px;
+}
+.feed-stream{
+  flex:1;display:flex;gap:0.4rem;overflow-x:auto;align-items:center;
+  padding:0.25rem 0;
+}
+.feed-stream::-webkit-scrollbar{height:3px;}
+.feed-stream::-webkit-scrollbar-track{background:var(--surface2);border-radius:2px;}
+.feed-stream::-webkit-scrollbar-thumb{background:var(--border-active);border-radius:2px;}
+.feed-card{
+  flex:0 0 auto;min-width:130px;
+  background:var(--surface2);border:1px solid var(--border);border-radius:5px;
+  padding:0.35rem 0.5rem;font-size:0.65rem;
+  transition:border-color 0.3s,box-shadow 0.3s;
+}
+.feed-card.glow{
+  border-color:var(--accent);
+  box-shadow:0 0 12px var(--accent-dim),0 0 4px var(--accent-dim);
+  animation:feedGlow 6s ease-out;
+}
+@keyframes feedGlow{
+  0%{border-color:var(--accent);box-shadow:0 0 20px var(--accent-dim);}
+  80%{border-color:var(--accent);box-shadow:0 0 6px var(--accent-dim);}
+  100%{border-color:var(--border);box-shadow:none;}
+}
+.feed-card .fc-sym{font-weight:700;color:var(--text);font-family:var(--mono);}
+.feed-card .fc-dir{font-weight:700;}
+.feed-card .fc-dir.long{color:var(--green);}
+.feed-card .fc-dir.short{color:var(--red);}
+.feed-card .fc-dir.flat{color:var(--text-dim);}
+.feed-card .fc-meta{color:var(--text-dim);font-family:var(--mono);font-size:0.58rem;margin-top:0.15rem;}
+.feed-card .fc-outcome{font-size:0.55rem;font-weight:600;margin-top:0.1rem;}
+.feed-card .fc-outcome.correct{color:var(--green);}
+.feed-card .fc-outcome.wrong{color:var(--red);}
+.feed-card .fc-outcome.pending{color:var(--text-dim);}
 
-  /* Empty state */
-  .empty-state {
-    text-align: center;
-    padding: 3rem 1rem;
-    color: var(--text-dim);
-  }
-  .empty-state .icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.4; }
-  .empty-state p { font-size: 0.9rem; }
+.feed-stats{
+  display:flex;flex-direction:column;align-items:flex-end;justify-content:center;
+  gap:0.2rem;min-width:90px;
+}
+.feed-stats .fs-rate{font-size:1.1rem;font-weight:700;color:var(--accent);font-family:var(--mono);}
+.feed-stats .fs-label{font-size:0.5rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em;}
+.feed-stats .fs-burst{font-size:0.55rem;color:var(--orange);font-family:var(--mono);font-weight:600;}
 
-  /* Footer */
-  footer {
-    text-align: center;
-    padding: 2rem;
-    color: var(--text-dim);
-    font-size: 0.75rem;
-    border-top: 1px solid var(--border);
-  }
+/* ═══ FILTER BAR ═══ */
+.filter-bar{
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:0.5rem 0.7rem;margin-bottom:0.6rem;
+  display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;
+}
+.filter-bar label{font-size:0.55rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;}
+.filter-bar select,.filter-bar button{
+  background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  padding:0.25rem 0.5rem;border-radius:3px;font-size:0.65rem;font-family:var(--sans);cursor:pointer;
+  transition:border-color 0.2s;
+}
+.filter-bar select:hover,.filter-bar button:hover{border-color:var(--accent);}
+.filter-bar select:focus,.filter-bar button:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim);}
+.filter-group{display:flex;align-items:center;gap:0.3rem;}
+.filter-sep{width:1px;height:18px;background:var(--border);}
+.toggle-group{display:flex;gap:1px;}
+.toggle-group button{border-radius:2px;font-size:0.55rem;padding:0.15rem 0.4rem;}
+.toggle-group button.active{background:var(--accent-dim);color:var(--accent);border-color:rgba(34,211,238,0.4);}
+.filter-stats{margin-left:auto;font-size:0.6rem;color:var(--text-dim);font-family:var(--mono);}
+.filter-stats strong{color:var(--accent);}
 
-  @media (max-width: 768px) {
-    .charts-grid { grid-template-columns: 1fr; }
-    .kpi-row { grid-template-columns: repeat(2, 1fr); }
-    header { flex-direction: column; gap: 1rem; }
-  }
+/* ═══ SECTION HEADERS ═══ */
+.section-hdr{display:flex;align-items:center;gap:0.5rem;margin:0.75rem 0 0.5rem 0;padding:0.3rem 0;}
+.section-hdr h2{font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-mid);}
+.section-hdr .line{flex:1;height:1px;background:linear-gradient(90deg,var(--border),transparent);}
+.section-hdr .badge{font-size:0.52rem;padding:0.12rem 0.4rem;border-radius:3px;background:var(--accent-dim);color:var(--accent);font-weight:600;letter-spacing:0.04em;}
+
+/* ═══ HEALTH PANEL ═══ */
+.health-panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.4rem;margin-bottom:0.6rem;}
+.health-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:0.7rem 0.75rem;position:relative;overflow:hidden;transition:border-color 0.2s;
+}
+.health-card:hover{border-color:var(--border-active);}
+.health-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;opacity:0.4;}
+.health-card.ok::before{background:linear-gradient(90deg,var(--green),transparent);}
+.health-card.warn::before{background:linear-gradient(90deg,var(--yellow),transparent);opacity:0.6;}
+.health-card.crit::before{background:linear-gradient(90deg,var(--red),transparent);opacity:0.7;}
+.health-label{font-size:0.52rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;}
+.health-value{font-size:1.15rem;font-weight:700;font-family:var(--mono);}
+.health-delta{font-size:0.55rem;margin-top:0.15rem;font-family:var(--mono);}
+.health-delta.up{color:var(--green);} .health-delta.down{color:var(--red);} .health-delta.flat{color:var(--text-dim);}
+
+/* ═══ INTENSITY PANEL ═══ */
+.intensity-panel{
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:0.6rem 0.75rem;margin-bottom:0.6rem;
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;
+}
+.intensity-meter h4{font-size:0.55rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.4rem;}
+.meter-bar{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-bottom:0.25rem;}
+.meter-fill{height:100%;border-radius:3px;transition:width 0.8s ease-out;}
+.meter-val{font-size:0.62rem;font-family:var(--mono);color:var(--text-mid);}
+.heatmap-row{display:flex;gap:1px;align-items:flex-end;height:30px;}
+.heatmap-cell{
+  flex:1;min-width:4px;border-radius:1px;
+  transition:background 0.5s,height 0.5s;
+}
+.entropy-gauge{position:relative;width:100%;height:40px;}
+.entropy-gauge canvas{width:100%;height:100%;}
+
+/* ═══ TIMELINE ═══ */
+.timeline-container{
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:0.6rem;margin-bottom:0.6rem;overflow-x:auto;position:relative;
+}
+.timeline-container h3{font-size:0.62rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.4rem;}
+.timeline-track{display:flex;align-items:center;gap:0;min-height:60px;padding:0.3rem 0;position:relative;}
+.tl-node{
+  display:flex;flex-direction:column;align-items:center;min-width:50px;cursor:pointer;
+  position:relative;z-index:2;transition:transform 0.15s;
+}
+.tl-node:hover{transform:scale(1.1);}
+.tl-dot{width:10px;height:10px;border-radius:50%;border:2px solid var(--border-active);transition:all 0.2s;}
+.tl-dot.correct{background:var(--green);border-color:var(--green);box-shadow:0 0 6px var(--green-dim);}
+.tl-dot.wrong{background:var(--red);border-color:var(--red);box-shadow:0 0 6px var(--red-dim);}
+.tl-dot.pending{background:var(--surface2);border-color:var(--text-dim);}
+.tl-connector{flex:0 0 auto;width:30px;height:2px;background:var(--border);z-index:1;}
+.tl-connector.active{background:linear-gradient(90deg,var(--accent),var(--border));}
+.tl-label{font-size:0.48rem;color:var(--text-dim);margin-top:0.25rem;text-align:center;white-space:nowrap;}
+.tl-dir{font-size:0.52rem;font-weight:700;margin-top:0.1rem;}
+.tl-dir.long{color:var(--green);} .tl-dir.short{color:var(--red);} .tl-dir.flat{color:var(--text-dim);}
+
+/* ═══ ZOOM CONTROLS ═══ */
+.zoom-bar{
+  background:var(--surface);border:1px solid var(--border);border-radius:4px;
+  padding:0.3rem 0.5rem;margin-bottom:0.6rem;
+  display:flex;align-items:center;gap:0.5rem;
+}
+.zoom-bar label{font-size:0.55rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;}
+.zoom-bar button{
+  background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  padding:0.2rem 0.5rem;border-radius:3px;font-size:0.6rem;cursor:pointer;
+}
+.zoom-bar button:hover{border-color:var(--accent);}
+.zoom-bar button.active{background:var(--accent-dim);color:var(--accent);border-color:rgba(34,211,238,0.4);}
+.zoom-bar .time-cursor{
+  margin-left:auto;font-size:0.6rem;color:var(--accent);font-family:var(--mono);
+}
+
+/* ═══ CHARTS ═══ */
+.charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:0.4rem;margin-bottom:0.6rem;}
+.chart-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:0.7rem;transition:border-color 0.2s;}
+.chart-card:hover{border-color:var(--border-active);}
+.chart-card h3{font-size:0.62rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem;display:flex;align-items:center;gap:0.35rem;}
+.chart-card h3 .dot{width:5px;height:5px;border-radius:50%;display:inline-block;}
+.chart-wrap{position:relative;width:100%;}
+.chart-card.span-2{grid-column:span 2;}
+.new-point-flash{animation:chartFlash 3s ease-out;}
+@keyframes chartFlash{0%{box-shadow:0 0 15px var(--accent-dim);}100%{box-shadow:none;}}
+
+/* ═══ CAUSALITY ═══ */
+.causality-panel{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:0.7rem;margin-bottom:0.6rem;}
+.causality-panel h3{font-size:0.62rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem;}
+.causality-canvas{width:100%;height:220px;}
+
+/* ═══ TABLES ═══ */
+.table-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:0.7rem;margin-bottom:0.6rem;overflow-x:auto;}
+.table-card h3{font-size:0.62rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem;}
+table{width:100%;border-collapse:collapse;font-size:0.68rem;}
+th{text-align:left;color:var(--text-dim);padding:0.35rem 0.45rem;border-bottom:1px solid var(--border);font-weight:600;font-size:0.55rem;text-transform:uppercase;letter-spacing:0.05em;}
+td{padding:0.3rem 0.45rem;border-bottom:1px solid rgba(26,38,64,0.4);font-family:var(--mono);font-size:0.65rem;}
+tr:hover td{background:rgba(34,211,238,0.02);}
+tr.clickable{cursor:pointer;}
+tr.clickable:hover td{background:rgba(34,211,238,0.05);}
+tr.new-row td{animation:rowGlow 6s ease-out;}
+@keyframes rowGlow{0%{background:var(--accent-dim);}100%{background:transparent;}}
+.tag{display:inline-block;padding:0.08rem 0.35rem;border-radius:2px;font-size:0.55rem;font-weight:600;font-family:var(--sans);}
+.tag-long{background:var(--green-dim);color:var(--green);} .tag-short{background:var(--red-dim);color:var(--red);}
+.tag-flat{background:rgba(100,116,139,0.15);color:var(--text-dim);}
+.tag-execute{background:var(--green-dim);color:var(--green);} .tag-hold{background:var(--yellow-dim);color:var(--yellow);}
+
+/* ═══ MODAL ═══ */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(6,10,18,0.92);z-index:200;display:none;align-items:center;justify-content:center;padding:1rem;}
+.modal-overlay.visible{display:flex;}
+.modal{background:var(--surface2);border:1px solid var(--border-active);border-radius:10px;max-width:880px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 0 40px rgba(0,0,0,0.5),0 0 20px var(--accent-dim);}
+.modal-header{padding:0.85rem 1rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.modal-header h2{font-size:0.8rem;font-weight:700;}
+.modal-close{background:none;border:1px solid var(--border);color:var(--text-dim);padding:0.25rem 0.5rem;border-radius:3px;cursor:pointer;font-size:0.7rem;}
+.modal-close:hover{border-color:var(--red);color:var(--red);}
+.modal-body{padding:0.85rem 1rem;}
+.pipeline-step{display:flex;gap:0.6rem;padding:0.5rem 0;border-bottom:1px solid rgba(26,38,64,0.4);}
+.pipeline-step:last-child{border-bottom:none;}
+.step-indicator{display:flex;flex-direction:column;align-items:center;min-width:30px;}
+.step-dot{width:8px;height:8px;border-radius:50%;border:2px solid var(--accent);}
+.step-dot.pass{background:var(--green);border-color:var(--green);}
+.step-dot.fail{background:var(--red);border-color:var(--red);}
+.step-dot.warn{background:var(--yellow);border-color:var(--yellow);}
+.step-line{width:2px;flex:1;background:var(--border);min-height:16px;}
+.step-content{flex:1;}
+.step-title{font-size:0.62rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--accent);margin-bottom:0.25rem;}
+.step-data{font-size:0.65rem;color:var(--text-mid);font-family:var(--mono);line-height:1.5;}
+.step-data .key{color:var(--text-dim);} .step-data .val{color:var(--text);}
+.step-data .good{color:var(--green);} .step-data .bad{color:var(--red);}
+
+/* ═══ VIEW TOGGLE ═══ */
+.view-toggle{display:flex;gap:1px;background:var(--surface);border:1px solid var(--border);border-radius:3px;overflow:hidden;}
+.view-toggle button{background:var(--surface2);border:none;color:var(--text-dim);padding:0.2rem 0.5rem;font-size:0.55rem;font-family:var(--sans);cursor:pointer;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;}
+.view-toggle button.active{background:var(--accent-dim);color:var(--accent);}
+.view-toggle button:hover{color:var(--text);}
+
+.empty-state{text-align:center;padding:1.5rem 1rem;color:var(--text-dim);}
+.empty-state p{font-size:0.75rem;}
+footer{text-align:center;padding:1rem;color:var(--text-dim);font-size:0.55rem;border-top:1px solid var(--border);letter-spacing:0.04em;}
+
+@media(max-width:768px){
+  .charts-grid{grid-template-columns:1fr;} .chart-card.span-2{grid-column:span 1;}
+  .health-panel{grid-template-columns:repeat(2,1fr);}
+  .intensity-panel{grid-template-columns:1fr;}
+  header{flex-direction:column;gap:0.4rem;}
+  .filter-bar{flex-direction:column;align-items:flex-start;}
+  .feed-ticker{flex-direction:column;} .feed-stats{flex-direction:row;align-items:center;}
+}
 </style>
 </head>
 <body>
+
+<!-- Regime shift pulse overlay -->
+<div class="regime-pulse" id="regime-pulse"></div>
 
 <header>
   <div class="logo">
     <div class="logo-icon">S</div>
     <div>
       <h1>SENECIO Oracle</h1>
-      <span>Prediction Performance Dashboard</span>
+      <div class="tagline">Live Decision Observability</div>
     </div>
   </div>
-  <div id="status-badge" class="status-badge status-nodata">Loading...</div>
+  <div class="header-right">
+    <div class="view-toggle" id="view-toggle">
+      <button class="active" data-view="RAW">Raw</button>
+      <button data-view="SMOOTHED">Smooth</button>
+      <button data-view="NORMALIZED">Norm</button>
+    </div>
+    <div class="sync-indicator sync-unknown" id="sync-indicator">
+      <span class="sync-dot"></span>
+      <span id="sync-label">INIT</span>
+    </div>
+    <span class="sync-delta" id="sync-delta">—</span>
+    <span class="deploy-badge deploy-unknown" id="deploy-badge">DEPLOY ?</span>
+  </div>
 </header>
 
 <div class="container">
-  <!-- Staleness sentinel -->
-  <div id="staleness-banner" class="staleness-banner">
-    <span class="icon">\u26A0</span>
-    <span id="staleness-msg">Dashboard data may be stale — checking...</span>
+  <div id="staleness-banner" class="staleness-banner"><span id="staleness-msg"></span></div>
+
+  <!-- ═══ 1. LIVE FEED TICKER ═══ -->
+  <div class="feed-ticker" id="feed-ticker">
+    <div class="feed-label">LIVE FEED</div>
+    <div class="feed-stream" id="feed-stream"></div>
+    <div class="feed-stats">
+      <div class="fs-rate" id="pred-per-min">0</div>
+      <div class="fs-label">pred/min</div>
+      <div class="fs-burst" id="burst-indicator"></div>
+    </div>
   </div>
-  <!-- KPI Row -->
-  <div class="kpi-row" id="kpi-row"></div>
 
-  <!-- Charts -->
-  <div class="charts-grid" id="charts-grid"></div>
+  <!-- ═══ FILTER BAR ═══ -->
+  <div class="filter-bar" id="filter-bar">
+    <div class="filter-group"><label>Sym</label><select id="filter-symbol"><option value="ALL">ALL</option></select></div>
+    <div class="filter-sep"></div>
+    <div class="filter-group"><label>Regime</label><select id="filter-regime"><option value="ALL">ALL</option></select></div>
+    <div class="filter-sep"></div>
+    <div class="filter-group"><label>Dir</label><select id="filter-direction"><option value="ALL">ALL</option><option value="LONG">LONG</option><option value="SHORT">SHORT</option><option value="FLAT">FLAT</option></select></div>
+    <div class="filter-sep"></div>
+    <div class="filter-group"><label>Action</label><div class="toggle-group" id="filter-action"><button class="active" data-val="ALL">ALL</button><button data-val="EXECUTE">EXEC</button><button data-val="HOLD">HOLD</button></div></div>
+    <div class="filter-sep"></div>
+    <div class="filter-group"><label>Outcome</label><select id="filter-outcome"><option value="ALL">ALL</option><option value="PROFIT">Profit</option><option value="FAILURE">Fail</option><option value="HIGH_CONF">HiConf</option><option value="PENDING">Pending</option></select></div>
+    <div class="filter-stats" id="filter-stats"></div>
+  </div>
 
-  <!-- Signal Rankings -->
+  <!-- ═══ 5. INTENSITY PANEL ═══ -->
+  <div class="section-hdr"><h2>Oracle Intensity</h2><div class="line"></div><span class="badge">LIVE</span></div>
+  <div class="intensity-panel" id="intensity-panel">
+    <div class="intensity-meter">
+      <h4>Activity Heatmap (per minute)</h4>
+      <div class="heatmap-row" id="heatmap-row"></div>
+    </div>
+    <div class="intensity-meter">
+      <h4>Signal Entropy Meter</h4>
+      <div class="meter-bar"><div class="meter-fill" id="entropy-fill" style="width:50%;background:var(--accent);"></div></div>
+      <div class="meter-val" id="entropy-val">—</div>
+    </div>
+    <div class="intensity-meter">
+      <h4>Market Pressure Index</h4>
+      <div class="meter-bar"><div class="meter-fill" id="pressure-fill" style="width:50%;background:var(--purple);"></div></div>
+      <div class="meter-val" id="pressure-val">—</div>
+    </div>
+  </div>
+
+  <!-- ═══ ORACLE HEALTH ═══ -->
+  <div class="section-hdr"><h2>Oracle Health</h2><div class="line"></div><span class="badge">SYSTEM</span></div>
+  <div class="health-panel" id="health-panel"></div>
+
+  <!-- ═══ TIMELINE ═══ -->
+  <div class="section-hdr"><h2>Prediction Lifecycle</h2><div class="line"></div><span class="badge">TEMPORAL</span></div>
+  <div class="timeline-container" id="timeline-container">
+    <h3>Prediction → Outcome → Verification Chain</h3>
+    <div class="timeline-track" id="timeline-track"></div>
+  </div>
+
+  <!-- ═══ 3. ZOOM CONTROLS ═══ -->
+  <div class="zoom-bar" id="zoom-bar">
+    <label>Zoom</label>
+    <button data-zoom="1" class="active">1h</button>
+    <button data-zoom="6">6h</button>
+    <button data-zoom="24">24h</button>
+    <button data-zoom="168">7d</button>
+    <button data-zoom="0">All</button>
+    <span class="time-cursor" id="time-cursor">NOW</span>
+  </div>
+
+  <!-- ═══ CAUSALITY ═══ -->
+  <div class="section-hdr"><h2>Decision Causality</h2><div class="line"></div><span class="badge">CAUSALITY</span></div>
+  <div class="causality-panel" id="causality-panel">
+    <h3>Pipeline Trace — <span id="causality-pred-label">select a prediction</span></h3>
+    <canvas class="causality-canvas" id="causality-canvas"></canvas>
+  </div>
+
+  <!-- ═══ LINE INTELLIGENCE ═══ -->
+  <div class="section-hdr"><h2>Line Intelligence</h2><div class="line"></div><span class="badge">SERIES</span></div>
+  <div class="charts-grid" id="intelligence-charts"></div>
+
+  <!-- ═══ STATS ═══ -->
+  <div class="section-hdr"><h2>Statistical Analytics</h2><div class="line"></div><span class="badge">STATS</span></div>
+  <div class="charts-grid" id="stats-charts"></div>
+
+  <!-- ═══ SIGNALS ═══ -->
+  <div class="section-hdr"><h2>Signal Intelligence</h2><div class="line"></div><span class="badge">SIGNALS</span></div>
   <div class="table-card" id="signal-rankings"></div>
 
-  <!-- Predictions Table -->
+  <!-- ═══ PREDICTIONS ═══ -->
+  <div class="section-hdr"><h2>Prediction Audit Log</h2><div class="line"></div><span class="badge">AUDIT</span></div>
   <div class="table-card" id="predictions-table"></div>
 </div>
 
-<footer>
-  SENECIO ORACLE — Primero medir. Despues decidir.<br>
-  Automated via GitHub Actions &middot; Updated every 15 min
-</footer>
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" id="modal">
+    <div class="modal-header"><h2 id="modal-title">Forensic Trace</h2><button class="modal-close" id="modal-close">CLOSE</button></div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<footer>SENECIO ORACLE &mdash; Primero medir. Despues decidir. &middot; Live sync every 15s &middot; Every number has lineage.</footer>
 
 <script>
 // ═══════════════════════════════════════════════════════════════════════════
-// DATA LOADING
+// GLOBAL STATE
 // ═══════════════════════════════════════════════════════════════════════════
 
 const RAW_BASE = 'senecio_output';
+const POLL_INTERVAL = 15000; // 15s client-side polling
+const GITHUB_PAGES_URL = 'https://simonkey888.github.io/SENECIOORACLE/';
+const GITHUB_API_URL = 'https://api.github.com/repos/simonkey888/SENECIOORACLE';
+
 let reportData = null;
 let predictionsData = [];
+let filteredData = [];
+let chartInstances = [];
+let selectedPrediction = null;
+let viewMode = 'RAW';
+let zoomHours = 1; // default: last 1h
+let lastPredCount = 0;
+let lastPredTimestamps = []; // for pred/min calc
+let previousRegime = null;
+let deploySHA = null;
+let pagesSHA = null;
+let syncState = 'init'; // init | ok | warn | err
 
-async function loadData() {
+const filters = { symbol:'ALL', regime:'ALL', direction:'ALL', action:'ALL', outcome:'ALL' };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. LIVE REFRESH LAYER
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function pollData() {
   try {
     const [reportRes, predRes] = await Promise.all([
-      fetch(`${RAW_BASE}/oracle_report.json?t=${Date.now()}`),
-      fetch(`${RAW_BASE}/predictions.jsonl?t=${Date.now()}`)
+      fetch(`${RAW_BASE}/oracle_report.json?t=${Date.now()}`, {cache:'no-store'}),
+      fetch(`${RAW_BASE}/predictions.jsonl?t=${Date.now()}`, {cache:'no-store'})
     ]);
 
-    reportData = await reportRes.json();
+    if (!reportRes.ok || !predRes.ok) throw new Error('Fetch failed');
 
+    reportData = await reportRes.json();
     const predText = await predRes.text();
-    predictionsData = predText.trim().split('\n')
+    const newPreds = predText.trim().split('\n')
       .filter(l => l.trim())
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean);
 
-    document.getElementById('status-badge').textContent = 'LIVE';
-    document.getElementById('status-badge').className = 'status-badge status-live';
+    // Detect new predictions
+    const newCount = newPreds.length - predictionsData.length;
+    const hasNew = newCount > 0;
 
-    // Staleness sentinel: check if report data is fresh
-    const banner = document.getElementById('staleness-banner');
-    const bannerMsg = document.getElementById('staleness-msg');
-    if (reportData && reportData.meta && reportData.meta.generated_at) {
-      const generatedAt = new Date(reportData.meta.generated_at);
-      const ageMinutes = (Date.now() - generatedAt.getTime()) / 60000;
-      if (ageMinutes > 30) {
-        banner.classList.add('visible');
-        bannerMsg.textContent = `Data is ${Math.round(ageMinutes)} min old (generated ${generatedAt.toISOString().slice(0,19).replace('T',' ')} UTC). Pages sync may be delayed.`;
-        document.getElementById('status-badge').textContent = 'STALE';
-        document.getElementById('status-badge').className = 'status-badge status-stale';
-      } else {
-        banner.classList.remove('visible');
-      }
+    predictionsData = enrichPredictions(newPreds);
+
+    // Track timestamps for pred/min
+    if (hasNew) {
+      const latestTs = new Date(predictionsData[predictionsData.length - 1].timestamp);
+      lastPredTimestamps.push(Date.now());
+      // Keep only last 60s
+      lastPredTimestamps = lastPredTimestamps.filter(t => Date.now() - t < 60000);
     }
+
+    // Update sync indicator
+    updateSyncStatus(reportData);
+
+    // Regime shift detection
+    const latestRegime = predictionsData.length > 0 ? predictionsData[predictionsData.length - 1]._regime : null;
+    if (previousRegime && latestRegime && previousRegime !== latestRegime) {
+      triggerRegimePulse(latestRegime);
+    }
+    previousRegime = latestRegime;
+
+    // Staleness check
+    checkStaleness(reportData);
+
+    // Populate filters (only on first load or if symbols changed)
+    if (document.getElementById('filter-symbol').options.length <= 1) populateFilters();
+
+    applyFilters(hasNew);
+
   } catch (e) {
-    console.error('Data load error:', e);
-    document.getElementById('status-badge').textContent = 'NO DATA';
-    document.getElementById('status-badge').className = 'status-badge status-nodata';
+    console.warn('Poll error:', e);
+    setSyncState('err', 'FETCH ERR');
   }
-  render();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// RENDER
-// ═══════════════════════════════════════════════════════════════════════════
-
-function fmt(v, decimals = 4) {
-  if (v === null || v === undefined) return '—';
-  return Number(v).toFixed(decimals);
-}
-
-function fmtPct(v) {
-  if (v === null || v === undefined) return '—';
-  return (Number(v) * 100).toFixed(1) + '%';
-}
-
-function fmtDate(iso) {
-  if (!iso) return '—';
-  try {
-    return new Date(iso).toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
-  } catch { return iso; }
-}
-
-function render() {
-  if (!reportData) {
-    document.getElementById('kpi-row').innerHTML = `
-      <div class="empty-state" style="grid-column:1/-1">
-        <div class="icon">📡</div>
-        <p>Waiting for oracle_report.json — predictions are being collected.<br>Dashboard will populate once verified outcomes exist.</p>
-      </div>`;
+function updateSyncStatus(report) {
+  if (!report?.meta?.generated_at) {
+    setSyncState('warn', 'NO TS');
     return;
   }
+  const genAt = new Date(report.meta.generated_at);
+  const ageSec = Math.round((Date.now() - genAt.getTime()) / 1000);
 
-  const meta = reportData.meta || {};
-  const cls = reportData.classification || {};
-  const prob = reportData.probabilistic || {};
-  const ev = reportData.ev_analysis || {};
-  const sharpe = reportData.sharpe || {};
-  const signals = reportData.signal_rankings || {};
-  const topPred = reportData.top_predictions || {};
+  if (ageSec < 120) {
+    setSyncState('ok', 'LIVE');
+  } else if (ageSec < 900) {
+    setSyncState('warn', `${Math.round(ageSec/60)}m old`);
+  } else {
+    setSyncState('err', `${Math.round(ageSec/60)}m stale`);
+  }
 
-  const hasVerified = (meta.verified || 0) > 0;
-
-  renderKPIs(meta, cls, prob, sharpe, hasVerified);
-  renderCharts(cls, prob, ev, hasVerified);
-  renderSignalRankings(signals);
-  renderPredictionsTable();
+  // Show delta in seconds
+  const deltaEl = document.getElementById('sync-delta');
+  if (ageSec < 60) {
+    deltaEl.textContent = `${ageSec}s ago`;
+    deltaEl.style.color = 'var(--green)';
+  } else {
+    deltaEl.textContent = `${Math.round(ageSec/60)}m ago`;
+    deltaEl.style.color = ageSec > 900 ? 'var(--red)' : 'var(--yellow)';
+  }
 }
 
-// ─── KPIs ────────────────────────────────────────────────────────────────
-
-function renderKPIs(meta, cls, prob, sharpe, hasVerified) {
-  const kpis = [
-    { label:'Total Predictions', value: meta.total_predictions || 0, cls:'' },
-    { label:'Verified', value: meta.verified || 0, cls:'', sub: `${meta.verified_directional || 0} directional` },
-    { label:'Accuracy', value: hasVerified ? fmtPct(cls.accuracy) : '—', cls: hasVerified && cls.accuracy >= 0.55 ? 'green' : hasVerified ? 'red' : '' },
-    { label:'Brier Score', value: prob.brier_score !== null ? fmt(prob.brier_score) : '—', cls: '', sub: 'lower = better' },
-    { label:'Sharpe Ratio', value: sharpe.sharpe !== null ? fmt(sharpe.sharpe, 2) : '—', cls: sharpe.sharpe !== null && sharpe.sharpe > 1 ? 'green' : '' },
-    { label:'Directional', value: meta.directional || 0, cls: 'accent', sub: `${meta.flat || 0} flat` },
-  ];
-
-  document.getElementById('kpi-row').innerHTML = kpis.map(k => `
-    <div class="kpi">
-      <div class="kpi-label">${k.label}</div>
-      <div class="kpi-value ${k.cls}">${k.value}</div>
-      ${k.sub ? `<div class="kpi-sub">${k.sub}</div>` : ''}
-    </div>
-  `).join('');
+function setSyncState(state, label) {
+  syncState = state;
+  const el = document.getElementById('sync-indicator');
+  el.className = 'sync-indicator sync-' + (state === 'ok' ? 'ok' : state === 'warn' ? 'warn' : 'err');
+  document.getElementById('sync-label').textContent = label;
 }
 
-// ─── CHARTS ──────────────────────────────────────────────────────────────
-
-const chartInstances = [];
-
-function destroyCharts() {
-  chartInstances.forEach(c => c.destroy());
-  chartInstances.length = 0;
+function checkStaleness(report) {
+  if (!report?.meta?.generated_at) return;
+  const ageMin = (Date.now() - new Date(report.meta.generated_at).getTime()) / 60000;
+  const banner = document.getElementById('staleness-banner');
+  if (ageMin > 30) {
+    banner.classList.add('visible');
+    document.getElementById('staleness-msg').textContent = `Data ${Math.round(ageMin)} min old. GitHub Pages sync may be delayed.`;
+  } else {
+    banner.classList.remove('visible');
+  }
 }
 
-function renderCharts(cls, prob, ev, hasVerified) {
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. DEPLOY VERIFICATION LAYER
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function verifyDeploy() {
+  const badge = document.getElementById('deploy-badge');
+  try {
+    // Get latest commit SHA from GitHub API
+    const apiRes = await fetch(`${GITHUB_API_URL}/commits/main`, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if (!apiRes.ok) throw new Error('API fail');
+    const apiData = await apiRes.json();
+    deploySHA = apiData.sha?.substring(0, 7);
+
+    // Get last workflow run
+    const runsRes = await fetch(`${GITHUB_API_URL}/actions/runs?per_page=1`, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    });
+    let runInfo = '';
+    if (runsRes.ok) {
+      const runsData = await runsRes.json();
+      if (runsData.workflow_runs?.length > 0) {
+        const run = runsData.workflow_runs[0];
+        const runTime = new Date(run.updated_at || run.created_at);
+        const runAgeMin = Math.round((Date.now() - runTime.getTime()) / 60000);
+        runInfo = ` last run ${runAgeMin}m ago`;
+        if (run.status === 'completed' && run.conclusion === 'success') {
+          runInfo += ' OK';
+        } else if (run.conclusion === 'failure') {
+          runInfo += ' FAIL';
+        }
+      }
+    }
+
+    // Try to fetch the deployed page's version meta
+    try {
+      const pageRes = await fetch(GITHUB_PAGES_URL, { cache: 'no-store' });
+      if (pageRes.ok) {
+        const pageHtml = await pageRes.text();
+        const metaMatch = pageHtml.match(/name="oracle-version"\s+content="([^"]+)"/);
+        if (metaMatch) {
+          // Pages is reachable and has our meta tag
+          badge.className = 'deploy-badge deploy-ok';
+          badge.textContent = `DEPLOY OK${deploySHA ? ' ' + deploySHA : ''}${runInfo}`;
+        } else {
+          badge.className = 'deploy-badge deploy-out';
+          badge.textContent = `OUT OF SYNC${runInfo}`;
+        }
+      } else {
+        badge.className = 'deploy-badge deploy-out';
+        badge.textContent = `PAGES ${pageRes.status}${runInfo}`;
+      }
+    } catch {
+      badge.className = 'deploy-badge deploy-unknown';
+      badge.textContent = `DEPLOY CHECK${deploySHA ? ' ' + deploySHA : ''}${runInfo}`;
+    }
+  } catch {
+    badge.className = 'deploy-badge deploy-unknown';
+    badge.textContent = 'DEPLOY ?';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. ORACLE INTENSITY MODE
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderIntensityPanel() {
+  // Activity heatmap: bucket predictions per minute for last 60 min
+  const now = Date.now();
+  const buckets = new Array(60).fill(0);
+  predictionsData.forEach(p => {
+    const age = now - new Date(p.timestamp).getTime();
+    const minAgo = Math.floor(age / 60000);
+    if (minAgo >= 0 && minAgo < 60) buckets[59 - minAgo]++;
+  });
+
+  const maxB = Math.max(...buckets, 1);
+  const row = document.getElementById('heatmap-row');
+  row.innerHTML = buckets.map(b => {
+    const norm = b / maxB;
+    const h = Math.max(4, norm * 28);
+    const bg = norm === 0 ? 'var(--surface2)' :
+      norm < 0.3 ? 'rgba(34,211,238,0.2)' :
+      norm < 0.7 ? 'rgba(34,211,238,0.5)' :
+      'rgba(251,146,60,0.7)';
+    return `<div class="heatmap-cell" style="height:${h}px;background:${bg};" title="${b} pred"></div>`;
+  }).join('');
+
+  // Signal entropy meter (from latest prediction's audit)
+  const latest = predictionsData.length > 0 ? predictionsData[predictionsData.length - 1] : null;
+  if (latest) {
+    const noise = latest._noise || 0;
+    const entropy = 1 - (latest._entropy_discount || 1);
+    const entPct = Math.min(100, Math.max(0, (noise + entropy) * 100));
+    const fill = document.getElementById('entropy-fill');
+    fill.style.width = entPct + '%';
+    fill.style.background = entPct < 30 ? 'var(--green)' : entPct < 60 ? 'var(--yellow)' : 'var(--red)';
+    document.getElementById('entropy-val').textContent = `noise=${fmt(noise,3)} entropy_d=${fmt(latest._entropy_discount||0,3)}`;
+  }
+
+  // Market pressure index
+  if (latest) {
+    const pressure = latest._total_pressure || 0;
+    const normP = Math.min(100, Math.max(0, Math.abs(pressure) * 30));
+    const fill = document.getElementById('pressure-fill');
+    fill.style.width = normP + '%';
+    fill.style.background = pressure > 0 ? 'var(--green)' : pressure < 0 ? 'var(--red)' : 'var(--purple)';
+    document.getElementById('pressure-val').textContent = `total_pressure=${fmt(pressure,3)} regime=${latest._regime}`;
+  }
+}
+
+function triggerRegimePulse(newRegime) {
+  const el = document.getElementById('regime-pulse');
+  el.classList.remove('active');
+  void el.offsetWidth; // force reflow
+  el.classList.add('active');
+  setTimeout(() => el.classList.remove('active'), 1600);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. PREDICTION VISIBILITY BOOST — Feed Ticker
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderFeedTicker(hasNew) {
+  const stream = document.getElementById('feed-stream');
+  const latest = [...predictionsData].reverse().slice(0, 12);
+
+  let html = '';
+  latest.forEach((p, i) => {
+    const dir = (p.prediction || '').toUpperCase();
+    const dc = dir === 'LONG' ? 'long' : dir === 'SHORT' ? 'short' : 'flat';
+    const glow = hasNew && i === 0 ? ' glow' : '';
+    const outcomeCls = p._verified ? (p._correct ? 'correct' : 'wrong') : 'pending';
+    const outcomeTxt = p._verified ? (p._correct ? 'WIN' : 'LOSS') : 'pending';
+
+    html += `<div class="feed-card${glow}">
+      <span class="fc-sym">${p.symbol || '—'}</span>
+      <span class="fc-dir ${dc}">${dir}</span>
+      <div class="fc-meta">c=${fmt(p.confidence,3)} ev=${fmt(p.ev,5)}</div>
+      <div class="fc-outcome ${outcomeCls}">${outcomeTxt}</div>
+    </div>`;
+  });
+  stream.innerHTML = html;
+
+  // Predictions per minute
+  const now = Date.now();
+  const recentCount = predictionsData.filter(p => now - new Date(p.timestamp).getTime() < 60000).length;
+  document.getElementById('pred-per-min').textContent = recentCount;
+
+  // Burst detection: >3 predictions in 5 min
+  const fiveMinAgo = now - 300000;
+  const fiveMinCount = predictionsData.filter(p => new Date(p.timestamp).getTime() > fiveMinAgo).length;
+  const burstEl = document.getElementById('burst-indicator');
+  if (fiveMinCount >= 3) {
+    burstEl.textContent = `BURST x${fiveMinCount}`;
+    burstEl.style.color = 'var(--orange)';
+  } else {
+    burstEl.textContent = '';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA ENRICHMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+function enrichPredictions(data) {
+  const sorted = [...data].sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp));
+  let cumPnl = 0, cumVerified = 0, cumCorrect = 0, cumEV = 0;
+
+  sorted.forEach((p, i) => {
+    const audit = p._audit || {};
+    const av = audit.action_vector || {};
+    const pipe = audit.pipeline || {};
+    const s1 = pipe.step1_market || {};
+    const s2 = pipe.step2_features || {};
+    const s3 = pipe.step3_risk || {};
+    const s4 = pipe.step4_ev || {};
+    const s5 = pipe.step5_feasibility || {};
+    const exec = audit.execution_state || {};
+
+    p._action = av.action || (p.prediction === 'FLAT' ? 'HOLD' : 'EXECUTE');
+    p._regime = s2.regime_hint || 'UNKNOWN';
+    p._conviction = s2.conviction || p.confidence || 0;
+    p._adjusted_ev = s4.adjusted_ev || p.ev || 0;
+    p._base_ev = s4.base_ev || p.ev || 0;
+    p._entropy_discount = s4.entropy_discount || 1;
+    p._survival_discount = s4.survival_discount || 1;
+    p._tradeable = s4.tradeable !== undefined ? s4.tradeable : true;
+    p._size = av.size || 0;
+    p._reason = av.reason || '';
+    p._side = av.side || p.prediction || '';
+    p._kelly = av.kelly || 0;
+    p._p_win = s4.p_win || 0;
+    p._vol_ref = s4.vol_ref || 0;
+    p._avg_win = s4.avg_win || 0;
+    p._avg_loss = s4.avg_loss || 0;
+    p._risk_score = s3.risk_score || 0;
+    p._risk_zone = s3.zone || 'UNKNOWN';
+    p._noise = s2.noise || 0;
+    p._agreement = s2.agreement || 0;
+    p._total_pressure = s2.total_pressure || 0;
+    p._liquidity_quality = s1.liquidity_quality || exec.liquidity_quality || 0;
+    p._slippage_bps = exec.slippage_bps || 0;
+    p._spread_bps = exec.spread_bps || 0;
+    p._feasible = s5.feasible !== undefined ? s5.feasible : true;
+    p._pressures = s2.pressures || {};
+    p._orderflow = s1.orderflow || 0;
+    p._volume_delta = s1.volume_delta || 0;
+    p._bidask = s1.bidask_imbalance || 0;
+    p._funding = s1.funding_signal || 0;
+    p._price_momentum = s1.price_momentum || 0;
+    p._volatility = s1.volatility || 0;
+
+    p._verified = p.outcome === 'CORRECT' || p.outcome === 'WRONG';
+    p._correct = p.outcome === 'CORRECT';
+    p._realized_return = 0;
+    if (p.price_15m_later && p.price_now) {
+      p._realized_return = (p.price_15m_later - p.price_now) / p.price_now;
+      if (p.prediction === 'SHORT') p._realized_return = -p._realized_return;
+    }
+
+    if (p._verified) { cumVerified++; if (p._correct) cumCorrect++; cumEV += p._adjusted_ev; }
+    if (p._verified && p._action === 'EXECUTE') cumPnl += p._realized_return * p._size;
+    p._cum_pnl = cumPnl;
+    p._cum_accuracy = cumVerified > 0 ? cumCorrect / cumVerified : null;
+    p._cum_ev_mean = cumVerified > 0 ? cumEV / cumVerified : null;
+
+    p._rolling_acc_10 = computeRolling(sorted, i, 10, '_correct', '_verified');
+    p._rolling_acc_50 = computeRolling(sorted, i, 50, '_correct', '_verified');
+    p._rolling_ev_50 = computeRollingAvg(sorted, i, 50, '_adjusted_ev', '_verified');
+    p._rolling_edge_quality = computeEdgeQuality(sorted, i, 50);
+
+    const ageMs = Date.now() - new Date(p.timestamp).getTime();
+    p._time_decay = Math.exp(-ageMs / (24 * 3600000 * Math.LN2));
+
+    if (p._verified) {
+      p._error = Math.abs(p.confidence - (p._correct ? 1 : 0));
+      p._calibration_error = p.confidence - (p._correct ? 1 : 0);
+    } else { p._error = null; p._calibration_error = null; }
+
+    const hourKey = new Date(new Date(p.timestamp).setMinutes(0,0,0)).toISOString();
+    p._hour_key = hourKey;
+  });
+
+  const hourMap = {};
+  sorted.forEach(p => { hourMap[p._hour_key] = (hourMap[p._hour_key] || 0) + 1; });
+  sorted.forEach(p => { p._signal_density = hourMap[p._hour_key] || 0; });
+  return sorted;
+}
+
+function computeRolling(d,i,w,vf,ff){let f=0,c=0;const s=Math.max(0,i-w+1);for(let j=s;j<=i;j++){if(d[j][ff]){f++;if(d[j][vf])c++;}}return f>0?c/f:null;}
+function computeRollingAvg(d,i,w,vf,ff){let s=0,c=0;const st=Math.max(0,i-w+1);for(let j=st;j<=i;j++){if(d[j][ff]){s+=d[j][vf]||0;c++;}}return c>0?s/c:null;}
+function computeEdgeQuality(d,i,w){let se=0,ss=0,sn=0,c=0;const st=Math.max(0,i-w+1);for(let j=st;j<=i;j++){if(d[j]._verified){se+=d[j]._adjusted_ev||0;ss+=(d[j]._slippage_bps||0)/10000;sn+=1-(d[j]._entropy_discount||1);c++;}}return c>0?se/c-ss/c-sn/c:null;}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FILTER ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+function populateFilters() {
+  const syms = [...new Set(predictionsData.map(p=>p.symbol).filter(Boolean))].sort();
+  const regs = [...new Set(predictionsData.map(p=>p._regime).filter(Boolean))].sort();
+  document.getElementById('filter-symbol').innerHTML = '<option value="ALL">ALL</option>' + syms.map(s=>`<option value="${s}">${s}</option>`).join('');
+  document.getElementById('filter-regime').innerHTML = '<option value="ALL">ALL</option>' + regs.map(r=>`<option value="${r}">${r}</option>`).join('');
+}
+
+function applyFilters(hasNew) {
+  const now = Date.now();
+  const zoomMs = zoomHours > 0 ? zoomHours * 3600000 : Infinity;
+
+  filteredData = predictionsData.filter(p => {
+    if (filters.symbol !== 'ALL' && p.symbol !== filters.symbol) return false;
+    if (filters.regime !== 'ALL' && p._regime !== filters.regime) return false;
+    if (filters.direction !== 'ALL' && p.prediction !== filters.direction) return false;
+    if (filters.action !== 'ALL' && p._action !== filters.action) return false;
+    if (filters.outcome !== 'ALL') {
+      if (filters.outcome === 'PROFIT' && !(p._verified && p._correct)) return false;
+      if (filters.outcome === 'FAILURE' && !(p._verified && !p._correct)) return false;
+      if (filters.outcome === 'HIGH_CONF' && (p.confidence || 0) < 0.6) return false;
+      if (filters.outcome === 'PENDING' && p._verified) return false;
+    }
+    if (zoomMs !== Infinity && new Date(p.timestamp).getTime() < now - zoomMs) return false;
+    return true;
+  });
+
+  const v = filteredData.filter(p=>p._verified).length;
+  const c = filteredData.filter(p=>p._correct).length;
+  document.getElementById('filter-stats').innerHTML = `<strong>${filteredData.length}</strong> &middot; <strong>${v}</strong> ver &middot; <strong>${c}</strong> ok`;
+
+  render(hasNew);
+}
+
+function setupFilterListeners() {
+  ['filter-symbol','filter-regime','filter-direction','filter-outcome'].forEach(id => {
+    document.getElementById(id).addEventListener('change', () => {
+      filters.symbol = document.getElementById('filter-symbol').value;
+      filters.regime = document.getElementById('filter-regime').value;
+      filters.direction = document.getElementById('filter-direction').value;
+      filters.outcome = document.getElementById('filter-outcome').value;
+      applyFilters(false);
+    });
+  });
+  document.querySelectorAll('#filter-action button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#filter-action button').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active'); filters.action = btn.dataset.val; applyFilters(false);
+    });
+  });
+  document.querySelectorAll('#view-toggle button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#view-toggle button').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active'); viewMode = btn.dataset.view; applyFilters(false);
+    });
+  });
+  // Zoom controls
+  document.querySelectorAll('#zoom-bar button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#zoom-bar button').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      zoomHours = parseInt(btn.dataset.zoom);
+      applyFilters(false);
+    });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FORMATTERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const fmt = (v,d=4) => v===null||v===undefined ? '—' : Number(v).toFixed(d);
+const fmtPct = v => v===null||v===undefined ? '—' : (Number(v)*100).toFixed(1)+'%';
+const fmtTs = iso => { if(!iso) return '—'; try { return new Date(iso).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}); } catch{return iso;} };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER ORCHESTRATOR
+// ═══════════════════════════════════════════════════════════════════════════
+
+function render(hasNew) {
+  if (!reportData) {
+    document.getElementById('health-panel').innerHTML = '<div class="empty-state" style="grid-column:1/-1"><p>Waiting for oracle data...</p></div>';
+    return;
+  }
   destroyCharts();
-  const grid = document.getElementById('charts-grid');
-  grid.innerHTML = '';
 
-  // 1) Confusion Matrix Heatmap (if available)
-  if (cls.confusion_matrix) {
-    const card = createChartCard('Confusion Matrix');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawConfusionMatrix(ctx, cls.confusion_matrix);
-  }
+  // Time cursor
+  document.getElementById('time-cursor').textContent = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) + ' UTC';
 
-  // 2) ECE Calibration (if available)
-  if (prob.ece && prob.ece.bins && prob.ece.bins.length > 0) {
-    const card = createChartCard('Calibration — ECE');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawCalibration(ctx, prob.ece);
-  }
-
-  // 3) EV by Confidence Bucket
-  if (ev.by_confidence_bucket && ev.by_confidence_bucket.buckets && ev.by_confidence_bucket.buckets.length > 0) {
-    const card = createChartCard('EV by Confidence Bucket');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawEVByBucket(ctx, ev.by_confidence_bucket.buckets);
-  }
-
-  // 4) EV by Regime
-  if (ev.by_regime && ev.by_regime.regimes && ev.by_regime.regimes.length > 0) {
-    const card = createChartCard('EV by Market Regime');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawEVByRegime(ctx, ev.by_regime.regimes);
-  }
-
-  // 5) EV by Symbol
-  if (ev.by_symbol && ev.by_symbol.symbols && ev.by_symbol.symbols.length > 0) {
-    const card = createChartCard('EV by Symbol');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawEVBySymbol(ctx, ev.by_symbol.symbols);
-  }
-
-  // 6) Prediction Timeline (always available from raw predictions)
-  if (predictionsData.length > 0) {
-    const card = createChartCard('Prediction Timeline');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawTimeline(ctx);
-  }
-
-  // 7) Confidence Distribution (always available from raw predictions)
-  if (predictionsData.length > 0) {
-    const card = createChartCard('Confidence Distribution');
-    grid.appendChild(card);
-    const ctx = card.querySelector('canvas').getContext('2d');
-    drawConfidenceDist(ctx);
-  }
-
-  // No-data charts
-  if (!hasVerified && predictionsData.length <= 4) {
-    const card = document.createElement('div');
-    card.className = 'chart-card';
-    card.style.gridColumn = '1 / -1';
-    card.innerHTML = `
-      <div class="empty-state">
-        <div class="icon">📊</div>
-        <p>Charts will populate as verified predictions accumulate.<br>
-        Current: ${meta.total_predictions || 0} predictions, ${meta.verified || 0} verified.</p>
-      </div>`;
-    grid.appendChild(card);
-  }
+  renderFeedTicker(hasNew);
+  renderIntensityPanel();
+  renderHealthPanel();
+  renderTimeline();
+  renderCausalityGraph();
+  renderIntelligenceCharts(hasNew);
+  renderStatsCharts();
+  renderSignalRankings(reportData.signal_rankings || {});
+  renderPredictionsTable(hasNew);
 }
 
-function createChartCard(title) {
+function destroyCharts() { chartInstances.forEach(c=>{try{c.destroy();}catch{}}); chartInstances.length=0; }
+
+function createChartCard(parent,title,dotColor) {
   const card = document.createElement('div');
   card.className = 'chart-card';
-  card.innerHTML = `<h3>${title}</h3><div class="chart-wrap"><canvas></canvas></div>`;
+  card.innerHTML = `<h3><span class="dot" style="background:${dotColor||'var(--accent)'}"></span>${title}</h3><div class="chart-wrap"><canvas></canvas></div>`;
+  parent.appendChild(card);
   return card;
 }
 
-// ─── Chart: Confusion Matrix ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// HEALTH PANEL
+// ═══════════════════════════════════════════════════════════════════════════
 
-function drawConfusionMatrix(ctx, cm) {
-  const labels = ['LONG', 'SHORT'];
-  const data = {
-    labels: labels,
-    datasets: [{
-      label: 'Predicted LONG',
-      data: [{ x: 'LONG', y: 'LONG', v: cm[0][0] }, { x: 'LONG', y: 'SHORT', v: cm[0][1] }],
-      backgroundColor: ctx2 => {
-        // simple heat — just use a matrix bar chart
-      }
-    }]
-  };
+function renderHealthPanel() {
+  const verified = filteredData.filter(p=>p._verified);
+  const n = verified.length;
+  const correct = verified.filter(p=>p._correct).length;
+  const accuracy = n > 0 ? correct / n : null;
+  const recentVerified = verified.slice(-5);
+  const recentAcc = recentVerified.length > 0 ? recentVerified.filter(p=>p._correct).length / recentVerified.length : null;
+  const drift = (accuracy !== null && recentAcc !== null) ? Math.abs(recentAcc - accuracy) : null;
+  const calEntropy = n > 0 ? verified.reduce((s,p) => s + (p._error || 0), 0) / n : null;
+  const half = Math.floor(n / 2);
+  const earlyEV = half > 0 ? verified.slice(0, half).reduce((s,p)=>s+(p._adjusted_ev||0),0)/half : null;
+  const lateEV = half > 0 ? verified.slice(half).reduce((s,p)=>s+(p._adjusted_ev||0),0)/Math.max(1,n-half) : null;
+  const edgeDeg = (earlyEV !== null && lateEV !== null) ? lateEV - earlyEV : null;
+  const highConf = verified.filter(p=>p.confidence > 0.6);
+  const fcr = highConf.length > 0 ? highConf.filter(p=>!p._correct).length / highConf.length : null;
+  const friction = n > 0 ? verified.reduce((s,p) => s + (p._slippage_bps||0)/10000 + (p._spread_bps||0)/10000, 0) / n : null;
 
-  // Use grouped bar chart for confusion matrix
-  const chart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: ['Actual LONG', 'Actual SHORT'],
-      datasets: [
-        { label: 'Predicted LONG', data: [cm[0][0], cm[0][1]], backgroundColor: 'rgba(34,211,238,0.7)', borderColor: 'rgba(34,211,238,1)', borderWidth: 1 },
-        { label: 'Predicted SHORT', data: [cm[1][0], cm[1][1]], backgroundColor: 'rgba(167,139,250,0.7)', borderColor: 'rgba(167,139,250,1)', borderWidth: 1 }
-      ]
-    },
-    options: chartOptions('Count')
-  });
-  chartInstances.push(chart);
-}
+  const metrics = [
+    {label:'Model Drift',value:drift!==null?fmt(drift,3):'—',cls:drift>0.15?'crit':drift>0.08?'warn':'ok',delta:drift>0.1?'diverging':'stable',color:drift>0.15?'var(--red)':drift>0.08?'var(--yellow)':'var(--green)'},
+    {label:'Cal Entropy',value:calEntropy!==null?fmt(calEntropy,3):'—',cls:calEntropy>0.35?'crit':calEntropy>0.2?'warn':'ok',delta:calEntropy>0.3?'overconfident':'ok',color:calEntropy>0.35?'var(--red)':calEntropy>0.2?'var(--yellow)':'var(--green)'},
+    {label:'Edge Degradation',value:edgeDeg!==null?fmt(edgeDeg,6):'—',cls:edgeDeg<-0.001?'crit':edgeDeg<0?'warn':'ok',delta:edgeDeg<0?'declining':'intact',color:edgeDeg<-0.001?'var(--red)':edgeDeg<0?'var(--yellow)':'var(--green)'},
+    {label:'False Confidence',value:fcr!==null?fmtPct(fcr):'—',cls:fcr>0.5?'crit':fcr>0.3?'warn':'ok',delta:fcr>0.5?'dangerous':'monitor',color:fcr>0.5?'var(--red)':fcr>0.3?'var(--yellow)':'var(--green)'},
+    {label:'Exec Friction',value:friction!==null?fmt(friction,6):'—',cls:friction>0.002?'warn':'ok',delta:friction>0.002?'elevated':'normal',color:friction>0.002?'var(--yellow)':'var(--green)'},
+    {label:'Cum PnL',value:verified.length>0?fmt(verified[verified.length-1]._cum_pnl,6):'—',cls:'',delta:'running',color:'var(--accent)'},
+  ];
 
-// ─── Chart: Calibration (ECE) ────────────────────────────────────────────
-
-function drawCalibration(ctx, ece) {
-  const bins = ece.bins;
-  const labels = bins.map(b => b.range || b.bucket || '');
-  const perfect = bins.map(b => b.midpoint || b.range_val || 0);
-  const actual = bins.map(b => b.accuracy || b.empirical || 0);
-
-  const chart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: labels,
-      datasets: [
-        { label: 'Perfect Calibration', data: perfect, borderColor: 'rgba(148,163,184,0.5)', borderDash: [6,4], pointRadius: 0, borderWidth: 2, fill: false },
-        { label: 'Actual', data: actual, borderColor: '#22d3ee', backgroundColor: 'rgba(34,211,238,0.1)', borderWidth: 2, fill: true, tension: 0.3, pointBackgroundColor: '#22d3ee' }
-      ]
-    },
-    options: chartOptions('Accuracy', true, 0, 1)
-  });
-  chartInstances.push(chart);
-}
-
-// ─── Chart: EV by Bucket ─────────────────────────────────────────────────
-
-function drawEVByBucket(ctx, buckets) {
-  const labels = buckets.map(b => b.bucket || b.range || '');
-  const values = buckets.map(b => b.avg_ev || b.ev || 0);
-  const colors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.7)' : 'rgba(248,113,113,0.7)');
-  const borders = values.map(v => v >= 0 ? '#34d399' : '#f87171');
-
-  const chart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ label: 'Avg EV', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
-    },
-    options: chartOptions('Expected Value')
-  });
-  chartInstances.push(chart);
-}
-
-// ─── Chart: EV by Regime ─────────────────────────────────────────────────
-
-function drawEVByRegime(ctx, regimes) {
-  const labels = regimes.map(r => r.regime || r.name || '');
-  const values = regimes.map(r => r.avg_ev || r.ev || 0);
-  const colors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.7)' : 'rgba(248,113,113,0.7)');
-  const borders = values.map(v => v >= 0 ? '#34d399' : '#f87171');
-
-  const chart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ label: 'Avg EV', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
-    },
-    options: chartOptions('Expected Value')
-  });
-  chartInstances.push(chart);
-}
-
-// ─── Chart: EV by Symbol ─────────────────────────────────────────────────
-
-function drawEVBySymbol(ctx, symbols) {
-  const labels = symbols.map(s => s.symbol || s.name || '');
-  const values = symbols.map(s => s.avg_ev || s.ev || 0);
-  const colors = values.map(v => v >= 0 ? 'rgba(52,211,153,0.7)' : 'rgba(248,113,113,0.7)');
-  const borders = values.map(v => v >= 0 ? '#34d399' : '#f87171');
-
-  const chart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ label: 'Avg EV', data: values, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
-    },
-    options: chartOptions('Expected Value')
-  });
-  chartInstances.push(chart);
-}
-
-// ─── Chart: Prediction Timeline ──────────────────────────────────────────
-
-function drawTimeline(ctx) {
-  const sorted = [...predictionsData].sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp));
-  const labels = sorted.map(p => fmtDate(p.timestamp));
-  const evs = sorted.map(p => p.ev || 0);
-  const confs = sorted.map(p => p.confidence || 0);
-
-  const chart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Confidence',
-          data: confs,
-          borderColor: '#22d3ee',
-          backgroundColor: 'rgba(34,211,238,0.1)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.3,
-          pointRadius: 3,
-          pointBackgroundColor: '#22d3ee',
-          yAxisID: 'y'
-        },
-        {
-          label: 'EV',
-          data: evs,
-          borderColor: '#a78bfa',
-          backgroundColor: 'rgba(167,139,250,0.1)',
-          borderWidth: 2,
-          fill: false,
-          tension: 0.3,
-          pointRadius: 3,
-          pointBackgroundColor: '#a78bfa',
-          yAxisID: 'y1'
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: true,
-      aspectRatio: 2,
-      interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
-      scales: {
-        x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(30,45,61,0.5)' } },
-        y: { type: 'linear', position: 'left', title: { display: true, text: 'Confidence', color: '#22d3ee' }, ticks: { color: '#22d3ee' }, grid: { color: 'rgba(30,45,61,0.5)' }, min: 0, max: 1 },
-        y1: { type: 'linear', position: 'right', title: { display: true, text: 'EV', color: '#a78bfa' }, ticks: { color: '#a78bfa' }, grid: { drawOnChartArea: false } }
-      }
-    }
-  });
-  chartInstances.push(chart);
-}
-
-// ─── Chart: Confidence Distribution ───────────────────────────────────────
-
-function drawConfidenceDist(ctx) {
-  // Histogram of confidence values
-  const bins = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-  const counts = new Array(bins.length - 1).fill(0);
-  const labels = bins.slice(0, -1).map((b, i) => `${b.toFixed(1)}-${bins[i+1].toFixed(1)}`);
-
-  predictionsData.forEach(p => {
-    const c = p.confidence || 0;
-    for (let i = 0; i < bins.length - 1; i++) {
-      if (c >= bins[i] && c < bins[i+1]) { counts[i]++; break; }
-      if (i === bins.length - 2 && c === bins[i+1]) { counts[i]++; }
-    }
-  });
-
-  const colors = counts.map((_, i) => {
-    const mid = (bins[i] + bins[i+1]) / 2;
-    return mid >= 0.6 ? 'rgba(34,211,238,0.7)' : mid >= 0.4 ? 'rgba(251,191,36,0.7)' : 'rgba(148,163,184,0.4)';
-  });
-  const borders = counts.map((_, i) => {
-    const mid = (bins[i] + bins[i+1]) / 2;
-    return mid >= 0.6 ? '#22d3ee' : mid >= 0.4 ? '#fbbf24' : '#94a3b8';
-  });
-
-  const chart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ label: 'Count', data: counts, backgroundColor: colors, borderColor: borders, borderWidth: 1 }]
-    },
-    options: chartOptions('Count')
-  });
-  chartInstances.push(chart);
-}
-
-// ─── Shared Chart Options ─────────────────────────────────────────────────
-
-function chartOptions(yLabel, isPercent = false, yMin = undefined, yMax = undefined) {
-  return {
-    responsive: true,
-    maintainAspectRatio: true,
-    aspectRatio: 2,
-    plugins: {
-      legend: { labels: { color: '#94a3b8', font: { size: 11 } } }
-    },
-    scales: {
-      x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(30,45,61,0.5)' } },
-      y: {
-        title: { display: true, text: yLabel, color: '#94a3b8' },
-        ticks: {
-          color: '#94a3b8',
-          callback: isPercent ? v => (v * 100).toFixed(0) + '%' : undefined
-        },
-        grid: { color: 'rgba(30,45,61,0.5)' },
-        min: yMin,
-        max: yMax
-      }
-    }
-  };
-}
-
-// ─── Signal Rankings Table ───────────────────────────────────────────────
-
-function renderSignalRankings(signals) {
-  const container = document.getElementById('signal-rankings');
-  const predictive = signals.most_predictive || [];
-  const destructive = signals.most_destructive || [];
-
-  if (predictive.length === 0 && destructive.length === 0) {
-    container.innerHTML = `
-      <h3>Signal Rankings</h3>
-      <div class="empty-state">
-        <p>Signal rankings will appear once verified directional predictions accumulate.</p>
-      </div>`;
-    return;
-  }
-
-  let html = '<h3>Signal Rankings</h3><table><thead><tr><th>Signal</th><th>Type</th><th>Correlation</th><th>n</th></tr></thead><tbody>';
-
-  predictive.forEach(s => {
-    html += `<tr><td>${s.signal || s.name}</td><td><span class="tag tag-long">PREDICTIVE</span></td><td class="green">${fmt(s.correlation || s.value)}</td><td>${s.count || '—'}</td></tr>`;
-  });
-
-  destructive.forEach(s => {
-    html += `<tr><td>${s.signal || s.name}</td><td><span class="tag tag-short">DESTRUCTIVE</span></td><td class="red">${fmt(s.correlation || s.value)}</td><td>${s.count || '—'}</td></tr>`;
-  });
-
-  html += '</tbody></table>';
-  container.innerHTML = html;
-}
-
-// ─── Predictions Table ────────────────────────────────────────────────────
-
-function renderPredictionsTable() {
-  const container = document.getElementById('predictions-table');
-
-  if (predictionsData.length === 0) {
-    container.innerHTML = `
-      <h3>Recent Predictions</h3>
-      <div class="empty-state">
-        <p>No predictions recorded yet.</p>
-      </div>`;
-    return;
-  }
-
-  // Show latest 50, reverse chronological
-  const recent = [...predictionsData].reverse().slice(0, 50);
-
-  let html = `<h3>Recent Predictions <span style="color:var(--text-dim);font-weight:400;font-size:0.75rem;">(${predictionsData.length} total, showing latest 50)</span></h3>`;
-  html += '<table><thead><tr><th>Time</th><th>Symbol</th><th>Direction</th><th>Confidence</th><th>EV</th><th>Price</th><th>Outcome</th></tr></thead><tbody>';
-
-  recent.forEach(p => {
-    const dir = (p.prediction || '').toUpperCase();
-    const tagClass = dir === 'LONG' ? 'tag-long' : dir === 'SHORT' ? 'tag-short' : 'tag-flat';
-    const outcome = p.outcome !== null ? (p.outcome ? '<span class="green">WIN</span>' : '<span class="red">LOSS</span>') : '<span style="color:var(--text-dim)">pending</span>';
-    const evColor = (p.ev || 0) >= 0 ? 'green' : 'red';
-
-    html += `<tr>
-      <td>${fmtDate(p.timestamp)}</td>
-      <td>${p.symbol || '—'}</td>
-      <td><span class="tag ${tagClass}">${dir}</span></td>
-      <td>${fmt(p.confidence || 0)}</td>
-      <td class="${evColor}">${fmt(p.ev || 0)}</td>
-      <td>${p.price_now ? Number(p.price_now).toFixed(2) : '—'}</td>
-      <td>${outcome}</td>
-    </tr>`;
-  });
-
-  html += '</tbody></table>';
-  container.innerHTML = html;
+  document.getElementById('health-panel').innerHTML = metrics.map(m=>`
+    <div class="health-card ${m.cls}">
+      <div class="health-label">${m.label}</div>
+      <div class="health-value" style="color:${m.color}">${m.value}</div>
+      <div class="health-delta ${m.delta==='stable'||m.delta==='ok'||m.delta==='intact'||m.delta==='normal'||m.delta==='monitor'||m.delta==='running'?'flat':'down'}">${m.delta}</div>
+    </div>`).join('');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// INIT
+// TIMELINE
 // ═══════════════════════════════════════════════════════════════════════════
 
-loadData();
+function renderTimeline() {
+  const track = document.getElementById('timeline-track');
+  const data = filteredData;
+  if (data.length === 0) { track.innerHTML = '<div class="empty-state"><p>No predictions match.</p></div>'; return; }
 
-// Auto-refresh every 5 min
-setInterval(loadData, 5 * 60 * 1000);
+  let html = '';
+  data.forEach((p, i) => {
+    if (i > 0) html += `<div class="tl-connector active"></div>`;
+    const dir = (p.prediction||'').toUpperCase();
+    const dotCls = p._verified ? (p._correct ? 'correct' : 'wrong') : 'pending';
+    html += `<div class="tl-node" data-idx="${i}" onclick="selectPrediction(${i})" title="${p.symbol} ${dir} c=${fmt(p.confidence)}">
+      <div class="tl-dot ${dotCls}"></div>
+      <div class="tl-dir ${dir.toLowerCase()}">${dir}</div>
+      <div class="tl-label">${fmtTs(p.timestamp).split(',')[0]||''}</div>
+    </div>`;
+  });
+  track.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CAUSALITY GRAPH
+// ═══════════════════════════════════════════════════════════════════════════
+
+function selectPrediction(idx) {
+  selectedPrediction = filteredData[idx];
+  renderCausalityGraph();
+  renderPredictionsTable(false);
+  openForensicModal(selectedPrediction);
+}
+
+function renderCausalityGraph() {
+  const p = selectedPrediction;
+  const label = document.getElementById('causality-pred-label');
+  const canvas = document.getElementById('causality-canvas');
+  const ctx = canvas.getContext('2d');
+  if (!p) { label.textContent = 'click a prediction'; ctx.clearRect(0,0,canvas.width,canvas.height); return; }
+
+  label.textContent = `${p.symbol} ${p.prediction} @ ${fmtTs(p.timestamp)}`;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr;
+  canvas.height = 220 * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = 220;
+
+  const pipe = (p._audit||{}).pipeline||{};
+  const s1=pipe.step1_market||{}, s2=pipe.step2_features||{}, s3=pipe.step3_risk||{}, s4=pipe.step4_ev||{}, s5=pipe.step5_feasibility||{};
+
+  const nodes = [
+    {label:'MARKET',x:70,y:45,data:[`p=${fmt(s1.price||p.price_now,2)}`,`vol=${fmt(s1.volatility,5)}`,`liq=${fmt(s1.liquidity_quality,3)}`],status:s1.liquidity_quality>0.99?'pass':'warn'},
+    {label:'FEATURES',x:200,y:45,data:[`dir=${s2.direction||p.prediction}`,`conv=${fmt(s2.conviction)}`,`reg=${s2.regime_hint||p._regime}`],status:'pass'},
+    {label:'CONVICT',x:330,y:45,data:[`noise=${fmt(s2.noise,3)}`,`agreement=${fmt(s2.agreement,2)}`,`press=${fmt(s2.total_pressure,3)}`],status:s2.noise<0.5?'pass':'warn'},
+    {label:'EV',x:460,y:45,data:[`base=${fmt(s4.base_ev,6)}`,`adj=${fmt(s4.adjusted_ev,6)}`,`ent_d=${fmt(s4.entropy_discount,3)}`],status:s4.adjusted_ev>0?'pass':'fail'},
+    {label:'RISK',x:590,y:45,data:[`zone=${s3.zone||p._risk_zone}`,`risk=${fmt(s3.risk_score,2)}`,`dd=${fmt(s3.dd_ratio,2)}`],status:s3.zone==='SAFE'?'pass':'fail'},
+    {label:'ACTION',x:720,y:45,data:[`${p._action} ${p._side||''}`,`size=${fmt(p._size,4)}`,`kelly=${fmt(p._kelly,3)}`],status:p._action==='EXECUTE'?'pass':'warn'},
+  ];
+
+  const scale = W < 800 ? W / 800 : 1;
+  nodes.forEach(n => n.x *= scale);
+
+  const outcomeY = 175;
+  const oNode = {
+    label:'OUTCOME', x:W/2, y:outcomeY,
+    data: p._verified ? [p._correct?'CORRECT':'WRONG',`ret=${fmt(p._realized_return,5)}`,`pnl=${fmt(p._cum_pnl,5)}`] : ['PENDING','awaiting',''],
+    status: p._verified ? (p._correct?'pass':'fail') : 'warn'
+  };
+
+  ctx.clearRect(0,0,W,H);
+  const sc = {pass:'#34d399',fail:'#f87171',warn:'#fbbf24'};
+
+  // Edges
+  ctx.strokeStyle='#1a2640'; ctx.lineWidth=1.5;
+  for(let i=0;i<nodes.length-1;i++){ctx.beginPath();ctx.moveTo(nodes[i].x+25,nodes[i].y);ctx.lineTo(nodes[i+1].x-25,nodes[i+1].y);ctx.stroke();}
+  ctx.beginPath();ctx.moveTo(nodes[nodes.length-1].x,nodes[nodes.length-1].y+20);ctx.quadraticCurveTo(nodes[nodes.length-1].x,outcomeY-30,oNode.x,oNode.y-20);ctx.strokeStyle=sc[oNode.status]+'66';ctx.lineWidth=2;ctx.stroke();
+
+  // Nodes
+  nodes.forEach(n=>{
+    const c=sc[n.status]||'#22d3ee';
+    ctx.beginPath();ctx.arc(n.x,n.y,13,0,Math.PI*2);ctx.fillStyle=c+'22';ctx.fill();ctx.strokeStyle=c;ctx.lineWidth=2;ctx.stroke();
+    ctx.fillStyle=c;ctx.font='600 7px Inter,sans-serif';ctx.textAlign='center';ctx.fillText(n.label,n.x,n.y-20);
+    ctx.fillStyle='#94a3b8';ctx.font='8px SF Mono,monospace';n.data.forEach((l,li)=>ctx.fillText(l,n.x,n.y+22+li*11));
+  });
+
+  const oc=sc[oNode.status]||'#22d3ee';
+  ctx.beginPath();ctx.arc(oNode.x,oNode.y,16,0,Math.PI*2);ctx.fillStyle=oc+'33';ctx.fill();ctx.strokeStyle=oc;ctx.lineWidth=2.5;ctx.stroke();
+  ctx.fillStyle=oc;ctx.font='700 8px Inter,sans-serif';ctx.textAlign='center';ctx.fillText(oNode.label,oNode.x,oNode.y-24);
+  ctx.font='8px SF Mono,monospace';ctx.fillStyle='#94a3b8';oNode.data.forEach((l,li)=>ctx.fillText(l,oNode.x,oNode.y+26+li*11));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LINE INTELLIGENCE CHARTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderIntelligenceCharts(hasNew) {
+  const grid = document.getElementById('intelligence-charts');
+  grid.innerHTML = '';
+  const verified = filteredData.filter(p=>p._verified);
+  const hasData = filteredData.length > 0;
+
+  if (hasData) { const c = createChartCard(grid,'Cumulative PnL Curve','var(--accent)'); if(hasNew) c.classList.add('new-point-flash'); drawCumPnL(c.querySelector('canvas').getContext('2d')); }
+  if (verified.length > 1) { const c = createChartCard(grid,'Rolling Edge Quality (EV-Slippage-Entropy)','var(--teal)'); drawEdgeQuality(c.querySelector('canvas').getContext('2d')); }
+  if (verified.length > 1) { const c = createChartCard(grid,'Confidence vs Hit Rate Divergence','var(--purple)'); drawConfDivergence(c.querySelector('canvas').getContext('2d')); }
+  if (hasData) { const c = createChartCard(grid,'Regime Transition Overlay','var(--teal)'); c.classList.add('span-2'); drawRegimeOverlay(c.querySelector('canvas').getContext('2d')); }
+  if (hasData) { drawDensityHeatline(createChartCard(grid,'Signal Density Heatline','var(--orange)').querySelector('canvas').getContext('2d')); }
+  if (verified.length > 0) { drawErrorPropagation(createChartCard(grid,'Error Propagation (Confidence-Outcome)','var(--red)').querySelector('canvas').getContext('2d')); }
+}
+
+function drawCumPnL(ctx){const d=filteredData;const labels=d.map(p=>fmtTs(p.timestamp));const pnl=d.map(p=>p._cum_pnl||0);const lc=pnl[pnl.length-1]>=0?'#34d399':'#f87171';const ch=new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Cum PnL',data:pnl,borderColor:lc,backgroundColor:lc+'22',borderWidth:2,fill:true,tension:0.3,pointRadius:d.map(p=>p._verified?4:2),pointBackgroundColor:d.map(p=>p._correct?'#34d399':p._verified?'#f87171':'#94a3b8')}]},options:chartOpts('PnL')});chartInstances.push(ch);}
+function drawEdgeQuality(ctx){const v=filteredData.filter(p=>p._verified);if(v.length<2)return;const labels=v.map(p=>fmtTs(p.timestamp));const eq=v.map(p=>p._rolling_edge_quality||0);const ae=v.map(p=>p._adjusted_ev||0);const ch=new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Edge Quality',data:eq,borderColor:'#2dd4bf',borderWidth:2,fill:true,backgroundColor:'rgba(45,212,191,0.08)',tension:0.3,pointRadius:3},{label:'Adj EV',data:ae,borderColor:'#a78bfa',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.3,pointRadius:2},{label:'Zero',data:v.map(()=>0),borderColor:'rgba(148,163,184,0.2)',borderWidth:1,borderDash:[6,4],pointRadius:0,fill:false}]},options:chartOpts('Value')});chartInstances.push(ch);}
+function drawConfDivergence(ctx){const v=filteredData.filter(p=>p._verified);if(v.length<2)return;const labels=v.map(p=>fmtTs(p.timestamp));const conf=v.map(p=>p.confidence||0);const hr=v.map(p=>p._rolling_acc_10||0);const div=conf.map((c,i)=>c-(hr[i]||0));const ch=new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Confidence',data:conf,borderColor:'#22d3ee',borderWidth:2,fill:false,tension:0.3,pointRadius:3},{label:'Hit Rate (n=10)',data:hr,borderColor:'#34d399',borderWidth:2,fill:false,tension:0.3,pointRadius:3},{label:'Divergence',data:div,borderColor:'#f87171',backgroundColor:'rgba(248,113,113,0.08)',borderWidth:1.5,fill:true,tension:0.3,pointRadius:2}]},options:chartOpts('Rate',true,0,1)});chartInstances.push(ch);}
+
+function drawRegimeOverlay(ctx){
+  const d=filteredData;if(d.length<2)return;
+  const labels=d.map(p=>fmtTs(p.timestamp));const prices=d.map(p=>p.price_now||0);
+  const rm={TRENDING:1,RANGING:0.5,VOLATILE:0,BREAKOUT:0.8,UNKNOWN:-0.5};
+  const regimes=d.map(p=>rm[p._regime]||-0.5);
+  const ch=new Chart(ctx,{type:'line',data:{labels,datasets:[
+    {label:'Price',data:prices,borderColor:'#e2e8f0',borderWidth:2,fill:false,tension:0.2,pointRadius:2,yAxisID:'y'},
+    {label:'Regime',data:regimes,borderColor:'#2dd4bf',backgroundColor:'rgba(45,212,191,0.08)',borderWidth:1.5,fill:true,tension:0,stepped:'before',pointRadius:3,pointBackgroundColor:d.map(p=>p._regime==='TRENDING'?'#34d399':p._regime==='VOLATILE'?'#f87171':'#2dd4bf'),yAxisID:'y1'},
+  ]},options:{responsive:true,maintainAspectRatio:true,aspectRatio:2.5,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#94a3b8',font:{size:10},boxWidth:10}},tooltip:{callbacks:{afterBody:(items)=>{const idx=items[0].dataIndex;const p=d[idx];return[`Regime: ${p._regime}`,`Action: ${p._action}`,`Conv: ${fmt(p.confidence)}`];}}}},scales:{x:{ticks:{color:'#64748b',font:{size:8}},grid:{color:'rgba(26,38,64,0.3)'}},y:{type:'linear',position:'left',title:{display:true,text:'Price',color:'#e2e8f0'},ticks:{color:'#e2e8f0',font:{size:9}},grid:{color:'rgba(26,38,64,0.3)'}},y1:{type:'linear',position:'right',title:{display:true,text:'Regime',color:'#2dd4bf'},ticks:{color:'#2dd4bf',font:{size:9},callback:v=>['VOL','RANG','TREND'][Math.round(v+1)]||''},grid:{drawOnChartArea:false},min:-1,max:1.5}}}});chartInstances.push(ch);
+}
+
+function drawDensityHeatline(ctx){const d=filteredData;const labels=d.map(p=>fmtTs(p.timestamp));const dens=d.map(p=>p._signal_density||0);const mx=Math.max(...dens,1);const bg=dens.map(d=>{const n=d/mx;return`rgba(${Math.round(251*n+17*(1-n))},${Math.round(146*(1-n)+200*n)},${Math.round(60*(1-n)+220*n)},0.7)`;});const ch=new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Signals/Hr',data:dens,backgroundColor:bg,borderWidth:0}]},options:chartOpts('Density')});chartInstances.push(ch);}
+function drawErrorPropagation(ctx){const v=filteredData.filter(p=>p._verified);if(!v.length)return;const labels=v.map(p=>fmtTs(p.timestamp));const errs=v.map(p=>p._calibration_error||0);const ch=new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Cal Error',data:errs,borderColor:'#f87171',backgroundColor:errs.map(e=>e>0?'rgba(248,113,113,0.15)':'rgba(52,211,153,0.15)'),borderWidth:2,fill:true,tension:0.3,pointRadius:5,pointBackgroundColor:errs.map(e=>e>0?'#f87171':'#34d399')},{label:'Zero',data:v.map(()=>0),borderColor:'rgba(148,163,184,0.3)',borderWidth:1,borderDash:[6,4],pointRadius:0,fill:false}]},options:chartOpts('Error (signed)')});chartInstances.push(ch);}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATS CHARTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderStatsCharts(){
+  const grid=document.getElementById('stats-charts');grid.innerHTML='';
+  const cls=reportData.classification||{};const prob=reportData.probabilistic||{};const ev=reportData.ev_analysis||{};
+  if(cls.confusion_matrix) drawConfusionMatrix(createChartCard(grid,'Confusion Matrix','var(--accent)').querySelector('canvas').getContext('2d'),cls.confusion_matrix);
+  if(prob.ece?.bins?.length>0) drawCalibration(createChartCard(grid,'ECE Calibration','var(--purple)').querySelector('canvas').getContext('2d'),prob.ece);
+  if(ev.by_confidence_bucket?.buckets?.length>0) drawEVByBucket(createChartCard(grid,'EV by Confidence','var(--green)').querySelector('canvas').getContext('2d'),ev.by_confidence_bucket.buckets);
+  if(ev.by_regime?.regimes?.length>0) drawEVByRegime(createChartCard(grid,'EV by Regime','var(--teal)').querySelector('canvas').getContext('2d'),ev.by_regime.regimes);
+  if(filteredData.filter(p=>p._verified).length>1) drawRollingAcc(createChartCard(grid,'Rolling Accuracy','var(--blue)').querySelector('canvas').getContext('2d'));
+  if(filteredData.length>0) drawConfDist(createChartCard(grid,'Confidence Dist','var(--orange)').querySelector('canvas').getContext('2d'));
+}
+
+function drawConfusionMatrix(ctx,cm){const d=cm.predicted_long_actual_up!==undefined?{lu:cm.predicted_long_actual_up,ld:cm.predicted_long_actual_down,sd:cm.predicted_short_actual_down,su:cm.predicted_short_actual_up}:{lu:0,ld:0,sd:0,su:0};const ch=new Chart(ctx,{type:'bar',data:{labels:['Actual UP','Actual DOWN'],datasets:[{label:'Pred LONG',data:[d.lu,d.ld],backgroundColor:'rgba(34,211,238,0.6)',borderColor:'#22d3ee',borderWidth:1},{label:'Pred SHORT',data:[d.su,d.sd],backgroundColor:'rgba(167,139,250,0.6)',borderColor:'#a78bfa',borderWidth:1}]},options:chartOpts('Count')});chartInstances.push(ch);}
+function drawCalibration(ctx,ece){const bins=ece.bins;const labels=bins.map(b=>b.range||'');const mp=bins.map(b=>{const n=(b.range||'').match(/[\d.]+/g);return n?.length>=2?(parseFloat(n[0])+parseFloat(n[1]))/2:b.avg_confidence||0;});const ch=new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Perfect',data:mp,borderColor:'rgba(148,163,184,0.4)',borderDash:[6,4],pointRadius:0,borderWidth:1.5,fill:false},{label:'Actual',data:bins.map(b=>b.accuracy||0),borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,0.1)',borderWidth:2,fill:true,tension:0.3,pointRadius:5,pointBackgroundColor:'#a78bfa'}]},options:chartOpts('Accuracy',true,0,1)});chartInstances.push(ch);}
+function drawEVByBucket(ctx,bk){const ch=new Chart(ctx,{type:'bar',data:{labels:bk.map(b=>b.bucket||''),datasets:[{label:'Model EV',data:bk.map(b=>b.avg_model_ev||0),backgroundColor:'rgba(96,165,250,0.5)',borderColor:'#60a5fa',borderWidth:1},{label:'Realized EV',data:bk.map(b=>b.avg_realized_ev||0),backgroundColor:bk.map(b=>(b.avg_realized_ev||0)>=0?'rgba(52,211,153,0.5)':'rgba(248,113,113,0.5)'),borderWidth:1}]},options:chartOpts('EV')});chartInstances.push(ch);}
+function drawEVByRegime(ctx,rg){const vals=rg.map(r=>r.avg_realized_ev||r.avg_ev||0);const ch=new Chart(ctx,{type:'bar',data:{labels:rg.map(r=>r.regime||''),datasets:[{label:'Avg Realized EV',data:vals,backgroundColor:vals.map(v=>v>=0?'rgba(52,211,153,0.6)':'rgba(248,113,113,0.6)'),borderWidth:1}]},options:chartOpts('EV')});chartInstances.push(ch);}
+function drawRollingAcc(ctx){const v=filteredData.filter(p=>p._verified);if(v.length<2)return;const ch=new Chart(ctx,{type:'line',data:{labels:v.map(p=>fmtTs(p.timestamp)),datasets:[{label:'Roll 10',data:v.map(p=>p._rolling_acc_10||0),borderColor:'#22d3ee',borderWidth:2,fill:false,tension:0.3,pointRadius:3},{label:'Roll 50',data:v.map(p=>p._rolling_acc_50||0),borderColor:'#a78bfa',borderWidth:2,fill:false,tension:0.3,pointRadius:3},{label:'Cum',data:v.map(p=>p._cum_accuracy||0),borderColor:'#34d399',borderWidth:1.5,borderDash:[4,3],fill:false,tension:0.3,pointRadius:2},{label:'50%',data:v.map(()=>0.5),borderColor:'rgba(148,163,184,0.25)',borderWidth:1,borderDash:[6,4],pointRadius:0,fill:false}]},options:chartOpts('Accuracy',true,0,1)});chartInstances.push(ch);}
+function drawConfDist(ctx){const bins=[0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0];const counts=new Array(bins.length-1).fill(0);const labels=bins.slice(0,-1).map((b,i)=>`${b.toFixed(1)}-${bins[i+1].toFixed(1)}`);filteredData.forEach(p=>{const c=p.confidence||0;for(let i=0;i<bins.length-1;i++){if(c>=bins[i]&&c<bins[i+1]){counts[i]++;break;}if(i===bins.length-2&&c===bins[i+1])counts[i]++;}});const ch=new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Count',data:counts,backgroundColor:counts.map((_,i)=>{const m=(bins[i]+bins[i+1])/2;return m>=0.6?'rgba(34,211,238,0.6)':m>=0.4?'rgba(251,191,36,0.6)':'rgba(100,116,139,0.3)';}),borderWidth:0}]},options:chartOpts('Count')});chartInstances.push(ch);}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED CHART OPTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function chartOpts(yLabel,isPct=false,yMin,yMax){
+  return {responsive:true,maintainAspectRatio:true,aspectRatio:2,animation:{duration:hasNew?600:0},
+    plugins:{legend:{labels:{color:'#94a3b8',font:{size:9},boxWidth:8,padding:8}},tooltip:{backgroundColor:'rgba(13,18,32,0.95)',borderColor:'rgba(26,38,64,0.8)',borderWidth:1,titleColor:'#e2e8f0',bodyColor:'#94a3b8',padding:6,bodyFont:{size:9}}},
+    scales:{x:{ticks:{color:'#64748b',font:{size:7}},grid:{color:'rgba(26,38,64,0.3)'}},y:{title:{display:true,text:yLabel,color:'#64748b',font:{size:8}},ticks:{color:'#64748b',font:{size:8},callback:isPct?v=>(v*100).toFixed(0)+'%':undefined},grid:{color:'rgba(26,38,64,0.3)'},min:yMin,max:yMax}}
+  };
+}
+let hasNew = false; // global flag for chart animation
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderSignalRankings(signals){
+  const c=document.getElementById('signal-rankings');
+  const pred=signals.most_predictive||[];const dest=signals.most_destructive||[];
+  if(!pred.length&&!dest.length){c.innerHTML='<h3>Signal Intelligence</h3><div class="empty-state"><p>Awaiting signal data.</p></div>';return;}
+  const all=new Map();pred.forEach(s=>all.set(s.signal,{...s,type:'PREDICTIVE'}));dest.forEach(s=>{if(all.has(s.signal)){all.get(s.signal).destructive_score=s.destructive_score;all.get(s.signal).type='BOTH';}else all.set(s.signal,{...s,type:'DESTRUCTIVE'});});
+  let html='<h3>Signal Intelligence</h3><table><thead><tr><th>Signal</th><th>Type</th><th>Predictive</th><th>Destructive</th><th>Influence</th><th>n</th></tr></thead><tbody>';
+  all.forEach(s=>{const tc=s.type==='PREDICTIVE'?'tag-long':s.type==='DESTRUCTIVE'?'tag-short':'tag-flat';html+=`<tr><td><strong>${s.signal}</strong></td><td><span class="tag ${tc}">${s.type}</span></td><td style="color:var(--green)">${fmt(s.predictive_score||0,4)}</td><td style="color:var(--red)">${fmt(s.destructive_score||0,4)}</td><td>${fmt(s.total_influence||0,4)}</td><td>${s.agreed_total||0}/${s.disagreed_total||0}</td></tr>`;});
+  html+='</tbody></table>';c.innerHTML=html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PREDICTIONS TABLE (with new-row glow)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderPredictionsTable(isNew){
+  const c=document.getElementById('predictions-table');
+  if(!filteredData.length){c.innerHTML='<h3>Prediction Audit Log</h3><div class="empty-state"><p>No predictions match.</p></div>';return;}
+  const recent=[...filteredData].reverse().slice(0,50);
+  let html=`<h3>Prediction Audit Log <span style="color:var(--text-dim);font-weight:400;font-size:0.55rem">(${filteredData.length} filtered, click for forensic trace)</span></h3>`;
+  html+='<table><thead><tr><th>Time</th><th>Sym</th><th>Dir</th><th>Conf</th><th>EV</th><th>Adj EV</th><th>Price</th><th>Regime</th><th>Action</th><th>Outcome</th></tr></thead><tbody>';
+  recent.forEach((p,ri)=>{
+    const idx=filteredData.indexOf(p);
+    const dir=(p.prediction||'').toUpperCase();
+    const dc=dir==='LONG'?'tag-long':dir==='SHORT'?'tag-short':'tag-flat';
+    const outcome=p._verified?(p._correct?'<span class="tag tag-execute">WIN</span>':'<span class="tag tag-short">LOSS</span>'):'<span style="color:var(--text-dim)">pending</span>';
+    const ac=p._action==='EXECUTE'?'tag-execute':'tag-hold';
+    const sel=selectedPrediction===p?'background:rgba(34,211,238,0.06);':'';
+    const newCls=isNew&&ri===0?'new-row':'';
+    html+=`<tr class="clickable ${newCls}" data-idx="${idx}" style="${sel}" onclick="selectPrediction(${idx})">
+      <td>${fmtTs(p.timestamp)}</td><td>${p.symbol||'—'}</td><td><span class="tag ${dc}">${dir}</span></td>
+      <td>${fmt(p.confidence)}</td><td>${fmt(p.ev,6)}</td><td>${fmt(p._adjusted_ev,6)}</td>
+      <td>${p.price_now?Number(p.price_now).toFixed(2):'—'}</td>
+      <td style="color:var(--teal)">${p._regime}</td><td><span class="tag ${ac}">${p._action}</span></td><td>${outcome}</td></tr>`;
+  });
+  html+='</tbody></table>';c.innerHTML=html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FORENSIC MODAL
+// ═══════════════════════════════════════════════════════════════════════════
+
+function openForensicModal(p){
+  if(!p)return;
+  const pipe=(p._audit||{}).pipeline||{};const s1=pipe.step1_market||{};const s2=pipe.step2_features||{};const s3=pipe.step3_risk||{};const s4=pipe.step4_ev||{};const s5=pipe.step5_feasibility||{};const exec=(p._audit||{}).execution_state||{};
+  document.getElementById('modal-title').textContent=`${p.symbol} ${p.prediction} — ${fmtTs(p.timestamp)}`;
+  const steps=[
+    {t:'Step 1: Market State',st:s1.liquidity_quality>0.99?'pass':'warn',d:[{k:'price',v:fmt(s1.price||p.price_now,2)},{k:'vol',v:fmt(s1.volatility,5)},{k:'liq',v:fmt(s1.liquidity_quality,4),c:s1.liquidity_quality>0.99?'good':'bad'},{k:'orderflow',v:fmt(s1.orderflow,4)},{k:'bidask',v:fmt(s1.bidask_imbalance,4)},{k:'funding',v:fmt(s1.funding_signal,6)}]},
+    {t:'Step 2: Features',st:'pass',d:[{k:'dir',v:s2.direction||p.prediction},{k:'conv',v:fmt(s2.conviction)},{k:'regime',v:s2.regime_hint||p._regime},{k:'noise',v:fmt(s2.noise,3)},{k:'pressure',v:fmt(s2.total_pressure,3)}]},
+    {t:'Step 3: Risk',st:s3.zone==='SAFE'?'pass':'fail',d:[{k:'zone',v:s3.zone||p._risk_zone,c:s3.zone==='SAFE'?'good':'bad'},{k:'risk',v:fmt(s3.risk_score,2)},{k:'dd',v:fmt(s3.dd_ratio,2)},{k:'verdict',v:s3.verdict||'—',c:s3.verdict==='ALLOW'?'good':'bad'}]},
+    {t:'Step 4: EV',st:s4.adjusted_ev>0?'pass':'fail',d:[{k:'base_ev',v:fmt(s4.base_ev,6)},{k:'adj_ev',v:fmt(s4.adjusted_ev,6),c:s4.adjusted_ev>0?'good':'bad'},{k:'entropy_d',v:fmt(s4.entropy_discount,3)},{k:'p_win',v:fmt(s4.p_win,4)},{k:'tradeable',v:s4.tradeable?'YES':'NO',c:s4.tradeable?'good':'bad'}]},
+    {t:'Step 5: Feasibility',st:s5.feasible?'pass':'fail',d:[{k:'feasible',v:s5.feasible?'YES':'NO',c:s5.feasible?'good':'bad'},{k:'reason',v:s5.reason||'—'},{k:'size_adj',v:fmt(s5.size_adjustment,4)}]},
+    {t:'Execution',st:'pass',d:[{k:'slippage_bps',v:fmt(exec.slippage_bps,1)},{k:'spread_bps',v:fmt(exec.spread_bps,2)},{k:'latency_ms',v:fmt(exec.latency_ms,0)}]},
+    {t:'Action',st:p._action==='EXECUTE'?'pass':'warn',d:[{k:'action',v:p._action,c:p._action==='EXECUTE'?'good':'bad'},{k:'side',v:p._side||'—'},{k:'size',v:fmt(p._size,4)},{k:'reason',v:p._reason||'—'}]},
+    {t:'Outcome',st:p._verified?(p._correct?'pass':'fail'):'warn',d:p._verified?[{k:'result',v:p._correct?'CORRECT':'WRONG',c:p._correct?'good':'bad'},{k:'return',v:fmt(p._realized_return,6),c:p._realized_return>0?'good':'bad'},{k:'cal_error',v:fmt(p._calibration_error,4)}]:[{k:'result',v:'PENDING'}]},
+  ];
+  let body='';steps.forEach((s,si)=>{body+=`<div class="pipeline-step"><div class="step-indicator"><div class="step-dot ${s.st}"></div>${si<steps.length-1?'<div class="step-line"></div>':''}</div><div class="step-content"><div class="step-title">${s.t}</div><div class="step-data">${s.d.map(x=>`<span class="key">${x.k}:</span> <span class="${x.c||'val'}">${x.v}</span>`).join(' &middot; ')}</div></div></div>`;});
+  if(Object.keys(p._pressures||{}).length>0){body+=`<div style="margin-top:0.5rem;padding-top:0.4rem;border-top:1px solid var(--border)"><div class="step-title">Signal Pressures</div><div class="step-data">${Object.entries(p._pressures).map(([k,v])=>`<span class="key">${k}:</span> <span class="val">${fmt(v,4)}</span>`).join(' &middot; ')}</div></div>`;}
+  document.getElementById('modal-body').innerHTML=body;
+  document.getElementById('modal-overlay').classList.add('visible');
+}
+
+function setupModal(){
+  document.getElementById('modal-close').addEventListener('click',()=>document.getElementById('modal-overlay').classList.remove('visible'));
+  document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('modal-overlay'))document.getElementById('modal-overlay').classList.remove('visible');});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT — LIVE STREAMING STARTUP
+// ═══════════════════════════════════════════════════════════════════════════
+
+setupFilterListeners();
+setupModal();
+
+// Initial load
+pollData().then(() => {
+  // Deploy verification (after initial render)
+  verifyDeploy();
+  // Refresh deploy check every 5 min
+  setInterval(verifyDeploy, 5 * 60 * 1000);
+});
+
+// Live polling every 15 seconds
+setInterval(pollData, POLL_INTERVAL);
+
+// Update time cursor every second
+setInterval(() => {
+  document.getElementById('time-cursor').textContent = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) + ' UTC';
+  // Update pred/min counter live
+  const now = Date.now();
+  const recentCount = predictionsData.filter(p => now - new Date(p.timestamp).getTime() < 60000).length;
+  document.getElementById('pred-per-min').textContent = recentCount;
+}, 1000);
+
+// Redraw causality on resize
+window.addEventListener('resize', () => { if (selectedPrediction) renderCausalityGraph(); });
 </script>
 </body>
 </html>
