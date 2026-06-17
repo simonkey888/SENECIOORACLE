@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+import json
 
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -36,6 +37,7 @@ from .oracle_engine import OracleEngine
 from .execution_simulator import ExecutionSimulator
 from .scheduler import Scheduler
 from .ws_server import make_router as make_ws_router
+from . import oracle_runner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 log = logging.getLogger("senecio.main")
@@ -70,10 +72,12 @@ async def lifespan(app: FastAPI):
     app.state.scheduler = _scheduler
 
     _scheduler.start()
-    log.info("SENECIO ORACLE backend up — layers: data, scanner_a, scanner_b, wallet, brain, exec, ws")
+    oracle_runner.start()
+    log.info("SENECIO ORACLE backend up — layers: data, scanner_a, scanner_b, wallet, brain, exec, ws + REAL ORACLE")
 
     yield
 
+    await oracle_runner.stop()
     await _scheduler.stop()
     await _bus.close()
     log.info("SENECIO ORACLE backend down")
@@ -88,7 +92,58 @@ app.include_router(make_ws_router(_bus))
 # ---- REST endpoints ----
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "ACT-XX-polymarket-style"}
+    """Real health check — includes oracle runner state."""
+    oracle_state = oracle_runner.get_state()
+    return {
+        "status": "ok",
+        "version": "ACT-XIX-unified-oracle",
+        "oracle": {
+            "started_at": oracle_state.get("started_at"),
+            "last_prediction_ts": oracle_state.get("last_prediction_ts"),
+            "last_prediction_symbol": oracle_state.get("last_prediction_symbol"),
+            "predictions_count": oracle_state.get("predictions_count", 0),
+            "cycles_run": oracle_state.get("cycles_run", 0),
+            "cycles_failed": oracle_state.get("cycles_failed", 0),
+            "last_error": oracle_state.get("last_error"),
+            "last_cycle_at": oracle_state.get("last_cycle_at"),
+            "next_cycle_at": oracle_state.get("next_cycle_at"),
+            "exchange_used_last": oracle_state.get("exchange_used_last"),
+        },
+    }
+
+
+@app.get("/api/oracle/state")
+async def oracle_state():
+    """Detailed oracle runner state + last prediction."""
+    state = oracle_runner.get_state()
+    return {
+        **state,
+        "last_prediction": state.get("last_prediction_result"),
+    }
+
+
+@app.get("/api/oracle/predictions")
+async def oracle_predictions(limit: int = Query(default=20, le=200)):
+    """Return last N predictions from predictions.jsonl (most recent first)."""
+    from pathlib import Path
+    pred_path = Path(__file__).resolve().parent.parent / "oracle" / "senecio_output" / "predictions.jsonl"
+    if not pred_path.exists():
+        return {"count": 0, "predictions": []}
+    rows = []
+    with open(pred_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    # most recent first
+    rows.reverse()
+    # strip _audit for slim view (client can request /api/oracle/predictions/full for it)
+    slim = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows[:limit]]
+    return {"count": len(slim), "total_in_file": len(rows), "predictions": slim}
 
 
 @app.get("/api/stats")

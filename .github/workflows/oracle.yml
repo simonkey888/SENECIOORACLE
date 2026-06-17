@@ -1,9 +1,12 @@
 # SENECIO Oracle Cycle — Predict + Deploy Pages in one workflow
+# NOTE (ACT XIX): scheduled cron DISABLED — oracle now runs in Northflank
+# every 15 min via backend/oracle_runner.py. This workflow is kept for
+# manual backfill / verification only (workflow_dispatch).
 name: SENECIO Oracle Cycle
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # schedule:
+  #   - cron: '*/15 * * * *'   # disabled — moved to Northflank
   workflow_dispatch:
 
 permissions:

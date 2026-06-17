@@ -13,7 +13,7 @@ __pycache__/
 venv/
 env/
 
-# Local data (Fly mounts its own volume)
+# Local audit (runtime generates its own)
 senecio_polymarket/data/audit/*.jsonl
 
 # Git
@@ -34,14 +34,16 @@ Thumbs.db
 *.log
 /tmp/
 
-# Tests / scripts we don't need in production
+# Test scripts (don't need in production)
 senecio_polymarket/scripts/test_run.py
 senecio_polymarket/scripts/run.sh
 
 # Dockerfile companions
 Dockerfile
 .dockerignore
-fly.toml
 
-# Docs
+# Docs (not needed at runtime)
 README.md
+
+# NOTE: senecio_output/ is INCLUDED — it seeds predictions.jsonl for the oracle
+# Do NOT exclude it.
