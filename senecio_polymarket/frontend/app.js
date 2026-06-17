@@ -448,6 +448,186 @@
   window.addEventListener('resize', onResize);
   window.addEventListener('orientationchange', () => setTimeout(onResize, 300));
 
+  // =====================================================================
+  // ORACLE PANEL (ACT XIX) — Real predictions from Supabase via API
+  // =====================================================================
+  const oracle = {
+    predictions: [],
+    score: null,
+    health: null,
+    confChart: null,
+    refreshTimer: null,
+  };
+
+  function fmtTs(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleTimeString('en-GB', { hour12: false }) + ' ' +
+             d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+    } catch (_) { return iso.slice(11, 19); }
+  }
+
+  function fmtPrice(p) {
+    if (p == null) return '—';
+    return '$' + Number(p).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtEv(ev) {
+    if (ev == null) return '—';
+    const v = Number(ev);
+    const sign = v >= 0 ? '+' : '';
+    return sign + v.toExponential(2);
+  }
+
+  function fmtConf(c) {
+    if (c == null) return '—';
+    return (Number(c) * 100).toFixed(1) + '%';
+  }
+
+  function fmtCountdown(iso) {
+    if (!iso) return '—';
+    const diff = new Date(iso).getTime() - Date.now();
+    if (diff <= 0) return 'now';
+    const min = Math.floor(diff / 60000);
+    const sec = Math.floor((diff % 60000) / 1000);
+    return min + 'm' + (sec < 10 ? '0' : '') + sec + 's';
+  }
+
+  function renderOracleTable() {
+    const tbody = document.querySelector('#oracle-table tbody');
+    if (!tbody) return;
+    if (!oracle.predictions.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="placeholder">no predictions yet</td></tr>';
+      return;
+    }
+    const rows = oracle.predictions.slice(0, 50).map(p => {
+      const pred = (p.prediction || '').toLowerCase();
+      const out = p.outcome || (p.price_15m_later == null ? 'PEND' : '—');
+      return `<tr>
+        <td style="font-size:10px;color:var(--text-faint)">${fmtTs(p.ts)}</td>
+        <td class="sym">${p.symbol || '—'}</td>
+        <td class="pred-${pred}">${p.prediction || '—'}</td>
+        <td class="num">${fmtConf(p.confidence)}</td>
+        <td class="num">${fmtEv(p.ev)}</td>
+        <td class="num">${fmtPrice(p.price_now)}</td>
+        <td class="exchange">${p.exchange_used || '—'}</td>
+        <td class="outcome-${out}">${out}</td>
+      </tr>`;
+    }).join('');
+    tbody.innerHTML = rows;
+    const meta = document.getElementById('oracle-pred-meta');
+    if (meta) meta.textContent = `${oracle.predictions.length} shown`;
+  }
+
+  function renderOracleScore() {
+    const s = oracle.score || {};
+    const h = oracle.health || {};
+    const total = document.getElementById('score-total');
+    const verified = document.getElementById('score-verified');
+    const winrate = document.getElementById('score-winrate');
+    const next = document.getElementById('score-next');
+    if (total) total.textContent = s.total_predictions ?? h.oracle?.supabase_total ?? '—';
+    if (verified) verified.textContent = s.verified ?? '—';
+    if (winrate) {
+      const wr = s.win_rate_pct;
+      winrate.textContent = wr != null ? wr.toFixed(1) + '%' : '—';
+      const card = winrate.closest('.score-card');
+      if (card) card.classList.toggle('bad', wr != null && wr < 50);
+    }
+    if (next) next.textContent = fmtCountdown(h.oracle?.next_cycle_at);
+  }
+
+  function drawOracleConfChart() {
+    const canvas = document.getElementById('oracle-conf-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.clientWidth * dpr;
+    const H = (canvas.clientHeight || 120) * dpr;
+    canvas.width = W; canvas.height = H;
+    ctx.clearRect(0, 0, W, H);
+
+    const preds = oracle.predictions.slice(0, 50).reverse(); // chronological
+    if (preds.length < 2) {
+      ctx.fillStyle = '#4d5666';
+      ctx.font = (11 * dpr) + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Need ≥2 predictions to draw trend', W / 2, H / 2);
+      return;
+    }
+
+    const padL = 30 * dpr, padR = 10 * dpr, padT = 10 * dpr, padB = 16 * dpr;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    // grid + axes (0% to 100% confidence)
+    ctx.strokeStyle = '#1c2330';
+    ctx.lineWidth = 1 * dpr;
+    ctx.fillStyle = '#4d5666';
+    ctx.font = (9 * dpr) + 'px monospace';
+    ctx.textAlign = 'right';
+    for (let pct = 0; pct <= 100; pct += 25) {
+      const y = padT + plotH * (1 - pct / 100);
+      ctx.beginPath();
+      ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+      ctx.fillText(pct + '%', padL - 4 * dpr, y + 3 * dpr);
+    }
+
+    // points + line
+    const points = preds.map((p, i) => {
+      const x = padL + (i / (preds.length - 1)) * plotW;
+      const conf = Number(p.confidence) || 0;
+      const y = padT + plotH * (1 - conf);
+      return { x, y, pred: p.prediction, conf };
+    });
+
+    // line
+    ctx.strokeStyle = '#00ffa3';
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.beginPath();
+    points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+
+    // points colored by direction
+    points.forEach(p => {
+      ctx.fillStyle = p.pred === 'LONG' ? '#00ffa3' : p.pred === 'SHORT' ? '#ff3d6e' : '#ffb000';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.5 * dpr, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  async function fetchOracleData() {
+    try {
+      const [predRes, scoreRes, healthRes] = await Promise.all([
+        fetch('/api/oracle/predictions/db?limit=50').then(r => r.json()),
+        fetch('/api/oracle/score').then(r => r.json()).catch(() => null),
+        fetch('/api/health').then(r => r.json()),
+      ]);
+      oracle.predictions = predRes.predictions || [];
+      oracle.score = scoreRes;
+      oracle.health = healthRes;
+      renderOracleTable();
+      renderOracleScore();
+      drawOracleConfChart();
+    } catch (e) {
+      console.error('oracle fetch error', e);
+    }
+  }
+
+  function startOraclePanel() {
+    fetchOracleData();
+    // Refresh every 60s (cycle is 15min, but countdown + new rows should update)
+    oracle.refreshTimer = setInterval(fetchOracleData, 60000);
+    // Update countdown every 5s without refetching
+    setInterval(() => {
+      if (oracle.health?.oracle?.next_cycle_at) renderOracleScore();
+    }, 5000);
+    // Redraw chart on resize
+    window.addEventListener('resize', () => setTimeout(drawOracleConfChart, 150));
+  }
+
   // ---- initial fetch ----
   async function bootstrap() {
     try {
@@ -456,6 +636,7 @@
       renderTopbar();
     } catch (_) {}
     connect();
+    startOraclePanel();
     // periodic refresh of stats (every 5s)
     setInterval(async () => {
       try {

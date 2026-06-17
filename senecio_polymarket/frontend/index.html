@@ -122,10 +122,64 @@
         </div>
       </div>
     </section>
+
+    <!-- FOURTH COLUMN: real Oracle (Supabase-backed) -->
+    <section class="col col-oracle">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Oracle Score</h2>
+          <span id="oracle-score-meta" class="meta">live</span>
+        </div>
+        <div id="oracle-score" class="oracle-score-grid">
+          <div class="score-card">
+            <div class="score-label">Total</div>
+            <div class="score-value" id="score-total">—</div>
+          </div>
+          <div class="score-card">
+            <div class="score-label">Verified</div>
+            <div class="score-value" id="score-verified">—</div>
+          </div>
+          <div class="score-card score-win">
+            <div class="score-label">Win rate</div>
+            <div class="score-value" id="score-winrate">—</div>
+          </div>
+          <div class="score-card">
+            <div class="score-label">Next cycle</div>
+            <div class="score-value" id="score-next" style="font-size:13px">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Oracle Predictions (live DB)</h2>
+          <span id="oracle-pred-meta" class="meta">—</span>
+        </div>
+        <div class="table-wrap">
+          <table id="oracle-table" class="table">
+            <thead>
+              <tr>
+                <th>TS</th><th>SYM</th><th>PRED</th><th>CONF</th><th>EV</th><th>PRICE</th><th>EX</th><th>OUT</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="8" class="placeholder">loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Confidence Trend (last 50)</h2></div>
+        <div class="chart-wrap">
+          <canvas id="oracle-conf-chart"></canvas>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer>
-    <span>SENECIO ORACLE • ACT XX • Polymarket-style stack • paper-only • all events auditable</span>
+    <span>SENECIO ORACLE • ACT XIX • Unified Oracle + Supabase • paper-only • all events auditable</span>
     <span id="cursor-display">cursor: clob=0 / onchain=0</span>
   </footer>
 </div>

@@ -92,14 +92,14 @@ body {
 /* ============= MAIN GRID ============= */
 main {
   display: grid;
-  grid-template-columns: 360px 1fr 380px;
+  grid-template-columns: 320px 1fr 340px 360px;
   gap: 8px;
   padding: 8px;
   overflow: hidden;
   min-height: 0;
 }
 .col { display: flex; flex-direction: column; gap: 8px; overflow: hidden; min-height: 0; }
-.col-left, .col-mid, .col-right { min-height: 0; }
+.col-left, .col-mid, .col-right, .col-oracle { min-height: 0; }
 
 /* ============= PANEL ============= */
 .panel {
@@ -482,4 +482,77 @@ footer {
   .chip:hover { color: var(--text-dim); border-color: var(--border-strong); }
   .chip:active { color: var(--text); border-color: var(--accent-2); }
   .feed-row:hover, .table tbody tr:hover { background: transparent; }
+}
+
+/* ============= ORACLE COLUMN (ACT XIX) ============= */
+.col-oracle .panel {
+  border-color: rgba(0, 255, 163, 0.15);
+}
+.col-oracle .panel-head h2 {
+  color: var(--accent);
+}
+.oracle-score-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 10px;
+}
+.score-card {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.score-card .score-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.score-card .score-value {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+.score-card.score-win .score-value {
+  color: var(--accent);
+}
+.score-card.score-win.bad .score-value {
+  color: var(--danger);
+}
+
+/* Oracle table — direction color coding */
+#oracle-table tbody td.pred-long   { color: var(--long);   font-weight: 600; }
+#oracle-table tbody td.pred-short  { color: var(--short);  font-weight: 600; }
+#oracle-table tbody td.pred-flat   { color: var(--hold);   }
+#oracle-table tbody td.outcome-WIN  { color: var(--long);  font-weight: 600; }
+#oracle-table tbody td.outcome-LOSS { color: var(--short); font-weight: 600; }
+#oracle-table tbody td.outcome-PEND { color: var(--text-faint); }
+#oracle-table tbody td.exchange { color: var(--accent-2); font-size: 10px; }
+
+/* Responsive — drop to 2 columns on smaller screens */
+@media (max-width: 1400px) {
+  main {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    overflow-y: auto;
+  }
+  .col-left, .col-mid, .col-right, .col-oracle {
+    max-height: 70vh;
+  }
+}
+@media (max-width: 900px) {
+  main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    overflow-y: auto;
+  }
+  .col-left, .col-mid, .col-right, .col-oracle {
+    max-height: none;
+  }
 }
