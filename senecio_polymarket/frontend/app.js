@@ -309,14 +309,25 @@
   function drawEquityChart() {
     const cv = $('#equity-chart');
     const ctx = cv.getContext('2d');
-    const w = cv.width = cv.clientWidth * 2;
-    const h = cv.height = 280;
-    ctx.scale(1, 1);
+    // Set canvas pixel size based on displayed CSS size (retina-aware)
+    const cssW = cv.clientWidth || cv.parentElement.clientWidth || 320;
+    const cssH = cv.clientHeight || 140;
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.floor(cssW * dpr);
+    cv.height = Math.floor(cssH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = cssW;
+    const h = cssH;
     ctx.clearRect(0, 0, w, h);
     // bg
     ctx.fillStyle = '#11161f';
     ctx.fillRect(0, 0, w, h);
-    if (state.equityCurve.length < 2) return;
+    if (state.equityCurve.length < 2) {
+      ctx.fillStyle = '#4d5666';
+      ctx.font = '11px monospace';
+      ctx.fillText('collecting data…', 12, h / 2);
+      return;
+    }
     const min = Math.min(...state.equityCurve);
     const max = Math.max(...state.equityCurve);
     const range = Math.max(1, max - min);
@@ -348,20 +359,31 @@
     ctx.fill();
     // labels
     ctx.fillStyle = '#4d5666';
-    ctx.font = '20px monospace';
-    ctx.fillText(`$${max.toFixed(0)}`, 8, 24);
-    ctx.fillText(`$${min.toFixed(0)}`, 8, h - 8);
+    ctx.font = '11px monospace';
+    ctx.fillText(`$${max.toFixed(0)}`, 8, 14);
+    ctx.fillText(`$${min.toFixed(0)}`, 8, h - 4);
   }
 
   function drawConfidenceChart() {
     const cv = $('#confidence-chart');
     const ctx = cv.getContext('2d');
-    const w = cv.width = cv.clientWidth * 2;
-    const h = cv.height = 280;
+    const cssW = cv.clientWidth || cv.parentElement.clientWidth || 320;
+    const cssH = cv.clientHeight || 140;
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.floor(cssW * dpr);
+    cv.height = Math.floor(cssH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = cssW;
+    const h = cssH;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#11161f';
     ctx.fillRect(0, 0, w, h);
-    if (state.confidenceHist.length === 0) return;
+    if (state.confidenceHist.length === 0) {
+      ctx.fillStyle = '#4d5666';
+      ctx.font = '11px monospace';
+      ctx.fillText('awaiting signals…', 12, h / 2);
+      return;
+    }
     // histogram of confidence (0..1) — 10 bins
     const bins = new Array(10).fill(0);
     state.confidenceHist.forEach(c => {
@@ -381,13 +403,14 @@
     const tx = 0.55 * w;
     ctx.strokeStyle = '#ff3d6e';
     ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(tx, 0); ctx.lineTo(tx, h);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = '#ff3d6e';
-    ctx.font = '18px monospace';
-    ctx.fillText('min_conf 0.55', tx + 6, 22);
+    ctx.font = '10px monospace';
+    ctx.fillText('min 0.55', tx + 4, 12);
   }
 
   // ---- utils ----
@@ -412,6 +435,18 @@
     $('#feed').innerHTML = '';
     state.events.slice().reverse().forEach(ev => renderFeedRow(ev));
   }));
+
+  // ---- resize handler: redraw charts on window resize / orientation change ----
+  let resizeTimer = null;
+  function onResize() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      drawEquityChart();
+      drawConfidenceChart();
+    }, 150);
+  }
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', () => setTimeout(onResize, 300));
 
   // ---- initial fetch ----
   async function bootstrap() {
