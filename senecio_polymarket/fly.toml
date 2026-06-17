@@ -1,18 +1,18 @@
-# SENECIO ORACLE — Fly.io config
+# SENECIO ORACLE — Fly.io config (v2 — fixed for first deploy)
 # Free-tier friendly: shared-cpu-1x, 256MB RAM, single machine in ams
 app = "seneciooracle"
 primary_region = "ams"
 
 [build]
-  # No buildpack — we use the Dockerfile in repo root of senecio_polymarket/
+  # Build context = repo root. Dockerfile path relative to repo root.
   dockerfile = "senecio_polymarket/Dockerfile"
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false   # keep running (event stream needs to stay live)
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 1     # always-on 1 machine so scheduler loop runs
+  min_machines_running = 1
 
   [http_service.concurrency]
     type = "requests"
@@ -21,8 +21,8 @@ primary_region = "ams"
 
 [[http_service.checks]]
   interval = "30s"
-  timeout = "5s"
-  grace_period = "10s"
+  timeout = "10s"
+  grace_period = "30s"   # longer grace — Python cold start + history seed takes ~5-10s
   method = "GET"
   path = "/api/health"
 
@@ -31,7 +31,8 @@ primary_region = "ams"
   cpus = 1
   memory_mb = 256
 
-# Persistent volume for audit JSONL log (so events survive redeploy)
-[mounts]
-  source = "senecio_data"
-  destination = "/app/data"
+# NOTE: [mounts] removed for first deploy — volume needs to be created manually
+# via `fly volumes create senecio_data --region ams --size 1` BEFORE deploying.
+# Without that, Fly fails the machine on boot. The app still works without it
+# (audit JSONL writes to /app/data/audit which the Dockerfile creates).
+# Add the mount back AFTER creating the volume.
