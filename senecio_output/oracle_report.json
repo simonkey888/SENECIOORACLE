@@ -1,41 +1,41 @@
 {
   "meta": {
-    "generated_at": "2026-06-18T21:15:44.174955+00:00",
+    "generated_at": "2026-06-18T21:30:44.276082+00:00",
     "source": "predictions.jsonl",
-    "total_predictions": 117,
+    "total_predictions": 118,
     "directional": 10,
-    "flat": 107,
-    "verified": 9,
-    "verified_directional": 9
+    "flat": 108,
+    "verified": 10,
+    "verified_directional": 10
   },
   "classification": {
-    "n_directional": 9,
-    "accuracy": 0.333333,
+    "n_directional": 10,
+    "accuracy": 0.3,
     "precision_long": 0.285714,
-    "precision_short": 0.5,
-    "recall_long": 0.666667,
+    "precision_short": 0.333333,
+    "recall_long": 0.5,
     "recall_short": 0.166667,
-    "f1_long": 0.4,
-    "f1_short": 0.25,
+    "f1_long": 0.363636,
+    "f1_short": 0.222222,
     "confusion_matrix": {
       "predicted_long_actual_up": 2,
       "predicted_long_actual_down": 5,
       "predicted_short_actual_down": 1,
-      "predicted_short_actual_up": 1
+      "predicted_short_actual_up": 2
     },
     "counts": {
       "tp_long": 2,
       "fp_long": 5,
       "tp_short": 1,
-      "fp_short": 1,
-      "fn_long": 1,
+      "fp_short": 2,
+      "fn_long": 2,
       "fn_short": 5
     }
   },
   "probabilistic": {
-    "brier_score": 0.293587,
+    "brier_score": 0.301695,
     "ece": {
-      "ece": 0.275544,
+      "ece": 0.30915,
       "n_bins_with_data": 2,
       "bins": [
         {
@@ -47,10 +47,10 @@
         },
         {
           "range": "[0.60, 0.70)",
-          "count": 8,
-          "avg_confidence": 0.6131,
-          "accuracy": 0.375,
-          "gap": 0.2381
+          "count": 9,
+          "avg_confidence": 0.613,
+          "accuracy": 0.3333,
+          "gap": 0.2796
         }
       ]
     }
@@ -67,10 +67,10 @@
         },
         {
           "bucket": "0.60-0.70",
-          "count": 8,
-          "avg_model_ev": 0.0008352,
-          "avg_realized_ev": 4.47612187,
-          "win_rate": 0.375
+          "count": 9,
+          "avg_model_ev": 0.00076595,
+          "avg_realized_ev": 3.97853811,
+          "win_rate": 0.3333
         }
       ]
     },
@@ -78,10 +78,10 @@
       "regimes": [
         {
           "regime": "RANGING",
-          "count": 9,
-          "avg_model_ev": 0.00082269,
-          "avg_realized_ev": 3.97845364,
-          "win_rate": 0.3333
+          "count": 10,
+          "avg_model_ev": 0.00076161,
+          "avg_realized_ev": 3.58039508,
+          "win_rate": 0.3
         }
       ]
     },
@@ -89,62 +89,62 @@
       "symbols": [
         {
           "symbol": "ETHUSDT",
-          "count": 9,
-          "avg_model_ev": 0.00082269,
-          "avg_realized_ev": 3.97845364,
-          "win_rate": 0.3333
+          "count": 10,
+          "avg_model_ev": 0.00076161,
+          "avg_realized_ev": 3.58039508,
+          "win_rate": 0.3
         }
       ]
     }
   },
   "sharpe": {
-    "sharpe": 66.225,
-    "mean_return": 3.97845364,
-    "std_return": 11.24538656,
-    "n_returns": 9,
+    "sharpe": 62.4329,
+    "mean_return": 3.58039508,
+    "std_return": 10.7349384,
+    "n_returns": 10,
     "cycles_per_year": 35040
   },
   "signal_rankings": {
     "most_predictive": [
       {
         "signal": "orderflow",
-        "agreed_total": 9,
-        "agreed_accuracy": 0.3333,
+        "agreed_total": 10,
+        "agreed_accuracy": 0.3,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 8.0313,
-        "predictive_score": 0.297454,
-        "destructive_score": 0.594908
+        "total_influence": 8.827,
+        "predictive_score": 0.264809,
+        "destructive_score": 0.617888
       },
       {
         "signal": "bidask",
-        "agreed_total": 9,
-        "agreed_accuracy": 0.3333,
+        "agreed_total": 10,
+        "agreed_accuracy": 0.3,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 3.5018,
-        "predictive_score": 0.129695,
-        "destructive_score": 0.259389
+        "total_influence": 3.8255,
+        "predictive_score": 0.114764,
+        "destructive_score": 0.267783
       },
       {
         "signal": "volume_delta",
         "agreed_total": 3,
         "agreed_accuracy": 0.6667,
-        "disagreed_total": 6,
-        "disagreed_accuracy": 0.1667,
-        "total_influence": 0.008,
-        "predictive_score": 0.000592,
-        "destructive_score": 0.000296
+        "disagreed_total": 7,
+        "disagreed_accuracy": 0.1429,
+        "total_influence": 0.0085,
+        "predictive_score": 0.000567,
+        "destructive_score": 0.000283
       },
       {
         "signal": "price_momentum",
-        "agreed_total": 6,
-        "agreed_accuracy": 0.1667,
+        "agreed_total": 7,
+        "agreed_accuracy": 0.1429,
         "disagreed_total": 3,
         "disagreed_accuracy": 0.6667,
-        "total_influence": 0.0077,
-        "predictive_score": 0.000143,
-        "destructive_score": 0.000717
+        "total_influence": 0.0082,
+        "predictive_score": 0.000117,
+        "destructive_score": 0.000702
       },
       {
         "signal": "funding",
@@ -160,33 +160,33 @@
     "most_destructive": [
       {
         "signal": "orderflow",
-        "agreed_total": 9,
-        "agreed_accuracy": 0.3333,
+        "agreed_total": 10,
+        "agreed_accuracy": 0.3,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 8.0313,
-        "predictive_score": 0.297454,
-        "destructive_score": 0.594908
+        "total_influence": 8.827,
+        "predictive_score": 0.264809,
+        "destructive_score": 0.617888
       },
       {
         "signal": "bidask",
-        "agreed_total": 9,
-        "agreed_accuracy": 0.3333,
+        "agreed_total": 10,
+        "agreed_accuracy": 0.3,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 3.5018,
-        "predictive_score": 0.129695,
-        "destructive_score": 0.259389
+        "total_influence": 3.8255,
+        "predictive_score": 0.114764,
+        "destructive_score": 0.267783
       },
       {
         "signal": "price_momentum",
-        "agreed_total": 6,
-        "agreed_accuracy": 0.1667,
+        "agreed_total": 7,
+        "agreed_accuracy": 0.1429,
         "disagreed_total": 3,
         "disagreed_accuracy": 0.6667,
-        "total_influence": 0.0077,
-        "predictive_score": 0.000143,
-        "destructive_score": 0.000717
+        "total_influence": 0.0082,
+        "predictive_score": 0.000117,
+        "destructive_score": 0.000702
       },
       {
         "signal": "funding",
@@ -202,11 +202,11 @@
         "signal": "volume_delta",
         "agreed_total": 3,
         "agreed_accuracy": 0.6667,
-        "disagreed_total": 6,
-        "disagreed_accuracy": 0.1667,
-        "total_influence": 0.008,
-        "predictive_score": 0.000592,
-        "destructive_score": 0.000296
+        "disagreed_total": 7,
+        "disagreed_accuracy": 0.1429,
+        "total_influence": 0.0085,
+        "predictive_score": 0.000567,
+        "destructive_score": 0.000283
       }
     ]
   },
@@ -266,6 +266,17 @@
         "price_15m_later": 1724.09,
         "outcome": "WRONG",
         "realized_return": -0.001315
+      },
+      {
+        "timestamp": "2026-06-18T21:15:38.308827+00:00",
+        "symbol": "ETHUSDT",
+        "prediction": "SHORT",
+        "confidence": 0.6121,
+        "ev": 0.00021194,
+        "price_now": 1702.64,
+        "price_15m_later": 1706.27,
+        "outcome": "WRONG",
+        "realized_return": -0.002132
       },
       {
         "timestamp": "2026-06-14T22:22:00.707172+00:00",
@@ -356,6 +367,17 @@
         "price_15m_later": 1719.66,
         "outcome": "WRONG",
         "realized_return": -0.002569
+      },
+      {
+        "timestamp": "2026-06-18T21:15:38.308827+00:00",
+        "symbol": "ETHUSDT",
+        "prediction": "SHORT",
+        "confidence": 0.6121,
+        "ev": 0.00021194,
+        "price_now": 1702.64,
+        "price_15m_later": 1706.27,
+        "outcome": "WRONG",
+        "realized_return": -0.002132
       },
       {
         "timestamp": "2026-06-14T22:01:54.628203+00:00",
