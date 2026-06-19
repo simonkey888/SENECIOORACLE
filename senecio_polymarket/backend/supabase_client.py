@@ -128,6 +128,67 @@ async def count_predictions() -> int:
         return 0
 
 
+async def fetch_pending_outcomes(older_than_seconds: int = 900, limit: int = 100) -> list[dict]:
+    """Fetch predictions that have outcome=NULL and are older than `older_than_seconds`.
+
+    Used by the verifier to find predictions whose 15min window has elapsed
+    and need to be settled (WIN/LOSS).
+
+    Returns rows with at least: id, ts, symbol, prediction, price_now.
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)).isoformat()
+        c = _get_client()
+        # PostgREST filter: outcome=is.null AND ts=lt.{cutoff}
+        params = {
+            "select": "id,ts,symbol,prediction,confidence,price_now,exchange_used",
+            "outcome": "is.null",
+            "ts": f"lt.{cutoff}",
+            "order": "ts.asc",
+            "limit": str(limit),
+        }
+        r = await c.get(f"/{SUPABASE_TABLE}", params=params)
+        if r.status_code == 200:
+            return r.json() or []
+        log.error("supabase fetch_pending_outcomes failed: %s %s", r.status_code, r.text[:200])
+        return []
+    except Exception as e:
+        log.error("supabase fetch_pending_outcomes error: %s", e)
+        return []
+
+
+async def update_outcome(prediction_id: int, outcome: str, price_15m_later: float) -> bool:
+    """Update a prediction row with the settled outcome.
+
+    Args:
+        prediction_id: Supabase row id
+        outcome: "WIN" or "LOSS"
+        price_15m_later: actual price 15min after prediction
+
+    Returns True on success.
+    """
+    try:
+        c = _get_client()
+        # PostgREST PATCH with row filter: PATCH /table?id=eq.{id}
+        r = await c.patch(
+            f"/{SUPABASE_TABLE}",
+            params={"id": f"eq.{prediction_id}"},
+            json={
+                "outcome": outcome,
+                "price_15m_later": float(price_15m_later),
+            },
+        )
+        if r.status_code in (200, 204):
+            log.info("supabase update_outcome OK id=%s outcome=%s", prediction_id, outcome)
+            return True
+        log.error("supabase update_outcome failed: %s %s", r.status_code, r.text[:300])
+        return False
+    except Exception as e:
+        log.error("supabase update_outcome error: %s", e)
+        return False
+
+
 async def close() -> None:
     global _client
     if _client and not _client.is_closed:

@@ -675,16 +675,25 @@ def auto_verify_previous(symbol: str, timeframe: str, current_price: float,
     return verified_count
 
 
-def check_candle_duplicate(candle_ts: int, path: str = DEFAULT_PREDICTIONS_PATH) -> bool:
-    """Check if we already have a prediction for this candle timestamp.
+def check_candle_duplicate(candle_ts: int, path: str = DEFAULT_PREDICTIONS_PATH, symbol: str = "") -> bool:
+    """Check if we already have a prediction for this candle timestamp AND symbol.
 
     CANDLE DEDUPLICATION: If the last closed candle's timestamp matches
-    a previous prediction, we skip — no point predicting the same candle twice.
+    a previous prediction FOR THE SAME SYMBOL, we skip — no point predicting
+    the same candle twice.
 
-    Returns True if this candle_ts already has a prediction.
+    BUGFIX (ACT XXI): Previously compared only candle_ts. Since ETH and BTC
+    share the same 15m candle boundary (same unix minute / 900), BTC was
+    always flagged as duplicate of ETH. Now we require both candle_ts AND
+    symbol to match. Symbol is normalized (slash stripped: "ETH/USDT" → "ETHUSDT").
+
+    Returns True if (candle_ts, symbol) pair already has a prediction.
     """
     if not os.path.exists(path) or candle_ts == 0:
         return False
+
+    # Normalize symbol the same way the prediction stores it: "ETH/USDT" → "ETHUSDT"
+    norm_sym = symbol.replace("/", "") if symbol else ""
 
     with open(path, "r") as f:
         lines = f.readlines()
@@ -700,8 +709,14 @@ def check_candle_duplicate(candle_ts: int, path: str = DEFAULT_PREDICTIONS_PATH)
         try:
             pred = json.loads(line)
             pred_candle = pred.get("_audit", {}).get("candle_ts", 0)
-            if pred_candle == candle_ts:
+            if pred_candle != candle_ts:
+                continue
+            # Same candle_ts — if symbol also matches, it's a true duplicate.
+            # If symbol is unknown (legacy callers), keep old behavior (treat as dup).
+            pred_sym = pred.get("symbol", "")
+            if not norm_sym or not pred_sym or pred_sym == norm_sym:
                 return True
+            # Same candle_ts but DIFFERENT symbol — not a duplicate, keep scanning
         except json.JSONDecodeError:
             continue
 
@@ -842,7 +857,7 @@ def main():
 
     # Step 1b: Candle deduplication — skip if same candle already predicted
     candle_ts = market_data.get("candle_ts", 0)
-    if check_candle_duplicate(candle_ts, args.log_path):
+    if check_candle_duplicate(candle_ts, args.log_path, args.symbol):
         logger.info(f"Same candle already predicted (candle_ts={candle_ts}) — skipping")
         if args.json:
             print(json.dumps({"status": "DUPLICATE_CANDLE", "candle_ts": candle_ts, "action": "SKIPPED"}))

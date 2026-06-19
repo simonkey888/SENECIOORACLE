@@ -50,6 +50,11 @@ _state: dict[str, Any] = {
     "last_cycle_at": None,
     "next_cycle_at": None,
     "exchange_used_last": None,
+    # Outcome verifier state (ACT XXI)
+    "last_verify_at": None,
+    "last_verify_count": None,        # how many outcomes were settled in last run
+    "last_verify_ids": [],            # ids settled in last run (for debug, capped at 10)
+    "verified_total": 0,              # running total of verified predictions
 }
 
 # Cycle config
@@ -134,7 +139,7 @@ async def _run_one_prediction(symbol: str) -> Optional[dict]:
 
         # Check for candle duplicate (avoid logging same 15m candle twice)
         candle_ts = market_data.get("candle_ts", 0)
-        if candle_ts and check_candle_duplicate(candle_ts, str(PREDICTIONS_PATH)):
+        if candle_ts and check_candle_duplicate(candle_ts, str(PREDICTIONS_PATH), symbol):
             log.info("skip duplicate candle_ts=%s for %s", candle_ts, symbol)
             return None
 
@@ -192,6 +197,135 @@ async def _run_one_prediction(symbol: str) -> Optional[dict]:
         return None
 
 
+async def _fetch_current_price(symbol: str) -> Optional[float]:
+    """Fetch the latest price for a symbol via ccxt (OKX public ticker).
+
+    Lightweight: only fetches ticker (no OHLCV/orderbook), so ~10x faster than
+    full fetch_market_snapshot. Used by the verifier to settle old predictions.
+
+    Args:
+        symbol: e.g. "ETH/USDT" (ccxt format with slash)
+    Returns:
+        Last price as float, or None on failure.
+    """
+    def _fetch() -> Optional[float]:
+        try:
+            import ccxt
+            ex = ccxt.okx({"enableRateLimit": True})
+            t = ex.fetch_ticker(symbol)
+            return float(t.get("last") or 0) or None
+        except Exception as e:
+            log.warning("ccxt fetch_ticker failed for %s: %s", symbol, e)
+            return None
+    return await asyncio.to_thread(_fetch)
+
+
+async def _verify_pending_outcomes() -> int:
+    """Settle predictions whose 15-min window has elapsed.
+
+    For each prediction with outcome=NULL and ts older than 15min:
+      1. Fetch current price via ccxt
+      2. Compare with price_now at prediction time
+      3. Determine WIN/LOSS (skip FLAT — no directional bet)
+      4. Update Supabase row with outcome + price_15m_later
+
+    Returns the number of outcomes settled in this run.
+    """
+    try:
+        from . import supabase_client
+    except Exception as e:
+        log.warning("supabase_client unavailable, skipping verifier: %s", e)
+        return 0
+
+    try:
+        pending = await supabase_client.fetch_pending_outcomes(
+            older_than_seconds=900, limit=100
+        )
+    except Exception as e:
+        log.exception("fetch_pending_outcomes failed: %s", e)
+        return 0
+
+    if not pending:
+        log.info("verifier: no pending outcomes to settle")
+        _state["last_verify_at"] = datetime.now(timezone.utc).isoformat()
+        _state["last_verify_count"] = 0
+        _state["last_verify_ids"] = []
+        return 0
+
+    log.info("verifier: %d pending predictions to settle", len(pending))
+
+    # Group by symbol so we only fetch price once per symbol
+    # (predictions in same 15m cycle share the same settlement price anyway)
+    symbol_prices: dict[str, Optional[float]] = {}
+    symbols_needed = set()
+    for row in pending:
+        # Symbol stored as "ETHUSDT" in DB — convert back to ccxt format "ETH/USDT"
+        sym_raw = row.get("symbol", "")
+        sym_ccxt = sym_raw[:3] + "/" + sym_raw[3:] if len(sym_raw) >= 6 else sym_raw
+        symbols_needed.add(sym_ccxt)
+
+    for sym in symbols_needed:
+        symbol_prices[sym] = await _fetch_current_price(sym)
+        await asyncio.sleep(0.5)  # gentle on OKX rate limit
+
+    settled = 0
+    settled_ids: list[int] = []
+    skipped = 0
+    errors = 0
+
+    for row in pending:
+        pred_id = row.get("id")
+        sym_raw = row.get("symbol", "")
+        sym_ccxt = sym_raw[:3] + "/" + sym_raw[3:] if len(sym_raw) >= 6 else sym_raw
+        direction = (row.get("prediction") or "").upper()
+        price_now = float(row.get("price_now") or 0)
+        price_later = symbol_prices.get(sym_ccxt)
+
+        if price_later is None or price_later <= 0:
+            log.warning("verifier: no price for %s, skipping id=%s", sym_ccxt, pred_id)
+            errors += 1
+            continue
+
+        # Skip FLAT — no directional bet to verify
+        if direction == "FLAT":
+            skipped += 1
+            continue
+
+        # Determine WIN/LOSS
+        # LONG correct if price went up (price_later > price_now)
+        # SHORT correct if price went down (price_later < price_now)
+        # Equal price → treat as LOSS (no edge realized, costs would have eaten it)
+        if direction == "LONG":
+            outcome = "WIN" if price_later > price_now else "LOSS"
+        elif direction == "SHORT":
+            outcome = "WIN" if price_later < price_now else "LOSS"
+        else:
+            # Unknown direction (shouldn't happen) — skip
+            skipped += 1
+            continue
+
+        ok = await supabase_client.update_outcome(pred_id, outcome, price_later)
+        if ok:
+            settled += 1
+            if len(settled_ids) < 10:
+                settled_ids.append(pred_id)
+        else:
+            errors += 1
+        # Gentle pacing
+        await asyncio.sleep(0.1)
+
+    _state["last_verify_at"] = datetime.now(timezone.utc).isoformat()
+    _state["last_verify_count"] = settled
+    _state["last_verify_ids"] = settled_ids
+    _state["verified_total"] = (_state.get("verified_total") or 0) + settled
+
+    log.info(
+        "verifier done: settled=%d skipped=%d errors=%d total_verified_so_far=%d",
+        settled, skipped, errors, _state["verified_total"],
+    )
+    return settled
+
+
 async def _oracle_loop() -> None:
     """Main loop: every CYCLE_INTERVAL_S, run predictions for all symbols."""
     log.info("oracle_loop waiting %ds before first cycle...", INITIAL_DELAY_S)
@@ -202,6 +336,16 @@ async def _oracle_loop() -> None:
         _state["last_cycle_at"] = cycle_start.isoformat()
         _state["cycles_run"] += 1
         log.info("=== oracle cycle #%d start @ %s ===", _state["cycles_run"], cycle_start.isoformat())
+
+        # ACT XXI: Verify pending outcomes BEFORE producing new predictions.
+        # This settles predictions whose 15min window elapsed in the previous cycle.
+        # First cycle after boot will backfill all 200+ accumulated predictions.
+        try:
+            settled = await _verify_pending_outcomes()
+            if settled > 0:
+                log.info("verifier settled %d outcomes in cycle #%d", settled, _state["cycles_run"])
+        except Exception as e:
+            log.exception("verifier error (non-fatal, continuing): %s", e)
 
         for symbol in SYMBOLS:
             try:
