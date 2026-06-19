@@ -24,7 +24,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +55,10 @@ _state: dict[str, Any] = {
     "last_verify_count": None,        # how many outcomes were settled in last run
     "last_verify_ids": [],            # ids settled in last run (for debug, capped at 10)
     "verified_total": 0,              # running total of verified predictions
+    # ACT-XXII-prereq: bogus-outcome backfill state
+    "bogus_backfill_done": False,     # set True after _backfill_bogus_outcomes() runs once
+    "bogus_backfill_count": None,     # how many rows re-settled with historical price
+    "bogus_backfill_errors": None,    # how many rows we couldn't re-settle (no historical price)
 }
 
 # Cycle config
@@ -201,7 +205,8 @@ async def _fetch_current_price(symbol: str) -> Optional[float]:
     """Fetch the latest price for a symbol via ccxt (OKX public ticker).
 
     Lightweight: only fetches ticker (no OHLCV/orderbook), so ~10x faster than
-    full fetch_market_snapshot. Used by the verifier to settle old predictions.
+    full fetch_market_snapshot. Used for live-cycle settlement (predictions
+    whose 15min window just elapsed — close enough to "now").
 
     Args:
         symbol: e.g. "ETH/USDT" (ccxt format with slash)
@@ -220,14 +225,83 @@ async def _fetch_current_price(symbol: str) -> Optional[float]:
     return await asyncio.to_thread(_fetch)
 
 
+async def _fetch_price_at_time(symbol: str, ts_iso: str) -> Optional[float]:
+    """Fetch the historical close price at ~ts+15min via OKX public candles.
+
+    OKX endpoint: GET /api/v5/market/candles?instId={symbol}&bar=1m&after={ts+15min_ms}&before={ts+15min_ms}
+    Returns the 1-minute candle close at ts+15min ± 30s.
+
+    Used by the verifier for backfilling predictions whose 15min window
+    elapsed in the past — using current price would conflate a multi-hour
+    trend with 15min directional accuracy and produce invalid win rates.
+
+    Args:
+        symbol: e.g. "ETH/USDT" (ccxt format with slash)
+        ts_iso: ISO 8601 timestamp of the PREDICTION (e.g. "2026-06-17T21:56:05+00:00")
+    Returns:
+        Close price at ts+15min, or None on failure.
+    """
+    def _fetch() -> Optional[float]:
+        try:
+            import ccxt
+            # Parse prediction ts, add 15min to get settlement time
+            ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+            settle_ts = ts + timedelta(seconds=900)
+            settle_ms = int(settle_ts.timestamp() * 1000)
+
+            ex = ccxt.okx({"enableRateLimit": True})
+            # OKX /history-candles allows fetching historical candles
+            # ccxt signature: fetch_ohlcv(symbol, timeframe='1m', since=ms, limit=1)
+            # `since` returns the candle whose OPEN ts >= since. We want the
+            # candle that CONTAINS settle_ts, so we pass since=settle_ms - 60_000
+            # (1 candle before) and limit=2, then pick the candle whose open ts
+            # is closest to settle_ts.
+            ohlcv = ex.fetch_ohlcv(
+                symbol, timeframe="1m", since=settle_ms - 60_000, limit=2
+            )
+            if not ohlcv:
+                log.warning(
+                    "_fetch_price_at_time: empty ohlcv for %s @ %s",
+                    symbol, settle_ts.isoformat(),
+                )
+                return None
+            # ohlcv entries: [open_ts_ms, open, high, low, close, volume]
+            # Pick the candle whose open_ts is closest to (but <=) settle_ms
+            best = None
+            for candle in ohlcv:
+                if candle[0] <= settle_ms:
+                    if best is None or candle[0] > best[0]:
+                        best = candle
+            if best is None:
+                best = ohlcv[0]
+            close_price = float(best[4])  # index 4 = close
+            if close_price <= 0:
+                log.warning(
+                    "_fetch_price_at_time: zero/neg close for %s @ %s: %r",
+                    symbol, settle_ts.isoformat(), best,
+                )
+                return None
+            return close_price
+        except Exception as e:
+            log.warning(
+                "ccxt fetch_ohlcv failed for %s @ %s: %s",
+                symbol, ts_iso, e,
+            )
+            return None
+    return await asyncio.to_thread(_fetch)
+
+
 async def _verify_pending_outcomes() -> int:
     """Settle predictions whose 15-min window has elapsed.
 
     For each prediction with outcome=NULL and ts older than 15min:
-      1. Fetch current price via ccxt
-      2. Compare with price_now at prediction time
-      3. Determine WIN/LOSS (skip FLAT — no directional bet)
-      4. Update Supabase row with outcome + price_15m_later
+      1. Compute settlement time = prediction_ts + 15min
+      2. Fetch historical close price at settlement time via OKX /history-candles
+         (NOT current price — that would conflate multi-hour trends with
+         15min directional accuracy)
+      3. Compare with price_now at prediction time
+      4. Determine WIN/LOSS (skip FLAT — no directional bet)
+      5. Update Supabase row with outcome + price_15m_later
 
     Returns the number of outcomes settled in this run.
     """
@@ -254,24 +328,15 @@ async def _verify_pending_outcomes() -> int:
 
     log.info("verifier: %d pending predictions to settle", len(pending))
 
-    # Group by symbol so we only fetch price once per symbol
-    # (predictions in same 15m cycle share the same settlement price anyway)
-    symbol_prices: dict[str, Optional[float]] = {}
-    symbols_needed = set()
-    for row in pending:
-        # Symbol stored as "ETHUSDT" in DB — convert back to ccxt format "ETH/USDT"
-        sym_raw = row.get("symbol", "")
-        sym_ccxt = sym_raw[:3] + "/" + sym_raw[3:] if len(sym_raw) >= 6 else sym_raw
-        symbols_needed.add(sym_ccxt)
-
-    for sym in symbols_needed:
-        symbol_prices[sym] = await _fetch_current_price(sym)
-        await asyncio.sleep(0.5)  # gentle on OKX rate limit
-
     settled = 0
     settled_ids: list[int] = []
     skipped = 0
     errors = 0
+    cache_hits = 0
+    # Per-symbol, per-settlement-minute price cache.
+    # Multiple predictions in the same 15m cycle share the same settlement
+    # time, so we cache by (symbol, settle_minute_ms) to avoid hammering OKX.
+    price_cache: dict[tuple[str, int], Optional[float]] = {}
 
     for row in pending:
         pred_id = row.get("id")
@@ -279,16 +344,47 @@ async def _verify_pending_outcomes() -> int:
         sym_ccxt = sym_raw[:3] + "/" + sym_raw[3:] if len(sym_raw) >= 6 else sym_raw
         direction = (row.get("prediction") or "").upper()
         price_now = float(row.get("price_now") or 0)
-        price_later = symbol_prices.get(sym_ccxt)
+        ts_iso = row.get("ts")
 
-        if price_later is None or price_later <= 0:
-            log.warning("verifier: no price for %s, skipping id=%s", sym_ccxt, pred_id)
+        if not ts_iso or price_now <= 0:
+            log.warning(
+                "verifier: invalid row id=%s (ts=%s price_now=%s), skipping",
+                pred_id, ts_iso, price_now,
+            )
             errors += 1
             continue
 
         # Skip FLAT — no directional bet to verify
         if direction == "FLAT":
             skipped += 1
+            continue
+
+        # Compute settlement minute (ts+15min, truncated to minute for caching)
+        try:
+            ts_dt = datetime.fromisoformat(str(ts_iso).replace("Z", "+00:00"))
+            settle_dt = ts_dt + timedelta(seconds=900)
+            settle_minute_ms = int(settle_dt.timestamp() // 60 * 60 * 1000)
+        except Exception as e:
+            log.warning("verifier: cannot parse ts=%s for id=%s: %s", ts_iso, pred_id, e)
+            errors += 1
+            continue
+
+        cache_key = (sym_ccxt, settle_minute_ms)
+        if cache_key in price_cache:
+            price_later = price_cache[cache_key]
+            cache_hits += 1
+        else:
+            price_later = await _fetch_price_at_time(sym_ccxt, str(ts_iso))
+            price_cache[cache_key] = price_later
+            # Gentle pacing only on cache miss
+            await asyncio.sleep(0.3)
+
+        if price_later is None or price_later <= 0:
+            log.warning(
+                "verifier: no historical price for %s @ %s, skipping id=%s",
+                sym_ccxt, settle_dt.isoformat(), pred_id,
+            )
+            errors += 1
             continue
 
         # Determine WIN/LOSS
@@ -320,16 +416,145 @@ async def _verify_pending_outcomes() -> int:
     _state["verified_total"] = (_state.get("verified_total") or 0) + settled
 
     log.info(
-        "verifier done: settled=%d skipped=%d errors=%d total_verified_so_far=%d",
-        settled, skipped, errors, _state["verified_total"],
+        "verifier done: settled=%d skipped=%d errors=%d cache_hits=%d "
+        "price_cache_size=%d total_verified_so_far=%d",
+        settled, skipped, errors, cache_hits, len(price_cache),
+        _state["verified_total"],
     )
     return settled
+
+
+async def _backfill_bogus_outcomes() -> int:
+    """Re-settle predictions whose outcome was computed with the buggy
+    current-price verifier (before ACT-XXII-prereq).
+
+    The bug: _fetch_current_price() returned the spot price AT VERIFIER RUNTIME
+    instead of the historical close at ts+15min. This meant all predictions
+    got the same price_15m_later, conflating a multi-hour trend with 15min
+    directional accuracy.
+
+    Fix: fetch historical OHLC at ts+15min via OKX /history-candles and
+    recompute WIN/LOSS using the correct settlement price.
+
+    Triggered once on startup (when verified_total_with_buggy_price > 0
+    AND bogus_backfill_done != True). Marks _state['bogus_backfill_done']=True
+    when complete so it doesn't re-run.
+
+    Returns the number of outcomes re-settled.
+    """
+    if _state.get("bogus_backfill_done"):
+        return 0
+
+    try:
+        from . import supabase_client
+    except Exception as e:
+        log.warning("supabase_client unavailable for backfill: %s", e)
+        return 0
+
+    try:
+        # Fetch ALL predictions that already have WIN/LOSS — those are the
+        # ones that may have been settled with the buggy current-price logic.
+        # We re-fetch their historical price and recompute outcome.
+        rows = await supabase_client.fetch_predictions(limit=500)
+        to_resettle = [
+            r for r in rows
+            if r.get("outcome") in ("WIN", "LOSS")
+            and r.get("ts")
+            and r.get("price_now")
+        ]
+    except Exception as e:
+        log.exception("backfill fetch failed: %s", e)
+        return 0
+
+    if not to_resettle:
+        log.info("backfill: no WIN/LOSS rows to re-settle")
+        _state["bogus_backfill_done"] = True
+        _state["bogus_backfill_count"] = 0
+        return 0
+
+    log.info("backfill: re-settling %d outcomes with historical prices", len(to_resettle))
+
+    resettled = 0
+    errors = 0
+    cache: dict[tuple[str, int], Optional[float]] = {}
+
+    for row in to_resettle:
+        pred_id = row.get("id")
+        sym_raw = row.get("symbol", "")
+        sym_ccxt = sym_raw[:3] + "/" + sym_raw[3:] if len(sym_raw) >= 6 else sym_raw
+        direction = (row.get("prediction") or "").upper()
+        price_now = float(row.get("price_now") or 0)
+        ts_iso = str(row.get("ts"))
+
+        try:
+            ts_dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+            settle_dt = ts_dt + timedelta(seconds=900)
+            settle_minute_ms = int(settle_dt.timestamp() // 60 * 60 * 1000)
+        except Exception as e:
+            log.warning("backfill: cannot parse ts=%s id=%s: %s", ts_iso, pred_id, e)
+            errors += 1
+            continue
+
+        cache_key = (sym_ccxt, settle_minute_ms)
+        if cache_key in cache:
+            price_later = cache[cache_key]
+        else:
+            price_later = await _fetch_price_at_time(sym_ccxt, ts_iso)
+            cache[cache_key] = price_later
+            await asyncio.sleep(0.3)
+
+        if price_later is None or price_later <= 0:
+            log.warning(
+                "backfill: no historical price for %s @ %s, leaving id=%s as-is",
+                sym_ccxt, settle_dt.isoformat(), pred_id,
+            )
+            errors += 1
+            continue
+
+        if direction == "LONG":
+            new_outcome = "WIN" if price_later > price_now else "LOSS"
+        elif direction == "SHORT":
+            new_outcome = "WIN" if price_later < price_now else "LOSS"
+        else:
+            continue
+
+        old_outcome = row.get("outcome")
+        ok = await supabase_client.update_outcome(pred_id, new_outcome, price_later)
+        if ok:
+            resettled += 1
+            if old_outcome != new_outcome:
+                log.info(
+                    "backfill FLIP: id=%s %s %s now=$%.2f later=$%.2f → %s (was %s)",
+                    pred_id, sym_raw, direction, price_now, price_later,
+                    new_outcome, old_outcome,
+                )
+        else:
+            errors += 1
+        await asyncio.sleep(0.1)
+
+    _state["bogus_backfill_done"] = True
+    _state["bogus_backfill_count"] = resettled
+    _state["bogus_backfill_errors"] = errors
+    log.info(
+        "backfill complete: resettled=%d errors=%d (flips logged above)",
+        resettled, errors,
+    )
+    return resettled
 
 
 async def _oracle_loop() -> None:
     """Main loop: every CYCLE_INTERVAL_S, run predictions for all symbols."""
     log.info("oracle_loop waiting %ds before first cycle...", INITIAL_DELAY_S)
     await asyncio.sleep(INITIAL_DELAY_S)
+
+    # ACT-XXII-prereq: ONE-TIME backfill of bogus outcomes that were settled
+    # with current-price instead of historical price. Runs once at startup
+    # before the first prediction cycle, so the dashboard reflects correct
+    # win rates as soon as possible.
+    try:
+        await _backfill_bogus_outcomes()
+    except Exception as e:
+        log.exception("backfill error (non-fatal, continuing): %s", e)
 
     while True:
         cycle_start = datetime.now(timezone.utc)

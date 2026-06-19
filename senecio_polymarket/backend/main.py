@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXI-verifier-online", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXII-prereq-historical-verifier", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -103,7 +103,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXI-verifier-online",
+        "version": "ACT-XXII-prereq-historical-verifier",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -200,7 +200,7 @@ async def oracle_score():
         }
 
     return {
-        "version": "ACT-XXI-verifier-online",
+        "version": "ACT-XXII-prereq-historical-verifier",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
