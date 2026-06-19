@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XX-polymarket-style", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXI-verifier-online", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -103,7 +103,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XIX-unified-oracle-supabase",
+        "version": "ACT-XXI-verifier-online",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -170,7 +170,11 @@ async def oracle_predictions_db(limit: int = Query(default=50, le=500), symbol: 
 
 @app.get("/api/oracle/score")
 async def oracle_score():
-    """Oracle accuracy score computed from Supabase (verified predictions only)."""
+    """Oracle accuracy score computed from Supabase (verified predictions only).
+
+    Returns both aggregate and per-direction breakdown — the LONG vs SHORT
+    asymmetry is a critical GO/NO-GO signal for live capital.
+    """
     from . import supabase_client
     # Get all predictions with outcome filled
     rows = await supabase_client.fetch_predictions(limit=500)
@@ -178,12 +182,31 @@ async def oracle_score():
     wins = sum(1 for r in verified if r.get("outcome") == "WIN")
     losses = sum(1 for r in verified if r.get("outcome") == "LOSS")
     win_rate = (wins / len(verified) * 100) if verified else 0.0
+
+    # Per-direction breakdown — surfaces edge asymmetry that the aggregate
+    # win_rate hides (e.g. LONG 0% + SHORT 82% averages to 46% which looks
+    # mediocre but actually means LONG is broken and SHORT is the alpha).
+    by_direction: dict[str, dict] = {}
+    for direction in ("LONG", "SHORT", "FLAT"):
+        sub = [r for r in verified if (r.get("prediction") or "").upper() == direction]
+        sub_w = sum(1 for r in sub if r.get("outcome") == "WIN")
+        sub_l = sum(1 for r in sub if r.get("outcome") == "LOSS")
+        sub_decided = sub_w + sub_l
+        by_direction[direction] = {
+            "verified": sub_decided,
+            "wins": sub_w,
+            "losses": sub_l,
+            "win_rate_pct": round((sub_w / sub_decided * 100) if sub_decided > 0 else 0.0, 2),
+        }
+
     return {
+        "version": "ACT-XXI-verifier-online",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
         "losses": losses,
         "win_rate_pct": round(win_rate, 2),
+        "by_direction": by_direction,
     }
 
 

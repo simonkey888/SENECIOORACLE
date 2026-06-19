@@ -167,10 +167,16 @@ async def update_outcome(prediction_id: int, outcome: str, price_15m_later: floa
         price_15m_later: actual price 15min after prediction
 
     Returns True on success.
+
+    RLS safety: PostgREST returns HTTP 200 with an empty array [] when an
+    UPDATE is blocked by RLS or the row id doesn't exist. Status code alone
+    is NOT a reliable success signal — we must check len(response body) > 0.
     """
     try:
         c = _get_client()
         # PostgREST PATCH with row filter: PATCH /table?id=eq.{id}
+        # Prefer: return=representation (already in default headers) so the
+        # response body contains the updated row(s).
         r = await c.patch(
             f"/{SUPABASE_TABLE}",
             params={"id": f"eq.{prediction_id}"},
@@ -180,8 +186,23 @@ async def update_outcome(prediction_id: int, outcome: str, price_15m_later: floa
             },
         )
         if r.status_code in (200, 204):
-            log.info("supabase update_outcome OK id=%s outcome=%s", prediction_id, outcome)
-            return True
+            # ACT XXI patch: validate that a row was actually updated.
+            # PostgREST returns [] when 0 rows match (RLS-blocked or id missing)
+            # — silently treating that as success caused a false positive
+            # on the first verifier run before RLS UPDATE was enabled.
+            try:
+                body = r.json() if r.content else []
+            except Exception:
+                body = []
+            if isinstance(body, list) and len(body) > 0:
+                log.info("supabase update_outcome OK id=%s outcome=%s", prediction_id, outcome)
+                return True
+            log.error(
+                "supabase update_outcome NO-OP id=%s outcome=%s status=%s body=%r "
+                "— RLS likely blocked UPDATE (check UPDATE policy on table)",
+                prediction_id, outcome, r.status_code, body,
+            )
+            return False
         log.error("supabase update_outcome failed: %s %s", r.status_code, r.text[:300])
         return False
     except Exception as e:
