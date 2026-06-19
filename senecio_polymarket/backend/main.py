@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXII-prereq-historical-verifier", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXIII-directional-routing", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -103,7 +103,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXII-prereq-historical-verifier",
+        "version": "ACT-XXIII-directional-routing",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -172,10 +172,23 @@ async def oracle_predictions_db(limit: int = Query(default=50, le=500), symbol: 
 async def oracle_score():
     """Oracle accuracy score computed from Supabase (verified predictions only).
 
-    Returns both aggregate and per-direction breakdown — the LONG vs SHORT
-    asymmetry is a critical GO/NO-GO signal for live capital.
+    ACT XXIII: now returns per-direction × per-window breakdown + gate states.
+    The LONG vs SHORT asymmetry is a critical GO/NO-GO signal for live capital.
+
+    Returns:
+      - total_predictions: count of all rows in Supabase
+      - verified: count of rows with WIN/LOSS outcome (= outcome_1h, the gating column)
+      - wins/losses/win_rate_pct: aggregate across all verified
+      - by_direction: per-direction breakdown using outcome_1h (primary column)
+      - by_window: {15m: {LONG, SHORT, FLAT, global}, 1h: {...}} — 15m reads from
+                   audit.outcomes_dual.outcome_15m, 1h reads primary `outcome` column
+      - gates: {long_1h, short_1h, global_1h} with pass/fail + thresholds + n
+      - short_only_paper_mode: True when SHORT passes 1h gate but LONG fails
+      - trade_mode: "PAPER" (always, per ACT XXIII directive 5 — no live capital)
+      - live_capital_locked: True (hard guard)
     """
     from . import supabase_client
+    from . import oracle_runner
     # Get all predictions with outcome filled
     rows = await supabase_client.fetch_predictions(limit=500)
     verified = [r for r in rows if r.get("outcome") in ("WIN", "LOSS")]
@@ -199,14 +212,27 @@ async def oracle_score():
             "win_rate_pct": round((sub_w / sub_decided * 100) if sub_decided > 0 else 0.0, 2),
         }
 
+    # ACT XXIII: pull full state from oracle_runner (directional stats + gates)
+    runner_state = oracle_runner.get_state()
+    by_window = runner_state.get("directional_stats", {}).get("by_window", {})
+    gates = runner_state.get("gates", {})
+    short_only_paper_mode = runner_state.get("short_only_paper_mode", False)
+    trade_mode = runner_state.get("trade_mode", "PAPER")
+    live_capital_locked = runner_state.get("live_capital_locked", True)
+
     return {
-        "version": "ACT-XXII-prereq-historical-verifier",
+        "version": "ACT-XXIII-directional-routing",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
         "losses": losses,
         "win_rate_pct": round(win_rate, 2),
-        "by_direction": by_direction,
+        "by_direction": by_direction,           # 1h-window primary breakdown (backward compat)
+        "by_window": by_window,                 # ACT XXIII: {15m: {...}, 1h: {...}}
+        "gates": gates,                         # ACT XXIII: directional GO/NO-GO
+        "short_only_paper_mode": short_only_paper_mode,
+        "trade_mode": trade_mode,               # always "PAPER" per directive 5
+        "live_capital_locked": live_capital_locked,
     }
 
 

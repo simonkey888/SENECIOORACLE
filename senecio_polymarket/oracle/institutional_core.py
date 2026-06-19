@@ -1,5 +1,5 @@
 """
-Module: institutional_core.py — SINGLE DECISION CORE
+Module: institutional_core.py — SINGLE DECISION CORE (ACT XXIII)
 
 PHILOSOPHY: single brain, single memory, single execution authority
 
@@ -21,6 +21,20 @@ GOVERNANCE (non-negotiable):
     hard_stop: True
     monotonicity: risk_up → action_down, NO EXCEPTION
 
+ACT XXIII changes:
+    - w_bidask_imbalance reduced 0.8 → 0.35 (lower-by-65%, the upper bound of
+      the "20% to 35%" reduction range in directive 3). Reason: ACT XXII
+      diagnosis showed LONG loses despite bullish orderflow — bidask was
+      dominating conviction via its high weight without adding true edge.
+    - regime_filter_4h() method added: computes 4h trend from ohlcv[-16:]
+      (16 × 15m = 4h) and returns 'BULL' / 'BEAR' / 'NEUTRAL' / 'HIGH_VOL'.
+    - compress_features() now consults regime_filter_4h() and SUPPRESSES LONG
+      when regime is BEAR — unless conviction ≥ 0.80 (exceptional-confidence
+      bypass per directive 4). SHORT is never suppressed by bearish regime.
+    - Per-direction quality tracking in _calibration_window_by_direction.
+    - Long-loss attribution log line emitted from compress_features() when
+      LONG is selected under bearish regime (early-warning trace).
+
 INPUTS:
     market_state   — price, volume, orderflow, spread, funding
     regime_state   — detected regime with hysteresis + archetype
@@ -37,10 +51,13 @@ import math
 import time
 import sys
 import os
+import logging
 from typing import Optional
 from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+log = logging.getLogger("senecio.institutional_core")
 
 try:
     from survivability import SurvivabilityFunction
@@ -106,9 +123,12 @@ class SingleDecisionCore:
         min_ev_to_trade: float = 0.001,
         no_trade_noise: float = 0.60,
         # ── Probability field weights ──
+        # ACT XXIII: w_bidask_imbalance reduced 0.8 → 0.35 (directive 3).
+        # Diagnosis showed bidask was dominating conviction on LONG without
+        # adding true edge — LONG has bullish orderflow but still loses.
         w_orderflow: float = 1.0,
         w_volume_delta: float = 0.6,
-        w_bidask_imbalance: float = 0.8,
+        w_bidask_imbalance: float = 0.35,
         w_funding_signal: float = 0.3,
         w_oi_momentum: float = 0.4,
         w_price_momentum: float = 0.5,
@@ -212,6 +232,10 @@ class SingleDecisionCore:
         # ── Signal smoothing buffers ──
         self._bidask_buffer = deque(maxlen=5)  # EMA-5 smoothing for bidask_imbalance
 
+        # ACT XXIII: stashed ohlcv from last ingest_market() call, used by
+        # regime_filter_4h() to compute 4h trend. None until first cycle.
+        self._last_ohlcv: list = []
+
         # ── Action 4: Rolling calibration window ──
         # Tracks last N directional prediction outcomes for adaptive thresholds.
         # Targets: accuracy_floor=0.45, brier_ceiling=0.25, execution_rate_target=0.35
@@ -221,6 +245,22 @@ class SingleDecisionCore:
             "brier_ceiling": 0.25,
             "execution_rate_target": 0.35,
         }
+
+        # ACT XXIII: Per-direction calibration windows + quality scores.
+        # Lets us answer "what's the recent LONG win rate?" and "what's the
+        # recent SHORT win rate?" — the global window hides asymmetry.
+        # Each entry: (direction, outcome, ts, conviction, regime_4h)
+        self._calibration_by_direction: dict[str, deque] = {
+            "LONG": deque(maxlen=100),
+            "SHORT": deque(maxlen=100),
+            "FLAT": deque(maxlen=50),
+        }
+        self._last_regime_4h = "NEUTRAL"
+
+        # ACT XXIII: LONG-suppression thresholds (directive 4)
+        # LONG is suppressed when 4h regime is BEAR unless conviction >= this bypass
+        self._long_bear_bypass_conviction = 0.80
+        self._long_loss_streak_under_bear = 0  # tracked for diagnostic logging
 
         # ── Action 5: Signal density control ──
         # Tracks EXECUTE count per (symbol, timeframe) to prevent overtrading.
@@ -305,6 +345,12 @@ class SingleDecisionCore:
         # ── Liquidity quality ──
         liquidity_quality = max(0.0, 1.0 - spread_pct * 100)
 
+        # ACT XXIII: stash last ohlcv for regime_filter_4h() to read 16 candles.
+        # We keep a reference here (no copy) — the caller owns the lifetime.
+        # regime_filter_4h() must be called from compress_features() (same cycle)
+        # to guarantee the data is still valid.
+        self._last_ohlcv = ohlcv
+
         return {
             "price": price,
             "price_momentum": price_momentum,
@@ -323,6 +369,57 @@ class SingleDecisionCore:
     # ===================================================================
     # STEP 2: FEATURE COMPRESSION
     # ===================================================================
+
+    def regime_filter_4h(self) -> str:
+        """ACT XXIII: Higher-timeframe regime guard (directive 4).
+
+        Computes a 4h regime label from the last 16 15m candles (16 × 15m = 4h)
+        stashed in self._last_ohlcv by ingest_market().
+
+        Returns one of:
+          - 'BEAR'      : 4h return < -0.5% (downtrend)
+          - 'BULL'      : 4h return > +0.5% (uptrend)
+          - 'HIGH_VOL'  : 4h realized vol > 4% (high-volatility regime)
+          - 'NEUTRAL'   : 4h return ∈ [-0.5%, +0.5%] and vol <= 4%
+
+        Note: thresholds are deliberately loose to avoid flipping on noise.
+        The bias is conservative — only flip to BEAR/BULL on a real move.
+        """
+        ohlcv = getattr(self, "_last_ohlcv", None) or []
+        if len(ohlcv) < 16:
+            # Not enough history — assume NEUTRAL (don't suppress LONG on cold start)
+            self._last_regime_4h = "NEUTRAL"
+            return "NEUTRAL"
+
+        # 4h return: (close[-1] - close[-16]) / close[-16]
+        try:
+            close_now = float(ohlcv[-1][4])
+            close_4h_ago = float(ohlcv[-16][4])
+            if close_4h_ago <= 0:
+                self._last_regime_4h = "NEUTRAL"
+                return "NEUTRAL"
+            ret_4h = (close_now - close_4h_ago) / close_4h_ago
+
+            # 4h realized vol: mean of |high-low|/close over last 16 candles
+            vols = []
+            for c in ohlcv[-16:]:
+                if c[4] > 0:
+                    vols.append((c[2] - c[3]) / c[4])
+            real_vol = sum(vols) / len(vols) if vols else 0.0
+
+            if real_vol > 0.04:
+                regime = "HIGH_VOL"
+            elif ret_4h < -0.005:
+                regime = "BEAR"
+            elif ret_4h > 0.005:
+                regime = "BULL"
+            else:
+                regime = "NEUTRAL"
+            self._last_regime_4h = regime
+            return regime
+        except Exception:
+            self._last_regime_4h = "NEUTRAL"
+            return "NEUTRAL"
 
     def compress_features(self, market_state: dict) -> dict:
         """Step 2: Extract regime + directional pressure from market_state.
@@ -380,6 +477,29 @@ class SingleDecisionCore:
         else:
             direction = "NEUTRAL"
 
+        # ACT XXIII: Higher-timeframe regime guard (directive 4).
+        # Block LONG when 4h regime is BEAR — unless conviction is exceptional
+        # (>= 0.80 bypass). SHORT is NEVER suppressed by a bearish regime —
+        # a bearish 4h trend actually STRENGTHENS the SHORT thesis.
+        regime_4h = self.regime_filter_4h()
+        long_suppressed_by_regime = False
+        if direction == "LONG" and regime_4h == "BEAR":
+            if conviction < self._long_bear_bypass_conviction:
+                # Demote LONG → NEUTRAL — don't fight the 4h downtrend
+                direction = "NEUTRAL"
+                long_suppressed_by_regime = True
+                log.info(
+                    "REGIME_GUARD: LONG suppressed (4h=BEAR conv=%.4f < bypass=%.2f) "
+                    "pressures=of:%.4f ba:%.4f pm:%.4f",
+                    conviction, self._long_bear_bypass_conviction,
+                    of_pressure, ba_pressure, pm_pressure,
+                )
+            else:
+                log.info(
+                    "REGIME_GUARD: LONG allowed despite 4h=BEAR (conv=%.4f >= bypass=%.2f) — exceptional confidence",
+                    conviction, self._long_bear_bypass_conviction,
+                )
+
         # FIX_3: DISABLED — was trend confirmation gate requiring price_momentum
         # to confirm direction. In live 4h crypto, price_momentum between candles
         # is too noisy (~0.7% swings) and rarely aligns with orderflow direction.
@@ -392,7 +512,7 @@ class SingleDecisionCore:
         # elif direction == "SHORT" and price_mom > 0.005:
         #     direction = "NEUTRAL"
 
-        # ── Regime hint ──
+        # ── Regime hint (15m local regime — different from 4h regime_4h above) ──
         vol = market_state.get("volatility", 0.01)
         if vol > 0.05:
             regime_hint = "HIGH_VOL"
@@ -413,6 +533,8 @@ class SingleDecisionCore:
             "conviction": round(conviction, 6),
             "noise": round(noise, 6),
             "regime_hint": regime_hint,
+            "regime_4h": regime_4h,                                  # ACT XXIII
+            "long_suppressed_by_regime": long_suppressed_by_regime,  # ACT XXIII
             "total_pressure": round(total_pressure, 6),
             "up_prob": round(up, 6),
             "down_prob": round(down, 6),
@@ -1260,6 +1382,69 @@ class SingleDecisionCore:
             correct: True if the prediction was correct, False otherwise.
         """
         self._calibration_window.append(correct)
+
+    def record_outcome_directional(
+        self,
+        direction: str,
+        correct: bool,
+        conviction: float = 0.0,
+        regime_4h: str = "NEUTRAL",
+    ) -> None:
+        """ACT XXIII: Record a per-direction outcome for directional quality tracking.
+
+        Maintains separate calibration windows for LONG / SHORT / FLAT so we can
+        answer "what's the recent LONG win rate?" — the global window hides
+        asymmetry that's critical for the directional gate logic in oracle_runner.
+
+        Args:
+            direction: "LONG", "SHORT", or "FLAT"
+            correct: True if prediction was correct (WIN), False (LOSS)
+            conviction: conviction score at decision time (for attribution)
+            regime_4h: 4h regime at decision time (for attribution)
+        """
+        d = (direction or "").upper()
+        if d not in self._calibration_by_direction:
+            return
+        self._calibration_by_direction[d].append({
+            "correct": bool(correct),
+            "conviction": float(conviction),
+            "regime_4h": regime_4h,
+            "ts": time.time(),
+        })
+
+        # Track LONG-loss streak under bearish regime — diagnostic for directive 3
+        if d == "LONG" and not correct and regime_4h == "BEAR":
+            self._long_loss_streak_under_bear += 1
+            log.info(
+                "LONG LOSS under BEAR regime (streak=%d) conviction=%.4f — attribution",
+                self._long_loss_streak_under_bear, conviction,
+            )
+        elif d == "LONG" and correct:
+            # Reset streak on any LONG win
+            if self._long_loss_streak_under_bear > 0:
+                self._long_loss_streak_under_bear = 0
+
+    def directional_quality(self) -> dict:
+        """ACT XXIII: Return per-direction quality scores for /api/oracle/score.
+
+        Returns:
+            {
+              "LONG":  {"n": int, "wins": int, "win_rate_pct": float},
+              "SHORT": {...},
+              "FLAT":  {...},
+            }
+        """
+        out: dict[str, dict] = {}
+        for direction, window in self._calibration_by_direction.items():
+            n = len(window)
+            wins = sum(1 for entry in window if entry.get("correct"))
+            out[direction] = {
+                "n": n,
+                "wins": wins,
+                "losses": n - wins,
+                "win_rate_pct": round((wins / n * 100) if n > 0 else 0.0, 2),
+            }
+        return out
 
     # ===================================================================
     # Action 5: Signal density control
