@@ -38,6 +38,18 @@ from .execution_simulator import ExecutionSimulator
 from .scheduler import Scheduler
 from .ws_server import make_router as make_ws_router
 from . import oracle_runner
+# ACT-XXVII: research layer (lazy-initialized to avoid import-time failures
+# if optional deps like shap are missing)
+try:
+    from .research import ResearchCoordinator, get_registry
+    _research_coord = ResearchCoordinator()
+    _metrics_registry = get_registry()
+except Exception as _research_init_err:  # pragma: no cover — research layer must never break the app
+    _research_coord = None
+    _metrics_registry = None
+    _research_init_err_msg = str(_research_init_err)
+else:
+    _research_init_err_msg = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 log = logging.getLogger("senecio.main")
@@ -83,7 +95,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXVI-deep-edge-integration", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXVII-research-grade-validation", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -103,7 +115,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXVI-deep-edge-integration",
+        "version": "ACT-XXVII-research-grade-validation",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -221,7 +233,7 @@ async def oracle_score():
     live_capital_locked = runner_state.get("live_capital_locked", True)
 
     return {
-        "version": "ACT-XXVI-deep-edge-integration",
+        "version": "ACT-XXVII-research-grade-validation",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
@@ -263,7 +275,7 @@ async def portfolio_state():
     """ACT-XXV/XXVI: full portfolio subsystem snapshot (includes microstructure + regime_hmm)."""
     coord = _get_coordinator()
     if coord is None:
-        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXVI-deep-edge-integration"}
+        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXVII-research-grade-validation"}
     return coord.get_state()
 
 
@@ -321,7 +333,7 @@ async def portfolio_microstructure():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVI-deep-edge-integration",
+        "version": "ACT-XXVII-research-grade-validation",
         "report": coord.get_microstructure_report(),
         "stats": coord.microstructure.stats(),
     }
@@ -342,7 +354,7 @@ async def portfolio_regime_hmm():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVI-deep-edge-integration",
+        "version": "ACT-XXVII-research-grade-validation",
         "belief": coord.get_regime_belief(),
         "stats": coord.regime_hmm.stats(),
     }
@@ -359,7 +371,7 @@ async def portfolio_meta_labeler():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVI-deep-edge-integration",
+        "version": "ACT-XXVII-research-grade-validation",
         "stats": coord.meta_labeler.stats(),
     }
 
@@ -471,6 +483,208 @@ async def catalog():
 async def replay(day: str):
     events = [ev.model_dump() for ev in _audit.iter_events(day=day)]
     return {"day": day, "count": len(events), "events": events}
+
+
+# ---- ACT-XXVII: Research endpoints (STRICT_ADDITIVE) ----
+#
+# All endpoints below are NEW — they do not touch any existing endpoint or
+# module. They expose the 6 research-layer priorities (PurgedKFold/CPCV,
+# calibration, drift detection, research metrics, explainability, and
+# observability) via JSON + Prometheus exposition.
+
+@app.get("/api/research/state")
+async def research_state():
+    """ACT-XXVII: research coordinator state + last full-pass summary."""
+    if _research_coord is None:
+        return {
+            "error": "research coordinator not initialized",
+            "init_error": _research_init_err_msg,
+            "version": "ACT-XXVII-research-grade-validation",
+        }
+    last = _research_coord.get_last_report()
+    return {
+        "version": "ACT-XXVII-research-grade-validation",
+        "initialized": True,
+        "n_predictions_loaded": len(_research_coord.predictions),
+        "feature_names": _research_coord.feature_names,
+        "last_pass": (last.to_dict() if last is not None else None),
+        "drift_stats": _research_coord.get_drift_stats(),
+        "explainer_stats": (
+            _research_coord.get_explainer().stats()
+            if _research_coord.get_explainer() is not None else None
+        ),
+    }
+
+
+@app.post("/api/research/run_full_pass")
+async def research_run_full_pass(limit: int = Query(default=0, ge=0, le=10000)):
+    """ACT-XXVII Priority 1-5: run a full research pass on loaded predictions.
+
+    Loads predictions from `predictions.jsonl` (or whatever was last loaded),
+    then runs PurgedKFold + CPCV + calibration × 3 methods + drift replay +
+    research metrics + explainer fit. Returns the aggregate report.
+    Pass limit=0 to use all available records.
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    if limit > 0:
+        _research_coord.load_predictions(limit=limit)
+    elif len(_research_coord.predictions) == 0:
+        _research_coord.load_predictions()
+    report = _research_coord.run_full_pass()
+    return report.to_dict()
+
+
+@app.get("/api/research/calibration")
+async def research_calibration(method: str = "isotonic"):
+    """ACT-XXVII Priority 2: run calibration for one method on loaded predictions.
+
+    Returns the CalibrationReport (Brier + ECE + reliability curve before/after).
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized"}
+    if _research_coord.confidences is None or _research_coord.confidences.shape[0] == 0:
+        _research_coord.load_predictions()
+    if _research_coord.confidences is None or _research_coord.confidences.shape[0] == 0:
+        return {"error": "no predictions loaded"}
+    from .research import fit_and_evaluate
+    rep = fit_and_evaluate(
+        y_true=_research_coord.y,
+        y_prob=_research_coord.confidences,
+        method=method,
+        extra={"endpoint": "/api/research/calibration"},
+    )
+    return rep.to_dict()
+
+
+@app.get("/api/research/drift")
+async def research_drift():
+    """ACT-XXVII Priority 3: drift monitor state + last warnings."""
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized"}
+    return {
+        "version": "ACT-XXVII-research-grade-validation",
+        "drift_stats": _research_coord.get_drift_stats(),
+    }
+
+
+@app.get("/api/research/metrics")
+async def research_metrics(window: int = Query(default=50, ge=10, le=1000)):
+    """ACT-XXVII Priority 4: research metrics (IC + rolling Sharpe/PF/MDD)."""
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized"}
+    if _research_coord.confidences is None or _research_coord.confidences.shape[0] == 0:
+        _research_coord.load_predictions()
+    if _research_coord.confidences is None or _research_coord.confidences.shape[0] == 0:
+        return {"error": "no predictions loaded"}
+    from .research import compute_research_metrics
+    preds_signed = _research_coord.confidences * (2 * _research_coord.y - 1)
+    realized = (2 * _research_coord.y - 1).astype(float)
+    report = compute_research_metrics(
+        predictions=preds_signed,
+        realized_returns=realized,
+        window=window,
+        step=max(1, window // 10),
+        extra={"endpoint": "/api/research/metrics"},
+    )
+    return report.to_dict()
+
+
+@app.post("/api/research/explainer/fit")
+async def research_explainer_fit(
+    model_type: str = Query(default="tree"),
+    prefer_shap: bool = Query(default=True),
+):
+    """ACT-XXVII Priority 5: fit the explainer surrogate model."""
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized"}
+    if _research_coord.X is None or _research_coord.X.shape[0] == 0:
+        _research_coord.load_predictions()
+        # Force rebuild of feature matrix
+        _research_coord.X, _research_coord.y, _research_coord.confidences, _research_coord.timestamps = \
+            _research_coord._build_feature_matrix()
+    if _research_coord.X is None or _research_coord.X.shape[0] == 0:
+        return {"error": "no predictions loaded"}
+    from .research import fit_explainer
+    expl = fit_explainer(
+        X=_research_coord.X,
+        y=_research_coord.y,
+        feature_names=_research_coord.feature_names,
+        model_type=model_type,
+        prefer_shap=prefer_shap,
+    )
+    _research_coord.explainer = expl
+    return {
+        "version": "ACT-XXVII-research-grade-validation",
+        "stats": expl.stats(),
+    }
+
+
+@app.post("/api/research/explainer/explain")
+async def research_explainer_explain(prediction: dict):
+    """ACT-XXVII Priority 5: explain a single prediction's feature contributions.
+
+    Body: a prediction dict (must contain the feature fields configured in
+    ResearchCoordinator.feature_names).
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized"}
+    if _research_coord.get_explainer() is None:
+        return {"error": "explainer not fitted — POST /api/research/explainer/fit first"}
+    explanation = _research_coord.explain_prediction(prediction)
+    if explanation is None:
+        return {"error": "explanation failed"}
+    return {
+        "version": "ACT-XXVII-research-grade-validation",
+        "explanation": explanation,
+    }
+
+
+@app.get("/api/research/explainer/history")
+async def research_explainer_history():
+    """ACT-XXVII Priority 5: feature importance history (for stability analysis)."""
+    if _research_coord is None or _research_coord.get_explainer() is None:
+        return {"error": "explainer not fitted",
+                "history": []}
+    history = _research_coord.get_explainer().feature_importance_history()
+    return {
+        "version": "ACT-XXVII-research-grade-validation",
+        "n_snapshots": len(history),
+        "history": history,
+    }
+
+
+@app.get("/api/observability")
+async def observability():
+    """ACT-XXVII Priority 6: JSON snapshot of all Prometheus metrics."""
+    if _metrics_registry is None:
+        return {"error": "metrics registry not initialized",
+                "init_error": _research_init_err_msg}
+    return {
+        "version": "ACT-XXVII-research-grade-validation",
+        "snapshot": _metrics_registry.stats(),
+    }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """ACT-XXVII Priority 6: Prometheus exposition endpoint.
+
+    Returns text/plain Prometheus format (scrape target for Prometheus /
+    Grafana / VictoriaMetrics / etc.).
+    """
+    if _metrics_registry is None:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            "# metrics registry not initialized\n",
+            media_type="text/plain; version=0.0.4",
+        )
+    body, content_type = _metrics_registry.expose()
+    # Refresh runtime gauges on each scrape
+    _metrics_registry.update_runtime_metrics()
+    from fastapi.responses import Response
+    return Response(content=body, media_type=content_type)
 
 
 # ---- static frontend ----

@@ -610,10 +610,15 @@ def test_main_endpoints() -> bool:
         if "backend.main" in sys.modules:
             del sys.modules["backend.main"]
         from backend import main as main_module
-        # Verify version
+        # Verify version — accept ACT-XXVI or any later ACT that preserves
+        # the XXVI endpoints (additive-only directive).
         assert main_module.app.title == "SENECIO ORACLE"
-        assert main_module.app.version == "ACT-XXVI-deep-edge-integration", \
-            f"app version = {main_module.app.version}"
+        accepted_versions = (
+            "ACT-XXVI-deep-edge-integration",
+            "ACT-XXVII-research-grade-validation",
+        )
+        assert main_module.app.version in accepted_versions, \
+            f"app version = {main_module.app.version} (expected one of {accepted_versions})"
         ok(f"FastAPI app version = {main_module.app.version}")
         # Verify routes include the 3 new endpoints
         routes = [r.path for r in main_module.app.routes if hasattr(r, "path")]

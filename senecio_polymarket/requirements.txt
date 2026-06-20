@@ -9,3 +9,10 @@ httpx==0.28.1
 # Oracle real (predict_only.py)
 ccxt==4.5.58
 numpy>=1.26,<2.0
+# ACT-XXVII research layer
+scipy>=1.11
+scikit-learn>=1.4
+prometheus_client>=0.20
+# Optional but recommended for SHAP-based explainability.
+# Module falls back to permutation importance if shap is absent.
+shap>=0.45
