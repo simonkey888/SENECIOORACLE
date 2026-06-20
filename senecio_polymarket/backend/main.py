@@ -1417,3 +1417,180 @@ async def antifragility_checkpoint_restore(subsystem: str):
                 "subsystem": subsystem}
     return {"subsystem": subsystem, "state": state}
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ACT FINAL_AUDIT (MYTHOS) — STRICT_ADDITIVE observability endpoints
+#
+# All endpoints below are NEW (additive). They expose the forensic pipeline
+# (A3), watchdogs (A4), evidence tracker (A6), statistical study (A7),
+# decision engine (A8), and executive report (A9).
+#
+# DO NOT modify trading logic. DO NOT unlock LIVE gate.
+# ═══════════════════════════════════════════════════════════════════════════
+
+FINAL_AUDIT_VERSION = "ACT-FINAL_AUDIT-MYTHOS-STRICT_ADDITIVE"
+
+
+@app.get("/api/final_audit/version")
+async def final_audit_version():
+    """Return the FINAL_AUDIT infrastructure version stamp."""
+    return {
+        "final_audit_version": FINAL_AUDIT_VERSION,
+        "base_app_version": app.version,
+        "mode": "STRICT_ADDITIVE",
+        "trade_mode": "PAPER_ONLY",
+        "live_gate": "LOCKED",
+        "freeze_tag": "PRE_LONG_FIX_FREEZE",
+        "do_not_touch": [
+            "prediction_model", "feature_engineering", "signal_generation",
+            "verifier", "long_logic", "thresholds",
+        ],
+    }
+
+
+@app.get("/api/final_audit/forensics/latest")
+async def final_audit_forensics_latest():
+    """Return the most recent forensic pipeline summary."""
+    try:
+        from .forensics import pipeline as fp
+        return {
+            "last_summary": fp.get_last_run_summary(),
+            "recent_runs": fp.list_runs(limit=5),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/final_audit/forensics/run")
+async def final_audit_forensics_run():
+    """Manually trigger the forensic pipeline (does NOT block verifier)."""
+    try:
+        from .forensics import pipeline as fp
+        report = await fp.run_pipeline_async()
+        return {"summary": report.get("summary"), "ran_at_utc": report.get("run_completed_at_utc")}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/final_audit/watchdogs/latest")
+async def final_audit_watchdogs_latest():
+    """Return the latest watchdog alerts (from append-only JSONL log)."""
+    try:
+        from .watchdogs import coordinator as wd
+        return {
+            "alerts": wd.latest_alerts(limit=50),
+            "watchdog_names": [name for name, _ in wd.WATCHDOGS],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/final_audit/evidence/progress")
+async def final_audit_evidence_progress():
+    """Return progress toward evidence targets (>=200 verified, >=100 long, >=100 short)."""
+    try:
+        from . import evidence_tracker
+        return evidence_tracker.get_progress()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/final_audit/study/run")
+async def final_audit_study_run():
+    """Manually trigger the full A7 statistical study + A8 decision + A9 report.
+
+    This is a heavy operation (can take several seconds). Use sparingly.
+    """
+    try:
+        from .research import final_audit_orchestrator as fa
+        report = await fa.run_final_audit_async()
+        # Return a compact summary — full report is saved to disk
+        return {
+            "FINAL_VERDICT": report.get("FINAL_VERDICT"),
+            "GO_NO_GO": report.get("GO_NO_GO"),
+            "CONFIDENCE_SCORE": report.get("CONFIDENCE_SCORE"),
+            "ROOT_CAUSES_COUNT": len(report.get("ROOT_CAUSES_ORDERED", [])),
+            "PATCH_RECOMMENDATIONS_COUNT": len(report.get("PATCH_RECOMMENDATIONS", [])),
+            "EVIDENCE_PROGRESS": report.get("EVIDENCE_PROGRESS"),
+            "report_generated_at_utc": report.get("report_generated_at_utc"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/final_audit/study/latest")
+async def final_audit_study_latest():
+    """Return the latest executive report (or empty if none yet)."""
+    try:
+        from .research import executive_report as er
+        report = er.latest_report()
+        if report is None:
+            return {"available": False, "reason": "no executive report generated yet"}
+        return {
+            "available": True,
+            "FINAL_VERDICT": report.get("FINAL_VERDICT"),
+            "GO_NO_GO": report.get("GO_NO_GO"),
+            "CONFIDENCE_SCORE": report.get("CONFIDENCE_SCORE"),
+            "ROOT_CAUSES_ORDERED": report.get("ROOT_CAUSES_ORDERED"),
+            "PATCH_RECOMMENDATIONS": report.get("PATCH_RECOMMENDATIONS"),
+            "EVIDENCE_PROGRESS": report.get("EVIDENCE_PROGRESS"),
+            "DECISION_DETAIL": report.get("DECISION_DETAIL"),
+            "report_generated_at_utc": report.get("report_generated_at_utc"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/final_audit/audit_enrichment/schema")
+async def final_audit_enrichment_schema():
+    """Return the schema of the enriched audit fields (A2)."""
+    try:
+        from . import audit_enrichment
+        return {
+            "enrichment_version": audit_enrichment.ENRICHMENT_VERSION,
+            "required_fields": audit_enrichment.REQUIRED_FIELDS,
+            "field_count": len(audit_enrichment.REQUIRED_FIELDS),
+            "model_version": audit_enrichment.MODEL_VERSION,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/final_audit/state")
+async def final_audit_state():
+    """Return the full FINAL_AUDIT infrastructure state in one call."""
+    try:
+        from .forensics import pipeline as fp
+        from .watchdogs import coordinator as wd
+        from . import evidence_tracker
+        from .research import executive_report as er
+
+        forensics_summary = fp.get_last_run_summary()
+        evidence = evidence_tracker.get_progress(forensics_summary)
+        latest_alerts = wd.latest_alerts(limit=10)
+        latest_report = er.latest_report()
+
+        return {
+            "version": FINAL_AUDIT_VERSION,
+            "freeze_tag": "PRE_LONG_FIX_FREEZE",
+            "mode": "STRICT_ADDITIVE",
+            "trade_mode": "PAPER_ONLY",
+            "live_gate": "LOCKED",
+
+            "evidence_progress": evidence,
+            "forensics_last_run": forensics_summary,
+            "forensics_recent_runs": fp.list_runs(limit=3),
+            "watchdog_alerts_recent": latest_alerts,
+            "watchdog_names": [name for name, _ in wd.WATCHDOGS],
+            "executive_report_available": latest_report is not None,
+            "executive_report_summary": ({
+                "FINAL_VERDICT": latest_report.get("FINAL_VERDICT"),
+                "GO_NO_GO": latest_report.get("GO_NO_GO"),
+                "CONFIDENCE_SCORE": latest_report.get("CONFIDENCE_SCORE"),
+                "report_generated_at_utc": latest_report.get("report_generated_at_utc"),
+            } if latest_report else None),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+

@@ -189,6 +189,23 @@ async def _run_one_prediction(symbol: str) -> Optional[dict]:
         if "_audit" in prediction:
             prediction["_audit"]["exchange_used"] = exchange_used
 
+        # ── ACT FINAL_AUDIT (A2) — STRICT_ADDITIVE audit enrichment ──
+        # Adds 30+ derived fields to _audit.enriched (hour, weekday, session,
+        # regime, microstructure, hashes, etc.). Never modifies the prediction
+        # itself or any existing _audit sub-dict. Never raises.
+        try:
+            from . import audit_enrichment
+            audit_enrichment.enrich_prediction(
+                prediction,
+                runtime_meta={
+                    "execution_model": "PAPER",
+                    "latency_ms": None,
+                    "slippage_bps": None,
+                },
+            )
+        except Exception as enrich_err:
+            log.warning("audit_enrichment failed (continuing): %s", enrich_err)
+
         # Persist
         await asyncio.to_thread(log_prediction, prediction, str(PREDICTIONS_PATH))
 
@@ -502,6 +519,18 @@ async def _verify_pending_outcomes() -> int:
 
     # Refresh directional stats + gates after settling new outcomes
     await _refresh_directional_stats()
+
+    # ── ACT FINAL_AUDIT (A3) — STRICT_ADDITIVE automatic forensics ──
+    # After every verifier cycle, run the full forensic pipeline in the
+    # background. NEVER blocks the verifier — failures are logged only.
+    if settled > 0:
+        try:
+            from .forensics import pipeline as forensics_pipeline
+            asyncio.create_task(forensics_pipeline.run_pipeline_async())
+            log.debug("forensics pipeline scheduled after settling %d outcomes", settled)
+        except Exception as f_err:
+            log.warning("forensics pipeline scheduling failed (continuing): %s", f_err)
+
     return settled
 
 
