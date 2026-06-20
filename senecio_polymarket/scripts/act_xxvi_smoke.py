@@ -616,6 +616,7 @@ def test_main_endpoints() -> bool:
         accepted_versions = (
             "ACT-XXVI-deep-edge-integration",
             "ACT-XXVII-research-grade-validation",
+            "ACT-XXVIII-institutional-validation",
         )
         assert main_module.app.version in accepted_versions, \
             f"app version = {main_module.app.version} (expected one of {accepted_versions})"

@@ -108,6 +108,72 @@ from .coordinator import (
     ResearchCoordinator,
     ResearchPassReport,
 )
+# ACT-XXVIII: institutional validation modules (STRICT_ADDITIVE)
+from .walk_forward_optimizer import (
+    WalkForwardWindow,
+    WindowResult,
+    WalkForwardReport,
+    ParameterStabilityReport,
+    generate_windows,
+    default_score_fn,
+    run_walk_forward,
+    parameter_sweep,
+)
+from .monte_carlo_validation import (
+    MonteCarloReport,
+    run_monte_carlo,
+    bootstrap_ci,
+)
+from .statistical_validation import (
+    DeflatedSharpeReport,
+    ProbabilisticSharpeReport,
+    PBOTReport,
+    RealityCheckReport,
+    MultipleHypothesisReport,
+    StatisticalValidationReport,
+    deflated_sharpe_ratio,
+    probabilistic_sharpe_ratio,
+    pbo,
+    white_reality_check,
+    superior_predictive_ability,
+    benjamini_hochberg,
+    holm_bonferroni,
+    multiple_hypothesis_correction,
+    run_statistical_battery,
+)
+from .capacity_model import (
+    ADVEstimate,
+    MarketImpactEstimate,
+    ScalabilityPoint,
+    CapacityReport,
+    estimate_adv,
+    almgren_chriss_impact,
+    kissell_linear_impact,
+    estimate_market_impact,
+    estimate_capacity,
+)
+from .stress_testing import (
+    StressScenarioResult,
+    StressReport,
+    volatility_shock,
+    spread_shock,
+    latency_shock,
+    exchange_outage,
+    funding_shock,
+    gap_simulation,
+    black_swan,
+    run_stress_battery,
+)
+from .institutional_report import (
+    RobustnessScorecard,
+    DeploymentReadinessScorecard,
+    LiveGateExplanation,
+    InstitutionalReport,
+    build_robustness_scorecard,
+    build_readiness_scorecard,
+    explain_live_gate,
+    build_institutional_report,
+)
 
 __all__ = [
     # Priority 1
@@ -163,6 +229,65 @@ __all__ = [
     # Coordinator
     "ResearchCoordinator",
     "ResearchPassReport",
+    # ACT-XXVIII — Module 1: walk-forward optimizer
+    "WalkForwardWindow",
+    "WindowResult",
+    "WalkForwardReport",
+    "ParameterStabilityReport",
+    "generate_windows",
+    "default_score_fn",
+    "run_walk_forward",
+    "parameter_sweep",
+    # ACT-XXVIII — Module 2: monte carlo validation
+    "MonteCarloReport",
+    "run_monte_carlo",
+    "bootstrap_ci",
+    # ACT-XXVIII — Module 3: statistical validation
+    "DeflatedSharpeReport",
+    "ProbabilisticSharpeReport",
+    "PBOTReport",
+    "RealityCheckReport",
+    "MultipleHypothesisReport",
+    "StatisticalValidationReport",
+    "deflated_sharpe_ratio",
+    "probabilistic_sharpe_ratio",
+    "pbo",
+    "white_reality_check",
+    "superior_predictive_ability",
+    "benjamini_hochberg",
+    "holm_bonferroni",
+    "multiple_hypothesis_correction",
+    "run_statistical_battery",
+    # ACT-XXVIII — Module 4: capacity model
+    "ADVEstimate",
+    "MarketImpactEstimate",
+    "ScalabilityPoint",
+    "CapacityReport",
+    "estimate_adv",
+    "almgren_chriss_impact",
+    "kissell_linear_impact",
+    "estimate_market_impact",
+    "estimate_capacity",
+    # ACT-XXVIII — Module 5: stress testing
+    "StressScenarioResult",
+    "StressReport",
+    "volatility_shock",
+    "spread_shock",
+    "latency_shock",
+    "exchange_outage",
+    "funding_shock",
+    "gap_simulation",
+    "black_swan",
+    "run_stress_battery",
+    # ACT-XXVIII — Module 6: institutional report
+    "RobustnessScorecard",
+    "DeploymentReadinessScorecard",
+    "LiveGateExplanation",
+    "InstitutionalReport",
+    "build_robustness_scorecard",
+    "build_readiness_scorecard",
+    "explain_live_gate",
+    "build_institutional_report",
 ]
 
-VERSION = "ACT-XXVII-research-grade-validation"
+VERSION = "ACT-XXVIII-institutional-validation"

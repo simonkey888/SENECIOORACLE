@@ -552,7 +552,13 @@ def test_main_endpoints() -> bool:
     banner("TEST 10: main.py has ACT-XXVII endpoints + version bump")
     try:
         from backend import main
-        assert main.app.version == "ACT-XXVII-research-grade-validation", \
+        # Accept ACT-XXVII or any later ACT that preserves all XXVII endpoints
+        # (additive-only directive — version may move forward but endpoints must stay).
+        accepted_versions = (
+            "ACT-XXVII-research-grade-validation",
+            "ACT-XXVIII-institutional-validation",
+        )
+        assert main.app.version in accepted_versions, \
             f"unexpected version: {main.app.version}"
         ok(f"main.py version = {main.app.version}")
         # Check all expected new endpoints are registered

@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import json
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXVII-research-grade-validation", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXVIII-institutional-validation", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -115,7 +115,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -233,7 +233,7 @@ async def oracle_score():
     live_capital_locked = runner_state.get("live_capital_locked", True)
 
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
@@ -275,7 +275,7 @@ async def portfolio_state():
     """ACT-XXV/XXVI: full portfolio subsystem snapshot (includes microstructure + regime_hmm)."""
     coord = _get_coordinator()
     if coord is None:
-        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXVII-research-grade-validation"}
+        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXVIII-institutional-validation"}
     return coord.get_state()
 
 
@@ -333,7 +333,7 @@ async def portfolio_microstructure():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "report": coord.get_microstructure_report(),
         "stats": coord.microstructure.stats(),
     }
@@ -354,7 +354,7 @@ async def portfolio_regime_hmm():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "belief": coord.get_regime_belief(),
         "stats": coord.regime_hmm.stats(),
     }
@@ -371,7 +371,7 @@ async def portfolio_meta_labeler():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "stats": coord.meta_labeler.stats(),
     }
 
@@ -499,11 +499,11 @@ async def research_state():
         return {
             "error": "research coordinator not initialized",
             "init_error": _research_init_err_msg,
-            "version": "ACT-XXVII-research-grade-validation",
+            "version": "ACT-XXVIII-institutional-validation",
         }
     last = _research_coord.get_last_report()
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "initialized": True,
         "n_predictions_loaded": len(_research_coord.predictions),
         "feature_names": _research_coord.feature_names,
@@ -564,7 +564,7 @@ async def research_drift():
     if _research_coord is None:
         return {"error": "research coordinator not initialized"}
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "drift_stats": _research_coord.get_drift_stats(),
     }
 
@@ -616,7 +616,7 @@ async def research_explainer_fit(
     )
     _research_coord.explainer = expl
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "stats": expl.stats(),
     }
 
@@ -636,7 +636,7 @@ async def research_explainer_explain(prediction: dict):
     if explanation is None:
         return {"error": "explanation failed"}
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "explanation": explanation,
     }
 
@@ -649,7 +649,7 @@ async def research_explainer_history():
                 "history": []}
     history = _research_coord.get_explainer().feature_importance_history()
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "n_snapshots": len(history),
         "history": history,
     }
@@ -662,7 +662,7 @@ async def observability():
         return {"error": "metrics registry not initialized",
                 "init_error": _research_init_err_msg}
     return {
-        "version": "ACT-XXVII-research-grade-validation",
+        "version": "ACT-XXVIII-institutional-validation",
         "snapshot": _metrics_registry.stats(),
     }
 
@@ -685,6 +685,516 @@ async def prometheus_metrics():
     _metrics_registry.update_runtime_metrics()
     from fastapi.responses import Response
     return Response(content=body, media_type=content_type)
+
+
+# ---- ACT-XXVIII: Institutional Validation endpoints (STRICT_ADDITIVE) ----
+#
+# All 6 endpoints below are NEW — they do not touch any existing endpoint
+# or module. They expose the ACT-XXVIII validation battery (walk-forward,
+# Monte Carlo, statistical, stress, capacity, institutional report) via
+# JSON. Each accepts an optional JSON body with explicit arrays
+# (`returns`, `y`, `y_pred`, `volumes`, `prices`, `depth_usd`,
+# `strategy_returns`, `directions`); when not provided, inputs are
+# derived from the loaded predictions.jsonl.
+
+def _derive_returns_from_predictions() -> tuple[list[float], list[int], list[float], list[float]]:
+    """Synthesise (returns, directions, y, y_pred) from loaded predictions.
+
+    Each prediction with a known outcome (WIN/CORRECT vs LOSS/WRONG;
+    SKIP/None is dropped) contributes:
+      return = (+/-1) * confidence * ev
+      direction = +1 if prediction LONG else -1
+      y = 1.0 if WIN/CORRECT else 0.0
+      y_pred = confidence
+    """
+    if _research_coord is None or not _research_coord.predictions:
+        return [], [], [], []
+    rets: list[float] = []
+    dirs: list[int] = []
+    ys:   list[float] = []
+    yp:   list[float] = []
+    for rec in _research_coord.predictions:
+        outcome = (rec.get("outcome") or "").upper()
+        if outcome in ("WIN", "CORRECT"):
+            y_v = 1.0
+        elif outcome in ("LOSS", "WRONG"):
+            y_v = 0.0
+        else:
+            continue  # SKIP / None / unknown
+        try:
+            conf = float(rec.get("confidence") or 0.5)
+            ev_v = float(rec.get("ev") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        sign = +1.0 if y_v == 1.0 else -1.0
+        ret = sign * conf * ev_v
+        direction = +1 if (rec.get("prediction") or "LONG").upper() == "LONG" else -1
+        rets.append(float(ret))
+        dirs.append(int(direction))
+        ys.append(float(y_v))
+        yp.append(float(conf))
+    return rets, dirs, ys, yp
+
+
+@app.post("/api/research/walkforward")
+async def research_walkforward(request: Request):
+    """ACT-XXVIII Module 1: walk-forward optimization.
+
+    Body (all optional):
+      scheme: "rolling" | "anchored" | "expanding" (default "rolling")
+      train_size: int (default 100)
+      test_size:  int (default 30)
+      step:       int (default 20)
+      y:          list[float] (auto-derived from predictions if absent)
+      y_pred:     list[float] (auto-derived from predictions if absent)
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    scheme = str(body.get("scheme", "rolling"))
+    train_size = int(body.get("train_size", 100))
+    test_size  = int(body.get("test_size", 30))
+    step       = int(body.get("step", 20))
+    y = body.get("y")
+    yp = body.get("y_pred")
+    if y is None or yp is None:
+        _research_coord.load_predictions()
+        _, _, ys, yps = _derive_returns_from_predictions()
+        y = y if y is not None else ys
+        yp = yp if yp is not None else yps
+    if not y or not yp:
+        return {"error": "no labelled predictions available"}
+    from .research import run_walk_forward
+    import numpy as _np
+    rep = run_walk_forward(
+        y=_np.asarray(y, dtype=float),
+        y_pred=_np.asarray(yp, dtype=float),
+        scheme=scheme, train_size=train_size, test_size=test_size, step=step,
+        extra={"endpoint": "/api/research/walkforward"},
+    )
+    if _metrics_registry is not None:
+        _metrics_registry.observe(
+            "senecio_research_runs_total", 1,
+            labels={"module": "walk_forward"},
+        )
+    return rep.to_dict()
+
+
+@app.post("/api/research/montecarlo")
+async def research_montecarlo(request: Request):
+    """ACT-XXVIII Module 2: Monte Carlo validation.
+
+    Body (all optional):
+      returns:             list[float] (auto-derived from predictions if absent)
+      n_bootstrap:         int (default 2000)
+      n_reshuffle:         int (default 1000)
+      ruin_threshold_pct:  float (default -0.20)
+      slippage_bps_std:    float (default 2.0)
+      fee_bps_std:         float (default 0.5)
+      gap_penalty_bps:     float (default 0.5)
+      random_seed:         int (default 1337)
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    returns = body.get("returns")
+    if returns is None:
+        _research_coord.load_predictions()
+        returns, _, _, _ = _derive_returns_from_predictions()
+    if not returns:
+        return {"error": "no returns available (provide `returns` in body)"}
+    from .research import run_monte_carlo
+    import numpy as _np
+    rep = run_monte_carlo(
+        returns=_np.asarray(returns, dtype=float),
+        n_bootstrap=int(body.get("n_bootstrap", 2000)),
+        n_reshuffle=int(body.get("n_reshuffle", 1000)),
+        ruin_threshold_pct=body.get("ruin_threshold_pct", -0.20),
+        slippage_bps_std=body.get("slippage_bps_std", 2.0),
+        fee_bps_std=body.get("fee_bps_std", 0.5),
+        gap_penalty_bps=body.get("gap_penalty_bps", 0.5),
+        random_seed=body.get("random_seed", 1337),
+        extra={"endpoint": "/api/research/montecarlo"},
+    )
+    if _metrics_registry is not None:
+        _metrics_registry.observe(
+            "senecio_research_runs_total", 1,
+            labels={"module": "monte_carlo"},
+        )
+        _metrics_registry.set_gauge(
+            "senecio_last_ic",  # we abuse this slot — TODO add a dedicated gauge
+            float(rep.ruin_probability),
+        )
+    return rep.to_dict()
+
+
+@app.post("/api/research/statistics")
+async def research_statistics(request: Request):
+    """ACT-XXVIII Module 3: statistical validation battery.
+
+    Body (all optional):
+      returns:           list[float] (auto-derived from predictions if absent)
+      strategy_returns:  list[list[float]] — (T, N) matrix for PBO/WRC/SPA
+      n_trials:          int (default 1) — for DSR deflation
+      sharpe_benchmark:  float (default 0.0)
+      n_bootstrap:       int (default 1000)
+      periods_per_year:  int (default 252)
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    returns = body.get("returns")
+    if returns is None:
+        _research_coord.load_predictions()
+        returns, _, _, _ = _derive_returns_from_predictions()
+    if not returns:
+        return {"error": "no returns available"}
+    from .research import run_statistical_battery
+    import numpy as _np
+    sr = body.get("strategy_returns")
+    sr_arr = _np.asarray(sr, dtype=float) if sr is not None else None
+    rep = run_statistical_battery(
+        returns=_np.asarray(returns, dtype=float),
+        strategy_returns=sr_arr,
+        n_trials=int(body.get("n_trials", 1)),
+        sharpe_benchmark=float(body.get("sharpe_benchmark", 0.0)),
+        n_bootstrap=int(body.get("n_bootstrap", 1000)),
+        periods_per_year=int(body.get("periods_per_year", 252)),
+        extra={"endpoint": "/api/research/statistics"},
+    )
+    if _metrics_registry is not None:
+        _metrics_registry.observe(
+            "senecio_research_runs_total", 1,
+            labels={"module": "statistical"},
+        )
+    return rep.to_dict()
+
+
+@app.post("/api/research/stress")
+async def research_stress(request: Request):
+    """ACT-XXVIII Module 5: stress test battery.
+
+    Body (all optional):
+      returns:        list[float] (auto-derived from predictions if absent)
+      directions:     list[int] (auto-derived; +1 LONG, -1 SHORT)
+      vol_mult:       float (default 3.0)
+      spread_bps:     float (default 5.0)
+      latency_bps:    float (default 3.0)
+      funding_bps:    float (default 10.0)
+      gap_pct:        float (default -10.0)
+      gap_position:   float (default 0.5)
+      outage_trades:  int (default 5)
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    returns = body.get("returns")
+    directions = body.get("directions")
+    if returns is None:
+        _research_coord.load_predictions()
+        returns, dirs, _, _ = _derive_returns_from_predictions()
+        directions = directions if directions is not None else dirs
+    if not returns:
+        return {"error": "no returns available"}
+    from .research import run_stress_battery
+    import numpy as _np
+    rep = run_stress_battery(
+        returns=_np.asarray(returns, dtype=float),
+        directions=_np.asarray(directions, dtype=int) if directions else None,
+        vol_mult=float(body.get("vol_mult", 3.0)),
+        spread_bps=float(body.get("spread_bps", 5.0)),
+        latency_bps=float(body.get("latency_bps", 3.0)),
+        funding_bps=float(body.get("funding_bps", 10.0)),
+        gap_pct=float(body.get("gap_pct", -10.0)),
+        gap_position=float(body.get("gap_position", 0.5)),
+        outage_trades=int(body.get("outage_trades", 5)),
+        extra={"endpoint": "/api/research/stress"},
+    )
+    if _metrics_registry is not None:
+        _metrics_registry.observe(
+            "senecio_research_runs_total", 1,
+            labels={"module": "stress"},
+        )
+    return rep.to_dict()
+
+
+@app.post("/api/research/capacity")
+async def research_capacity(request: Request):
+    """ACT-XXVIII Module 4: capacity model.
+
+    Body (all optional):
+      volumes:            list[float] — historical volume series
+      prices:             list[float] — historical price series
+      depth_usd:          float — top-of-book depth in USD
+      gross_edge_bps:     float (default 50)
+      trades_per_day:     float (default 10)
+      fee_bps_per_trade:  float (default 2)
+      capacity_target_usd: float (default 100000)
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    volumes = body.get("volumes")
+    prices  = body.get("prices")
+    depth_usd = body.get("depth_usd")
+    if volumes is None:
+        # Fallback: synthesise volumes from the loaded predictions' price × ev
+        _research_coord.load_predictions()
+        vols = []
+        for rec in _research_coord.predictions:
+            try:
+                p = float(rec.get("price_now") or 0.0)
+                ev = float(rec.get("ev") or 0.0)
+                # volume proxy = price × |return| × 1e6 (arbitrary scale)
+                vols.append(max(p * abs(ev) * 1e6, 1.0))
+            except (TypeError, ValueError):
+                continue
+        volumes = vols
+        if prices is None:
+            prices = [float(rec.get("price_now") or 1.0)
+                      for rec in _research_coord.predictions]
+    if not volumes:
+        return {"error": "no volumes available"}
+    from .research import estimate_capacity
+    import numpy as _np
+    rep = estimate_capacity(
+        volumes=_np.asarray(volumes, dtype=float),
+        prices=_np.asarray(prices, dtype=float) if prices else None,
+        depth_usd=depth_usd,
+        gross_edge_bps=float(body.get("gross_edge_bps", 50.0)),
+        trades_per_day=float(body.get("trades_per_day", 10.0)),
+        fee_bps_per_trade=float(body.get("fee_bps_per_trade", 2.0)),
+        extra={"endpoint": "/api/research/capacity"},
+    )
+    if _metrics_registry is not None:
+        _metrics_registry.observe(
+            "senecio_research_runs_total", 1,
+            labels={"module": "capacity"},
+        )
+    return rep.to_dict()
+
+
+@app.post("/api/research/report")
+async def research_report(request: Request):
+    """ACT-XXVIII Module 6: single institutional research report.
+
+    Orchestrates all 5 prior ACT-XXVIII modules + the existing ACT-XXVII
+    calibration/drift/research-metrics/explainability/observability
+    layers, then produces a single institutional report with:
+      - Robustness scorecard (0..1 composite)
+      - Deployment readiness scorecard (0..1 composite)
+      - Live-gate explanation (read-only)
+      - Every sub-module's full report
+
+    Body (all optional):
+      capacity_target_usd: float (default 100000)
+      min_verified_n:      int (default 300)
+      run_walk_forward:    bool (default true)
+      run_monte_carlo:     bool (default true)
+      run_statistical:     bool (default true)
+      run_stress:          bool (default true)
+      run_capacity:        bool (default true)
+      persist_html:        bool (default false)
+    """
+    if _research_coord is None:
+        return {"error": "research coordinator not initialized",
+                "init_error": _research_init_err_msg}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    import numpy as _np
+    from .research import (
+        run_walk_forward, run_monte_carlo, run_statistical_battery,
+        run_stress_battery, estimate_capacity, fit_and_evaluate,
+        build_institutional_report,
+    )
+    # Ensure predictions are loaded
+    if not _research_coord.predictions:
+        _research_coord.load_predictions()
+    # Build matrices
+    _research_coord.X, _research_coord.y, _research_coord.confidences, _research_coord.timestamps = \
+        _research_coord._build_feature_matrix()
+    # Derive returns/directions from predictions
+    returns, directions, ys, yps = _derive_returns_from_predictions()
+
+    wf_rep = mc_rep = stat_rep = stress_rep = cap_rep = None
+    cal_rep = None
+
+    # 1) Walk-forward
+    if body.get("run_walk_forward", True) and ys:
+        try:
+            wf_rep = run_walk_forward(
+                y=_np.asarray(ys, dtype=float),
+                y_pred=_np.asarray(yps, dtype=float),
+                scheme="rolling", train_size=100, test_size=30, step=20,
+                extra={"endpoint": "/api/research/report"},
+                persist=False,
+            ).to_dict()
+        except Exception as e:
+            log.warning("WF in report failed: %s", e)
+
+    # 2) Monte Carlo
+    if body.get("run_monte_carlo", True) and returns:
+        try:
+            mc_rep = run_monte_carlo(
+                returns=_np.asarray(returns, dtype=float),
+                n_bootstrap=500, n_reshuffle=200,
+                extra={"endpoint": "/api/research/report"},
+                persist=False,
+            ).to_dict()
+        except Exception as e:
+            log.warning("MC in report failed: %s", e)
+
+    # 3) Statistical
+    if body.get("run_statistical", True) and returns:
+        try:
+            stat_rep = run_statistical_battery(
+                returns=_np.asarray(returns, dtype=float),
+                n_bootstrap=500,
+                extra={"endpoint": "/api/research/report"},
+                persist=False,
+            ).to_dict()
+        except Exception as e:
+            log.warning("Stat in report failed: %s", e)
+
+    # 4) Stress
+    if body.get("run_stress", True) and returns:
+        try:
+            stress_rep = run_stress_battery(
+                returns=_np.asarray(returns, dtype=float),
+                directions=_np.asarray(directions, dtype=int) if directions else None,
+                extra={"endpoint": "/api/research/report"},
+                persist=False,
+            ).to_dict()
+        except Exception as e:
+            log.warning("Stress in report failed: %s", e)
+
+    # 5) Capacity
+    if body.get("run_capacity", True):
+        try:
+            # synthesise volumes from predictions
+            vols = []
+            prices = []
+            for rec in _research_coord.predictions:
+                try:
+                    p = float(rec.get("price_now") or 0.0)
+                    ev = float(rec.get("ev") or 0.0)
+                    vols.append(max(p * abs(ev) * 1e6, 1.0))
+                    prices.append(p)
+                except (TypeError, ValueError):
+                    continue
+            if vols:
+                cap_rep = estimate_capacity(
+                    volumes=_np.asarray(vols, dtype=float),
+                    prices=_np.asarray(prices, dtype=float),
+                    gross_edge_bps=50.0,
+                    extra={"endpoint": "/api/research/report"},
+                    persist=False,
+                ).to_dict()
+        except Exception as e:
+            log.warning("Capacity in report failed: %s", e)
+
+    # 6) Calibration (one method)
+    try:
+        if _research_coord.y is not None and _research_coord.y.size > 0:
+            cal_rep = fit_and_evaluate(
+                y_true=_research_coord.y,
+                y_prob=_research_coord.confidences,
+                method="isotonic",
+                extra={"endpoint": "/api/research/report"},
+            ).to_dict()
+    except Exception as e:
+        log.warning("Calibration in report failed: %s", e)
+
+    # Drift stats from coordinator
+    drift_stats = _research_coord.get_drift_stats()
+
+    # Live gate (read-only consumption)
+    live_gate_state = None
+    try:
+        coord = _get_coordinator()
+        if coord is not None:
+            from . import supabase_client
+            rows = await supabase_client.fetch_predictions(limit=500)
+            verified = [r for r in rows if r.get("outcome") in ("WIN", "LOSS", "CORRECT", "WRONG")]
+            wins = sum(1 for r in verified if r.get("outcome") in ("WIN", "CORRECT"))
+            win_rate = (wins / len(verified) * 100) if verified else 0.0
+            oracle_score = {
+                "win_rate_pct": win_rate,
+                "verified": len(verified),
+                "by_window": oracle_runner.get_state().get("directional_stats", {}).get("by_window", {}),
+            }
+            status = coord.evaluate_live_gate(oracle_score=oracle_score)
+            live_gate_state = status.to_dict()
+    except Exception as e:
+        log.warning("Live-gate fetch in report failed: %s", e)
+
+    # Verified predictions count
+    verified_n = 0
+    if live_gate_state is not None:
+        verified_n = int(live_gate_state.get("verified", 0))
+
+    # Observability snapshot
+    obs_snapshot = _metrics_registry.stats() if _metrics_registry is not None else {}
+
+    # Build the institutional report
+    inst_rep = build_institutional_report(
+        n_trades=len(returns),
+        n_predictions=len(_research_coord.predictions),
+        walk_forward_report=wf_rep,
+        monte_carlo_report=mc_rep,
+        statistical_report=stat_rep,
+        capacity_report=cap_rep,
+        stress_report=stress_rep,
+        calibration_report=cal_rep,
+        drift_stats=drift_stats,
+        research_metrics_report=None,  # populated by /api/research/metrics
+        explainer_stats=(
+            _research_coord.get_explainer().stats()
+            if _research_coord.get_explainer() is not None else None
+        ),
+        observability_snapshot=obs_snapshot,
+        live_gate_state=live_gate_state,
+        verified_predictions_n=verified_n,
+        capacity_target_usd=float(body.get("capacity_target_usd", 100_000.0)),
+        min_verified_n=int(body.get("min_verified_n", 300)),
+        extra={"endpoint": "/api/research/report"},
+        persist=True,
+        persist_html=bool(body.get("persist_html", False)),
+    )
+    if _metrics_registry is not None:
+        _metrics_registry.observe(
+            "senecio_research_runs_total", 1,
+            labels={"module": "institutional_report"},
+        )
+    return inst_rep.to_dict()
 
 
 # ---- static frontend ----
