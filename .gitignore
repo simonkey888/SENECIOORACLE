@@ -43,6 +43,9 @@ senecio_polymarket/data/forensics/
 senecio_polymarket/data/watchdogs/
 senecio_polymarket/data/executive_reports/
 senecio_polymarket/data/audit/
+senecio_polymarket/data/monitoring/
+senecio_polymarket/data/reevaluacion/
+senecio_polymarket/data/proposed_patches/
 
 # Top-level legacy duplicates (NOT in deploy path — Dockerfile copies senecio_polymarket/ only)
 # Kept in working tree for history; do NOT commit changes to these.
