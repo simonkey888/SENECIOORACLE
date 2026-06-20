@@ -1,0 +1,100 @@
+# SENECIO Smoke Tests — read-only CI guardian for the FINAL_AUDIT freeze
+#
+# PURPOSE
+#   Run act_final_audit_smoke.py on every push / pull_request to verify that:
+#     - The freeze artifacts (freeze/manifest_sha256.txt, versions.json) are intact
+#     - The DO_NOT_TOUCH trading-logic files (institutional_core.py, predict_only.py,
+#       market_ev.py) have byte-identical SHA-256 vs the freeze manifest  (T9)
+#     - The additive observability layer (A2-A9) still imports and runs cleanly
+#
+# WHAT THIS WORKFLOW DOES NOT DO
+#   - No cron schedule             (NEVER — Northflank owns the prediction loop)
+#   - No workflow_dispatch         (prevents any manual trigger that could mutate data)
+#   - No commits, no pushes        (permissions: contents: read — strictly read-only)
+#   - No deploy, no Pages publish  (this is a test gate, not a deployment pipeline)
+#   - Does not touch oracle.yml    (oracle.yml stays as-is, with cron still disabled)
+#   - Does not mutate predictions.jsonl, does not run predict_only.py, does not call
+#     the oracle_runner, does not call Supabase, does not call Northflank
+#
+# FREEZE GUARANTEE
+#   If any of T1 / T9 / T10 fails, the workflow fails red. That is the signal that
+#   someone touched trading logic, the freeze manifest, or removed API endpoints.
+#   T9 is the load-bearing assertion: SHA-256 of the three DO_NOT_TOUCH files must
+#   match the frozen manifest byte-for-byte.
+#
+# TRADE-OFFS
+#   - We install the full requirements.txt (heavier than strictly needed) because
+#     the smoke test imports backend.research.statistical_study which lazy-imports
+#     sklearn / numpy / scipy. A minimal install would let T9 pass but T6 could
+#     silently degrade. Keeping the full install preserves the test's contract.
+#   - We use ubuntu-latest (not a smaller runner) because shap pulls system libs.
+
+name: SENECIO Smoke Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: act_final_audit_smoke (T1-T12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: senecio_polymarket
+
+    steps:
+      - name: Checkout repo (with tags — T1 requires PRE_LONG_FIX_FREEZE)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: senecio_polymarket/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify freeze tag presence (pre-flight for T1)
+        run: |
+          echo "=== git tag list ==="
+          git tag -l
+          if ! git rev-parse --verify --quiet refs/tags/PRE_LONG_FIX_FREEZE > /dev/null; then
+            echo "::error::PRE_LONG_FIX_FREEZE tag missing — T1 will fail. Push the tag first."
+            exit 1
+          fi
+          echo "PRE_LONG_FIX_FREEZE -> $(git rev-parse refs/tags/PRE_LONG_FIX_FREEZE)"
+
+      - name: Run act_final_audit_smoke (T1-T12)
+        run: |
+          python -m scripts.act_final_audit_smoke
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Smoke Test Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ **86/86 checks passed** — freeze intact, DO_NOT_TOUCH files byte-identical, observability layer imports clean." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Smoke test failed** — see log above. If T9 failed, someone touched trading logic." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "T9 = SHA-256 verification of \`institutional_core.py\`, \`predict_only.py\`, \`market_ev.py\` vs \`freeze/manifest_sha256.txt\`." >> $GITHUB_STEP_SUMMARY
