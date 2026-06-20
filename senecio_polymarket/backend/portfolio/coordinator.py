@@ -49,6 +49,11 @@ from .trade_journal import TradeJournal
 from .portfolio_analytics import PortfolioAnalytics
 from .shadow_live import ShadowLive
 from .live_gate import LiveGate, GateStatus
+# ACT-XXVI additions
+from .microstructure import MicrostructureIntelligence, MicrostructureReport
+from .meta_labeler import MetaLabeler, MetaLabel
+from .regime_hmm import HMMRegimeOverlay, RegimeBelief
+from .execution_fidelity import BookSnapshot, book_snapshot_from_dict
 
 log = logging.getLogger("senecio.portfolio_coordinator")
 
@@ -75,6 +80,10 @@ class PortfolioCoordinator:
         portfolio_analytics: Optional[PortfolioAnalytics] = None,
         shadow_live: Optional[ShadowLive] = None,
         live_gate: Optional[LiveGate] = None,
+        # ACT-XXVI additions
+        microstructure: Optional[MicrostructureIntelligence] = None,
+        meta_labeler: Optional[MetaLabeler] = None,
+        regime_hmm: Optional[HMMRegimeOverlay] = None,
         config: Optional[dict] = None,
     ):
         self.cfg = config or {}
@@ -88,6 +97,18 @@ class PortfolioCoordinator:
         self.portfolio_analytics = portfolio_analytics or PortfolioAnalytics(config=self.cfg)
         self.shadow_live = shadow_live or ShadowLive(config=self.cfg)
         self.live_gate = live_gate or LiveGate()
+        # ACT-XXVI modules (lazily constructed if not provided)
+        self.microstructure = microstructure or MicrostructureIntelligence(config=self.cfg)
+        self.meta_labeler = meta_labeler or MetaLabeler(config=self.cfg)
+        self.regime_hmm = regime_hmm or HMMRegimeOverlay(config=self.cfg)
+        # Inject ACT-XXVI observers into the existing modules (additive —
+        # they stay None-safe in the existing modules so this is non-breaking).
+        self.portfolio_engine.meta_labeler = self.meta_labeler
+        self.risk_kernel.microstructure = self.microstructure
+        # Last-seen caches (for API exposure)
+        self._last_microstructure_report: Optional[MicrostructureReport] = None
+        self._last_meta_label: Optional[MetaLabel] = None
+        self._last_regime_belief: Optional[RegimeBelief] = None
 
         # State cache
         self._portfolio_state: PortfolioState = PortfolioState(
@@ -132,13 +153,29 @@ class PortfolioCoordinator:
         vol_pct: Optional[float] = None,
         win_rate_by_direction: Optional[dict[str, float]] = None,
         book_depth_usd: Optional[float] = None,
+        # ACT-XXVI additions
+        ohlcv: Optional[list[list]] = None,
+        orderbook: Optional[dict] = None,
+        funding_rate: Optional[float] = None,
+        oi_change_24h_pct: Optional[float] = None,
     ) -> Optional[dict[str, Any]]:
-        """Process a new oracle prediction through the full ACT-XXV pipeline.
+        """Process a new oracle prediction through the full ACT-XXV/XXVI pipeline.
 
         Called by oracle_runner after each prediction is persisted.
 
         Returns a dict with the proposal + decision + order info (or None
         if the prediction was FLAT or skipped).
+
+        ACT-XXVI additions:
+          - ohlcv + funding + OI are fed into MicrostructureIntelligence
+            (VPIN + OFI + liquidation + funding/OI) BEFORE risk evaluation
+            so the RiskKernel can REJECT/REDUCE based on toxic flow.
+          - ohlcv also feeds HMMRegimeOverlay — the belief is cached and
+            exposed via /api/portfolio/regime_hmm (additive, no behavior
+            change to the prediction model).
+          - If `orderbook` is provided (with bids/asks lists), it's
+            converted to a BookSnapshot and passed to the ExecutionEngine
+            for the high-fidelity L2-walk fill path.
         """
         if not self._started:
             log.warning("coordinator not started — call start() first")
@@ -158,10 +195,64 @@ class PortfolioCoordinator:
         # Update last-price cache
         self._last_prices[symbol] = ref_price
 
+        # ACT-XXVI Step 0: feed microstructure + HMM observers BEFORE proposal build.
+        # This ensures the RiskKernel sees a fresh toxic-flow report and the
+        # MetaLabeler sees a fresh regime belief when they're consulted.
+        toxic_score = 0.0
+        if ohlcv:
+            try:
+                self.microstructure.ingest_ohlcv(ohlcv)
+            except Exception as e:
+                log.debug("microstructure ohlcv ingest failed: %s", e)
+            try:
+                self._last_regime_belief = self.regime_hmm.update_from_ohlcv(
+                    ohlcv=ohlcv,
+                    funding_rate=funding_rate,
+                    oi_change_pct=oi_change_24h_pct,
+                )
+            except Exception as e:
+                log.debug("regime_hmm update failed: %s", e)
+        if funding_rate is not None and oi_change_24h_pct is not None:
+            try:
+                self.microstructure.ingest_funding_oi(funding_rate, oi_change_24h_pct)
+            except Exception as e:
+                log.debug("microstructure funding/oi ingest failed: %s", e)
+        if orderbook:
+            # Ingest top-of-book sizes into OFI estimator
+            try:
+                bids = orderbook.get("bids") or []
+                asks = orderbook.get("asks") or []
+                if bids and asks:
+                    # bids/asks may be [[price, size], ...] or [{"price":..,"size":..}]
+                    def _first_size(levels):
+                        if not levels:
+                            return 0.0
+                        lvl = levels[0]
+                        if isinstance(lvl, dict):
+                            return float(lvl.get("size") or lvl.get("qty") or 0)
+                        elif isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
+                            return float(lvl[1])
+                        return 0.0
+                    self.microstructure.ingest_top_of_book(
+                        bid_size=_first_size(bids),
+                        ask_size=_first_size(asks),
+                    )
+            except Exception as e:
+                log.debug("microstructure top-of-book ingest failed: %s", e)
+        # Compute toxic-flow report (cached for API + passed to FillSimulator)
+        try:
+            self._last_microstructure_report = self.microstructure.evaluate(
+                current_price=ref_price,
+                direction=direction,
+            )
+            toxic_score = self._last_microstructure_report.toxic_score
+        except Exception as e:
+            log.debug("microstructure evaluate failed: %s", e)
+
         # Refresh portfolio state from ExecutionEngine's open positions
         self._refresh_portfolio_state()
 
-        # 1) Build proposal
+        # 1) Build proposal (PortfolioEngine consults MetaLabeler if attached)
         proposal = self.portfolio_engine.build_proposal(
             prediction=prediction,
             state=self._portfolio_state,
@@ -171,21 +262,38 @@ class PortfolioCoordinator:
         if proposal is None:
             return {"skipped": "no_proposal", "prediction_id": prediction.get("id")}
 
-        # 2) Risk-gate evaluation
+        # 2) Risk-gate evaluation (RiskKernel consults MicrostructureIntelligence)
         decision = self.risk_kernel.evaluate(proposal)
         if not decision.approved:
             return {
                 "skipped": "risk_rejected",
                 "reason": decision.reason,
                 "prediction_id": prediction.get("id"),
+                "microstructure": (
+                    self._last_microstructure_report.to_dict()
+                    if self._last_microstructure_report else None
+                ),
             }
 
         # 3) Submit to ExecutionEngine (paper mode)
+        # ACT-XXVI: pass BookSnapshot for high-fidelity L2 fill if available
+        book_snapshot = None
+        if orderbook:
+            try:
+                enriched_book = dict(orderbook)
+                enriched_book.setdefault("symbol", symbol)
+                enriched_book.setdefault("last_price", ref_price)
+                enriched_book.setdefault("toxic_flow_score", toxic_score)
+                book_snapshot = book_snapshot_from_dict(enriched_book)
+            except Exception as e:
+                log.debug("book_snapshot_from_dict failed: %s", e)
         order = await self.execution_engine.submit(
             proposal=proposal,
             decision=decision,
             last_price=ref_price,
             book_depth_usd=book_depth_usd,
+            book_snapshot=book_snapshot,
+            toxic_flow_score=toxic_score,
         )
 
         # 4) If filled, attach stop/target from the proposal
@@ -201,6 +309,16 @@ class PortfolioCoordinator:
             "decision": decision.to_dict(),
             "order": order.to_dict(),
             "prediction_id": prediction.get("id"),
+            # ACT-XXVI enrichment
+            "microstructure": (
+                self._last_microstructure_report.to_dict()
+                if self._last_microstructure_report else None
+            ),
+            "regime_hmm": (
+                self._last_regime_belief.to_dict()
+                if self._last_regime_belief else None
+            ),
+            "fidelity_model": "l2_walk" if book_snapshot else "legacy_stochastic",
         }
 
     def on_tick(
@@ -226,10 +344,20 @@ class PortfolioCoordinator:
             kill_switch_active=kill_switch,
         )
         # Update RiskKernel with realized PnL from each exit
+        # ACT-XXVI: also feed the outcome into MetaLabeler for streak tracking
         for exit_evt in exits:
             pnl = float(exit_evt.get("realized_pnl") or 0)
             equity = self.execution_engine.equity(self._last_prices)
             self.risk_kernel.record_pnl(pnl_usd=pnl, equity=equity)
+            # Record outcome for meta-labeler (uses position's direction)
+            try:
+                pos = exit_evt.get("position") or {}
+                direction = (pos.get("direction") or "").upper()
+                result = "WIN" if pnl > 0 else "LOSS"
+                if direction in ("LONG", "SHORT"):
+                    self.meta_labeler.record_outcome(direction, result)
+            except Exception as e:
+                log.debug("meta_labeler record_outcome failed: %s", e)
         return exits
 
     def evaluate_live_gate(
@@ -259,7 +387,7 @@ class PortfolioCoordinator:
         """Snapshot of the entire portfolio subsystem."""
         self._refresh_portfolio_state()
         return {
-            "version": "ACT-XXV-hedge-fund-transition",
+            "version": "ACT-XXVI-deep-edge-integration",
             "started": self._started,
             "portfolio_state": self._portfolio_state.to_dict(),
             "risk_kernel": self.risk_kernel.get_state(),
@@ -268,7 +396,32 @@ class PortfolioCoordinator:
             "shadow_live": self.shadow_live.stats(),
             "live_gate": self._gate_status.to_dict() if self._gate_status else None,
             "last_prices": self._last_prices,
+            # ACT-XXVI additions
+            "microstructure": self.microstructure.stats(),
+            "meta_labeler": self.meta_labeler.stats(),
+            "regime_hmm": self.regime_hmm.stats(),
+            "last_microstructure_report": (
+                self._last_microstructure_report.to_dict()
+                if self._last_microstructure_report else None
+            ),
+            "last_regime_belief": (
+                self._last_regime_belief.to_dict()
+                if self._last_regime_belief else None
+            ),
         }
+
+    def get_microstructure_report(self) -> dict[str, Any]:
+        """Return the most recent MicrostructureReport (or live evaluate)."""
+        if self._last_microstructure_report is not None:
+            return self._last_microstructure_report.to_dict()
+        # Fallback: build a snapshot from the observer
+        return self.microstructure.stats()
+
+    def get_regime_belief(self) -> dict[str, Any]:
+        """Return the most recent HMM RegimeBelief."""
+        if self._last_regime_belief is not None:
+            return self._last_regime_belief.to_dict()
+        return self.regime_hmm.snapshot().to_dict()
 
     def get_analytics(self) -> dict[str, Any]:
         """Compute the full PortfolioAnalytics report."""

@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXV-hedge-fund-transition", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXVI-deep-edge-integration", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -103,7 +103,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXV-hedge-fund-transition",
+        "version": "ACT-XXVI-deep-edge-integration",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -221,7 +221,7 @@ async def oracle_score():
     live_capital_locked = runner_state.get("live_capital_locked", True)
 
     return {
-        "version": "ACT-XXV-hedge-fund-transition",
+        "version": "ACT-XXVI-deep-edge-integration",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
@@ -260,10 +260,10 @@ def _get_coordinator():
 
 @app.get("/api/portfolio/state")
 async def portfolio_state():
-    """ACT-XXV: full portfolio subsystem snapshot."""
+    """ACT-XXV/XXVI: full portfolio subsystem snapshot (includes microstructure + regime_hmm)."""
     coord = _get_coordinator()
     if coord is None:
-        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXV-hedge-fund-transition"}
+        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXVI-deep-edge-integration"}
     return coord.get_state()
 
 
@@ -304,6 +304,63 @@ async def portfolio_shadow():
         "status": coord.shadow_live.stats(),
         "report": coord.shadow_live.generate_report(),
         "recent_trades": coord.shadow_live.fetch_trades(limit=20),
+    }
+
+
+@app.get("/api/portfolio/microstructure")
+async def portfolio_microstructure():
+    """ACT-XXVI: microstructure intelligence snapshot.
+
+    Returns the most recent MicrostructureReport with:
+      - toxic_score (0..1 composite)
+      - VPIN, OFI normalized, liquidation cluster proximity
+      - funding/OI extremity flags
+      - action recommendation (ALLOW / REDUCE / REJECT)
+    """
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    return {
+        "version": "ACT-XXVI-deep-edge-integration",
+        "report": coord.get_microstructure_report(),
+        "stats": coord.microstructure.stats(),
+    }
+
+
+@app.get("/api/portfolio/regime_hmm")
+async def portfolio_regime_hmm():
+    """ACT-XXVI: HMM regime overlay — probabilistic belief over BULL/BEAR/HIGH_VOL.
+
+    Returns the most recent RegimeBelief with:
+      - probabilities: {BULL, BEAR, HIGH_VOL} posterior
+      - dominant state
+      - entropy (uncertainty)
+      - transition_risk_to_bear (prob of flipping bearish next step)
+      - long_bias / short_bias / size_mult
+    """
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    return {
+        "version": "ACT-XXVI-deep-edge-integration",
+        "belief": coord.get_regime_belief(),
+        "stats": coord.regime_hmm.stats(),
+    }
+
+
+@app.get("/api/portfolio/meta_labeler")
+async def portfolio_meta_labeler():
+    """ACT-XXVI: meta-labeler (triple-barrier LONG-side filter) stats.
+
+    Returns per-direction outcome counts + current loss streaks +
+    ML-readiness flag (becomes True once 300+ LONG outcomes recorded).
+    """
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    return {
+        "version": "ACT-XXVI-deep-edge-integration",
+        "stats": coord.meta_labeler.stats(),
     }
 
 

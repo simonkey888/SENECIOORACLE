@@ -203,9 +203,19 @@ class ExecutionEngine:
         self.starting_cash: float = self.cfg["starting_cash"]
         self.audit_log: list[dict] = []                  # every state transition
         self._audit_listener = None                      # optional callback for journal
+        # ACT-XXVI: high-fidelity fill simulator (HftBacktest-style L2 walk +
+        # queue position + Almgren-Chriss impact). Used when a BookSnapshot
+        # is supplied to submit(); otherwise falls back to legacy stochastic.
+        self.fill_simulator = None
+        try:
+            from .execution_fidelity import FillSimulator
+            self.fill_simulator = FillSimulator(config=self.cfg)
+        except Exception as e:
+            log.warning("FillSimulator unavailable (degraded mode): %s", e)
         log.info(
-            "ExecutionEngine init: mode=%s allow_live=%s cash=$%.0f",
+            "ExecutionEngine init: mode=%s allow_live=%s cash=$%.0f fill_simulator=%s",
             self.cfg["trade_mode"], self.cfg["allow_live"], self.cash,
+            "on" if self.fill_simulator else "off",
         )
 
     # -------- audit listener --------
@@ -237,6 +247,8 @@ class ExecutionEngine:
         decision: Any,
         last_price: float,
         book_depth_usd: Optional[float] = None,
+        book_snapshot: Any = None,                # ACT-XXVI: BookSnapshot for L2 fill
+        toxic_flow_score: Optional[float] = None, # ACT-XXVI: from MicrostructureIntelligence
     ) -> Order:
         """Submit a new order from an approved proposal.
 
@@ -244,7 +256,9 @@ class ExecutionEngine:
             proposal: TradeProposal (must have .to_dict())
             decision: RiskDecision (provides size_scale)
             last_price: current market mid-price
-            book_depth_usd: optional orderbook depth for partial-fill modeling
+            book_depth_usd: optional orderbook depth for partial-fill modeling (legacy)
+            book_snapshot: optional L2 BookSnapshot (ACT-XXVI high-fidelity path)
+            toxic_flow_score: optional 0..1 toxic-flow indicator (adverse selection)
         """
         if self.cfg["allow_live"]:
             raise RuntimeError(
@@ -299,8 +313,18 @@ class ExecutionEngine:
         order.status = OrderStatus.SUBMITTED.value
         self._emit_audit({"event": "ORDER_SUBMITTED", "order_id": order.order_id})
 
-        # Try to fill (with retry logic)
-        await self._try_fill(order, last_price=last_price, book_depth_usd=book_depth_usd)
+        # Try to fill (with retry logic).
+        # ACT-XXVI: prefer high-fidelity FillSimulator when a BookSnapshot is
+        # provided; otherwise fall back to legacy stochastic.
+        if self.fill_simulator is not None and book_snapshot is not None:
+            await self._try_fill_high_fidelity(
+                order=order,
+                last_price=last_price,
+                book_snapshot=book_snapshot,
+                toxic_flow_score=toxic_flow_score,
+            )
+        else:
+            await self._try_fill(order, last_price=last_price, book_depth_usd=book_depth_usd)
         return order
 
     async def _try_fill(
@@ -406,6 +430,115 @@ class ExecutionEngine:
         if order.remaining_qty() > 0 and order.status != OrderStatus.FILLED.value:
             await self.cancel(order.order_id, reason="max_retries_exhausted")
             # If we got at least one partial fill, open a smaller position
+            if order.filled_qty > 0:
+                self._open_or_add_position(order)
+
+    async def _try_fill_high_fidelity(
+        self,
+        order: Order,
+        last_price: float,
+        book_snapshot: Any,
+        toxic_flow_score: Optional[float] = None,
+    ) -> None:
+        """ACT-XXVI: high-fidelity fill path using FillSimulator (L2 walk + queue + impact).
+
+        This is a single-shot simulator — no retry loop. The FillSimulator
+        already accounts for adverse selection, market impact, and queue
+        position. The resulting Fill is recorded via the same audit path
+        as the legacy _try_fill so TradeJournal + ShadowLive see the same
+        event shape.
+        """
+        if self.fill_simulator is None:
+            # Degraded — fall back
+            await self._try_fill(order, last_price=last_price)
+            return
+
+        notional_usd = order.remaining_qty() * last_price
+        if notional_usd <= 0:
+            return
+
+        # Run the simulator (marketable limit → taker)
+        estimate = self.fill_simulator.simulate_fill(
+            side=order.side,
+            notional_usd=notional_usd,
+            book=book_snapshot,
+            is_marketable=True,
+            toxic_flow_score=toxic_flow_score,
+        )
+
+        # Simulated ack latency
+        await asyncio.sleep(estimate.expected_latency_ms / 1000.0)
+
+        if estimate.expected_qty <= 0:
+            # No fill (queue position didn't reach front, or book was empty)
+            order.status = OrderStatus.CANCELED.value
+            order.last_update_at = datetime.now(timezone.utc).isoformat()
+            self._emit_audit({
+                "event": "ORDER_CANCELED",
+                "order_id": order.order_id,
+                "reason": "no_fill_from_simulator",
+                "model": estimate.model,
+                "queue_fill_prob": estimate.queue_fill_prob,
+            })
+            return
+
+        # Apply the simulated fill
+        fill_qty = estimate.expected_qty
+        old_qty = order.filled_qty
+        new_qty = old_qty + fill_qty
+        order.avg_fill_price = (
+            (order.avg_fill_price * old_qty + estimate.expected_vwap_price * fill_qty) / new_qty
+            if new_qty > 0 else estimate.expected_vwap_price
+        )
+        order.filled_qty = new_qty
+
+        fill = Fill(
+            fill_id=self._new_id("fl"),
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            qty=round(fill_qty, 8),
+            price=round(estimate.expected_vwap_price, 6),
+            slippage_bps=estimate.expected_slippage_bps,
+            latency_ms=estimate.expected_latency_ms,
+            fee_usd=estimate.expected_fee_usd,
+            ts=datetime.now(timezone.utc).isoformat(),
+            is_partial=estimate.is_partial,
+        )
+        self._emit_audit({
+            "event": "FILL",
+            "fill": fill.to_dict(),
+            "order_id": order.order_id,
+            "remaining_after": order.remaining_qty(),
+            "fidelity_model": estimate.model,
+            "market_impact_bps": estimate.expected_market_impact_bps,
+            "adverse_selection_mult": estimate.adverse_selection_mult,
+            "queue_position": estimate.queue_position,
+            "levels_consumed": estimate.levels_consumed,
+            "book_present": estimate.book_present,
+        })
+
+        if order.remaining_qty() <= 1e-9:
+            order.status = OrderStatus.FILLED.value
+            self._emit_audit({
+                "event": "ORDER_FILLED",
+                "order_id": order.order_id,
+                "avg_fill_price": order.avg_fill_price,
+                "fidelity_model": estimate.model,
+            })
+            self._open_or_add_position(order)
+        else:
+            # Partial fill — cancel the residual (no retry in high-fidelity mode
+            # because the simulator already accounts for what the book can give).
+            order.status = OrderStatus.PARTIAL_FILL.value
+            self._emit_audit({
+                "event": "ORDER_PARTIAL_FILL",
+                "order_id": order.order_id,
+                "filled_qty": order.filled_qty,
+                "remaining": order.remaining_qty(),
+                "fidelity_model": estimate.model,
+            })
+            await self.cancel(order.order_id, reason="high_fidelity_partial_residual")
             if order.filled_qty > 0:
                 self._open_or_add_position(order)
 
@@ -682,6 +815,7 @@ class ExecutionEngine:
             "closed_positions": len(self.closed_positions),
             "total_orders": len(self.orders),
             "audit_log_size": len(self.audit_log),
+            "fill_simulator": "on" if self.fill_simulator else "off",
         }
 
     def update_config(self, **overrides: Any) -> None:

@@ -894,12 +894,72 @@ async def _route_to_portfolio(prediction: dict, market_data: dict) -> None:
         allow_live=not _state.get("live_capital_locked", True),
     )
 
+    # ACT-XXVI: extract ohlcv + funding + OI from market_data and pass to
+    # coordinator. The coordinator feeds these to MicrostructureIntelligence
+    # (VPIN + OFI + liquidation + funding/OI) and HMMRegimeOverlay BEFORE
+    # the proposal is built, so the RiskKernel can REJECT/REDUCE based on
+    # toxic flow and the MetaLabeler can soft-scale LONG confidence.
+    ohlcv_rows = market_data.get("ohlcv") or []
+    funding_rate = (market_data.get("funding") or {}).get("rate", 0.0)
+    oi_change_24h_pct = (market_data.get("open_interest") or {}).get("oi_change_24h_pct", 0.0)
+
+    # ACT-XXVI: synthesize a thin L2 orderbook snapshot from the depth
+    # numbers we have. The full L2 isn't available without re-fetching, but
+    # we can build a 3-level approximation that the FillSimulator's
+    # walk_book() can consume. This makes the high-fidelity fill path active.
+    orderbook_snap = None
+    try:
+        ob = market_data.get("orderbook") or {}
+        bid_depth = float(ob.get("bid_depth", 0) or 0)
+        ask_depth = float(ob.get("ask_depth", 0) or 0)
+        ticker = market_data.get("ticker") or {}
+        bid_px = float(ticker.get("bid", 0) or 0)
+        ask_px = float(ticker.get("ask", 0) or 0)
+        if bid_px > 0 and ask_px > 0 and (bid_depth > 0 or ask_depth > 0):
+            # Build 3 synthetic levels around best bid/ask.
+            # Distribute the depth across 3 levels (60%/25%/15%) at increasing
+            # distance from the BBO (0 bps, 2 bps, 5 bps).
+            def _split_depth(total_depth_usd: float, mid_px: float) -> list[list]:
+                # total_depth is in BASE currency already (USDT * price not represented),
+                # but for crypto pairs on OKX the depth values are quote volumes.
+                # We treat them as quote, convert to base via price.
+                if mid_px <= 0:
+                    return []
+                base_total = total_depth_usd / mid_px
+                return [
+                    [mid_px, base_total * 0.60],
+                    [mid_px, base_total * 0.25],
+                    [mid_px, base_total * 0.15],
+                ]
+            mid = (bid_px + ask_px) / 2
+            bid_levels = []
+            for i, frac in enumerate([0.60, 0.25, 0.15]):
+                offset_bps = [0, 2, 5][i]
+                px = mid * (1 - offset_bps / 10_000)
+                bid_levels.append([px, (bid_depth / mid) * frac])
+            ask_levels = []
+            for i, frac in enumerate([0.60, 0.25, 0.15]):
+                offset_bps = [0, 2, 5][i]
+                px = mid * (1 + offset_bps / 10_000)
+                ask_levels.append([px, (ask_depth / mid) * frac])
+            orderbook_snap = {
+                "bids": bid_levels,
+                "asks": ask_levels,
+                "last_price": mid,
+            }
+    except Exception as e:
+        log.debug("orderbook snapshot synth failed: %s", e)
+
     # Ingest the prediction
     result = await coord.ingest_prediction(
         prediction=prediction,
         last_price=last_price,
         vol_pct=vol_pct,
         win_rate_by_direction=win_rate_by_dir,
+        ohlcv=ohlcv_rows,
+        orderbook=orderbook_snap,
+        funding_rate=funding_rate,
+        oi_change_24h_pct=oi_change_24h_pct,
     )
     if result:
         if "skipped" in result:
@@ -907,12 +967,13 @@ async def _route_to_portfolio(prediction: dict, market_data: dict) -> None:
         else:
             order = (result.get("order") or {})
             log.info(
-                "portfolio fill: %s %s status=%s filled_qty=%.6f avg=$%.4f",
+                "portfolio fill: %s %s status=%s filled_qty=%.6f avg=$%.4f fidelity=%s",
                 (result.get("proposal") or {}).get("symbol"),
                 (result.get("proposal") or {}).get("direction"),
                 order.get("status"),
                 order.get("filled_qty", 0),
                 order.get("avg_fill_price", 0),
+                result.get("fidelity_model", "unknown"),
             )
 
 

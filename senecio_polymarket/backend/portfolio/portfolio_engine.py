@@ -164,6 +164,13 @@ class PortfolioEngine:
 
     def __init__(self, config: Optional[dict[str, Any]] = None):
         self.cfg = {**DEFAULTS, **(config or {})}
+        # ACT-XXVI: optional MetaLabeler for LONG-side secondary filtering.
+        # If set, build_proposal() consults it AFTER computing stop/target
+        # but BEFORE final Kelly sizing. If the label says take_trade=False,
+        # the proposal is dropped. If True, the proposal's confidence is
+        # multiplied by the labeler's confidence_mult.
+        # Stays None by default so existing tests / behavior are unchanged.
+        self.meta_labeler = None
         log.info(
             "PortfolioEngine init: equity=$%.0f base_risk=%.2f%% max_concurrent=%d heat_max=%.2f%%",
             self.cfg["starting_equity_usd"],
@@ -252,6 +259,45 @@ class PortfolioEngine:
             self._log_skip(symbol, direction, "risk_per_unit<=0")
             return None
 
+        # 4.5) ACT-XXVI: Meta-labeling (LONG-only secondary filter)
+        # If a MetaLabeler is attached, run it BEFORE Kelly sizing. A REJECT
+        # verdict drops the proposal entirely; an ACCEPT verdict multiplies
+        # the effective confidence (which then feeds the Kelly sizing below).
+        meta_label = None
+        if self.meta_labeler is not None:
+            try:
+                # Extract context for the labeler
+                regime_4h = (prediction.get("_audit") or {}).get("regime_4h") or "NEUTRAL"
+                spread_bps = (prediction.get("_audit") or {}).get("spread_bps", 0.0) or 0.0
+                ev_bps = abs(ev) * 10_000  # ev is a fraction; convert to bps
+                meta_label = self.meta_labeler.evaluate(
+                    direction=direction,
+                    conviction=confidence,
+                    regime_4h=str(regime_4h),
+                    vol_pct=vol_pct or 0.01,
+                    spread_bps=float(spread_bps),
+                    entry_price=price_now,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    expected_ev_bps=float(ev_bps),
+                    time_stop_minutes=60,
+                )
+                if not meta_label.take_trade:
+                    self._log_skip(
+                        symbol, direction,
+                        f"meta_label_reject: {meta_label.reason}",
+                    )
+                    return None
+                # Apply confidence multiplier (this then flows into Kelly sizing)
+                confidence = confidence * meta_label.confidence_mult
+                log.info(
+                    "meta_label PASS: %s %s mult=%.2f → conf=%.3f barrier=%s rr=%.2f",
+                    symbol, direction, meta_label.confidence_mult, confidence,
+                    meta_label.barrier_hit_prediction, meta_label.reward_risk,
+                )
+            except Exception as e:
+                log.warning("meta_labeler evaluate failed (non-fatal): %s", e)
+
         # 5) Confidence-shaped risk fraction
         conf_mult = self._sigmoid(
             (confidence - cfg["conf_mid"]) * cfg["conf_k"]
@@ -300,6 +346,7 @@ class PortfolioEngine:
             f"conf={confidence:.3f} conf_mult={conf_mult:.3f} "
             f"wr={wr:.3f} kelly={kelly:.3f} risk_pct={risk_pct*100:.3f}% "
             f"stop_pct={stop_pct*100:.2f}% vol_stop={vol_stop*100:.2f}%"
+            + (f" meta={meta_label.barrier_hit_prediction}/{meta_label.reward_risk:.2f}" if meta_label else "")
         )
 
         proposal = TradeProposal(

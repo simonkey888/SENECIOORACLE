@@ -159,6 +159,11 @@ class RiskKernel:
             peak_equity=self.cfg["starting_equity_usd"],
             current_equity=self.cfg["starting_equity_usd"],
         )
+        # ACT-XXVI: optional MicrostructureIntelligence observer.
+        # If set, evaluate() consults it for an additional toxic-flow check
+        # that can REJECT or REDUCE size based on VPIN/OFI/liquidation/funding.
+        # Stays None by default so existing tests / behavior are unchanged.
+        self.microstructure = None
         log.info(
             "RiskKernel init: starting_equity=$%.0f max_daily_loss=%.2f%% max_dd=%.2f%% "
             "min_conf=%.2f cooldown_after=%d losses for %dm",
@@ -262,7 +267,42 @@ class RiskKernel:
                 self.state.vol_pct * 100, size_scale * 100,
             )
 
-        # 7) Day rollover check (best-effort)
+        # 7) ACT-XXVI: Microstructure toxic-flow check (additive, optional)
+        # If a MicrostructureIntelligence observer is attached and the
+        # current market state exceeds the toxic thresholds, REJECT or
+        # further REDUCE the size. This blocks new entries during broken
+        # zones (high VPIN, one-sided OFI, near liquidation clusters,
+        # extreme funding/OI divergence).
+        micro_report = None
+        if self.microstructure is not None:
+            try:
+                # Use the proposal's entry price + direction for evaluation
+                entry_price = float(p.get("entry_price", 0))
+                direction = p.get("direction", "LONG")
+                micro_report = self.microstructure.evaluate(
+                    current_price=entry_price,
+                    direction=direction,
+                )
+                if micro_report.action == "REJECT":
+                    return self._reject(
+                        proposal,
+                        f"microstructure_reject: toxic_score={micro_report.toxic_score:.2f} "
+                        f"vpin={micro_report.vpin:.2f} ofi={micro_report.ofi_normalized:.2f} "
+                        f"near_liq={micro_report.near_liquidation_cluster} "
+                        f"funding_extreme={micro_report.funding_extreme}",
+                        snap,
+                    )
+                if micro_report.action == "REDUCE":
+                    # Multiply the vol-scale by the microstructure reduce factor
+                    size_scale *= micro_report.size_scale
+                    log.info(
+                        "microstructure REDUCE: toxic=%.2f → size_scale=%.2f",
+                        micro_report.toxic_score, size_scale,
+                    )
+            except Exception as e:
+                log.warning("microstructure evaluate failed (non-fatal): %s", e)
+
+        # 8) Day rollover check (best-effort)
         self._maybe_rollover_day()
 
         # All checks passed
@@ -271,6 +311,7 @@ class RiskKernel:
             f"approved conf={conf:.3f} regime={regime.value} "
             f"size_scale={size_scale:.2f} dd={self.state.drawdown_pct:.2f}% "
             f"day_pnl={self.state.daily_pnl_pct:.2f}%"
+            + (f" micro_toxic={micro_report.toxic_score:.2f}" if micro_report else "")
         )
         return RiskDecision(
             approved=True,
