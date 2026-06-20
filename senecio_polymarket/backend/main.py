@@ -51,6 +51,16 @@ except Exception as _research_init_err:  # pragma: no cover — research layer m
 else:
     _research_init_err_msg = None
 
+# ACT-XXIX: anti-fragility layer (lazy-initialized; never breaks the app)
+try:
+    from .antifragility import AntiFragilityCoordinator as _AFCoord
+    _antifragility_coord = _AFCoord(start_biv=False)
+except Exception as _af_init_err:  # pragma: no cover
+    _antifragility_coord = None
+    _af_init_err_msg = str(_af_init_err)
+else:
+    _af_init_err_msg = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 log = logging.getLogger("senecio.main")
 
@@ -95,7 +105,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXVIII-institutional-validation", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXIX-systemic-antifragility", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -115,7 +125,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -233,7 +243,7 @@ async def oracle_score():
     live_capital_locked = runner_state.get("live_capital_locked", True)
 
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
@@ -275,7 +285,7 @@ async def portfolio_state():
     """ACT-XXV/XXVI: full portfolio subsystem snapshot (includes microstructure + regime_hmm)."""
     coord = _get_coordinator()
     if coord is None:
-        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXVIII-institutional-validation"}
+        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXIX-systemic-antifragility"}
     return coord.get_state()
 
 
@@ -333,7 +343,7 @@ async def portfolio_microstructure():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "report": coord.get_microstructure_report(),
         "stats": coord.microstructure.stats(),
     }
@@ -354,7 +364,7 @@ async def portfolio_regime_hmm():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "belief": coord.get_regime_belief(),
         "stats": coord.regime_hmm.stats(),
     }
@@ -371,7 +381,7 @@ async def portfolio_meta_labeler():
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "stats": coord.meta_labeler.stats(),
     }
 
@@ -499,11 +509,11 @@ async def research_state():
         return {
             "error": "research coordinator not initialized",
             "init_error": _research_init_err_msg,
-            "version": "ACT-XXVIII-institutional-validation",
+            "version": "ACT-XXIX-systemic-antifragility",
         }
     last = _research_coord.get_last_report()
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "initialized": True,
         "n_predictions_loaded": len(_research_coord.predictions),
         "feature_names": _research_coord.feature_names,
@@ -564,7 +574,7 @@ async def research_drift():
     if _research_coord is None:
         return {"error": "research coordinator not initialized"}
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "drift_stats": _research_coord.get_drift_stats(),
     }
 
@@ -616,7 +626,7 @@ async def research_explainer_fit(
     )
     _research_coord.explainer = expl
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "stats": expl.stats(),
     }
 
@@ -636,7 +646,7 @@ async def research_explainer_explain(prediction: dict):
     if explanation is None:
         return {"error": "explanation failed"}
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "explanation": explanation,
     }
 
@@ -649,7 +659,7 @@ async def research_explainer_history():
                 "history": []}
     history = _research_coord.get_explainer().feature_importance_history()
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "n_snapshots": len(history),
         "history": history,
     }
@@ -662,7 +672,7 @@ async def observability():
         return {"error": "metrics registry not initialized",
                 "init_error": _research_init_err_msg}
     return {
-        "version": "ACT-XXVIII-institutional-validation",
+        "version": "ACT-XXIX-systemic-antifragility",
         "snapshot": _metrics_registry.stats(),
     }
 
@@ -1208,3 +1218,202 @@ async def root():
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+# ---- ACT-XXIX: Systemic Anti-Fragility Layer endpoints (STRICT_ADDITIVE) ----
+# These 6 endpoints expose the anti-fragility stack built in
+# backend/antifragility/. They do NOT modify any existing module — only
+# add new endpoints that wrap the AntiFragilityCoordinator.
+
+@app.get("/api/antifragility/state")
+async def antifragility_state():
+    """Full snapshot of the anti-fragility subsystems."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized",
+                "init_error": _af_init_err_msg,
+                "version": "ACT-XXIX-systemic-antifragility"}
+    return _antifragility_coord.snapshot()
+
+
+@app.post("/api/antifragility/invariants/run")
+async def antifragility_run_invariants():
+    """Run all registered invariants and return per-invariant results."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    return {"results": _antifragility_coord.run_invariants(),
+            "summary": _antifragility_coord.invariants.summary()}
+
+
+@app.post("/api/antifragility/lineage/explain")
+async def antifragility_lineage_explain(body: dict):
+    """Explain a prediction's ancestry (inputs + descendants in lineage DAG)."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    prediction_id = body.get("prediction_id")
+    if not prediction_id:
+        return {"error": "prediction_id required"}
+    return _antifragility_coord.get_prediction_ancestry(prediction_id)
+
+
+@app.post("/api/antifragility/diagnostics/run")
+async def antifragility_diagnostics_run(body: dict | None = None):
+    """Run self-diagnostics with optional feature/prediction inputs."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    body = body or {}
+    return _antifragility_coord.run_diagnostics(
+        features=body.get("features"),
+        member_predictions=body.get("member_predictions"),
+        sample_vector=body.get("sample_vector"),
+    )
+
+
+@app.get("/api/antifragility/architecture/validate")
+async def antifragility_architecture_validate():
+    """Validate the actual code structure against the declared architecture spec."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    return _antifragility_coord.run_architecture_validation()
+
+
+@app.post("/api/antifragility/market/simulate")
+async def antifragility_market_simulate(body: dict):
+    """Generate synthetic market data, scenarios, or simulate regime transitions.
+
+    Body params:
+      - mode: 'synthetic' (default) | 'scenario' | 'adversarial' | 'regime'
+      - n_bars: int (for synthetic mode, default 100)
+      - scenario_name: str (for scenario mode; defaults to 'all')
+      - adversarial_kind: 'max_drawdown' | 'whipsaw_extreme' | 'tail_event'
+      - regime_kind: 'bull_to_bear' | 'crash_recovery' | 'volatility_cycle'
+    """
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    mode = body.get("mode", "synthetic")
+    if mode == "synthetic":
+        n = int(body.get("n_bars", 100))
+        bars = _antifragility_coord.generate_synthetic_bars(n)
+        return {"mode": mode, "bars": bars, "n": len(bars)}
+    elif mode == "scenario":
+        name = body.get("scenario_name", "all")
+        if name == "all":
+            return {"mode": mode, "scenarios": _antifragility_coord.generate_scenarios()}
+        else:
+            scenarios = _antifragility_coord.generate_scenarios()
+            return {"mode": mode, "scenario": scenarios.get(name)}
+    elif mode == "adversarial":
+        kind = body.get("adversarial_kind", "max_drawdown")
+        if kind == "max_drawdown":
+            bars = _antifragility_coord.adversarial.max_drawdown_path(
+                n_bars=int(body.get("n_bars", 100)))
+        elif kind == "whipsaw_extreme":
+            bars = _antifragility_coord.adversarial.whipsaw_extreme(
+                n_bars=int(body.get("n_bars", 50)))
+        elif kind == "tail_event":
+            bars = _antifragility_coord.adversarial.tail_event(
+                direction=body.get("direction", "down"))
+        else:
+            return {"error": f"unknown adversarial_kind: {kind}"}
+        return {"mode": mode, "kind": kind, "bars": [b.to_dict() for b in bars]}
+    elif mode == "regime":
+        kind = body.get("regime_kind", "bull_to_bear")
+        if kind == "bull_to_bear":
+            bars = _antifragility_coord.regime_sim.bull_to_bear(
+                n_bars=int(body.get("n_bars", 60)))
+        elif kind == "crash_recovery":
+            bars = _antifragility_coord.regime_sim.crash_recovery()
+        elif kind == "volatility_cycle":
+            bars = _antifragility_coord.regime_sim.volatility_cycle()
+        else:
+            return {"error": f"unknown regime_kind: {kind}"}
+        return {"mode": mode, "kind": kind, "bars": [b.to_dict() for b in bars]}
+    else:
+        return {"error": f"unknown mode: {mode}"}
+
+
+@app.post("/api/antifragility/faults/inject")
+async def antifragility_faults_inject(body: dict):
+    """Inject a fault into the system (for chaos testing).
+
+    Body params:
+      - kind: one of exchange_outage, partial_fill, rejected_orders,
+              latency_spike, packet_loss, desync, stale_quotes,
+              wrong_symbol, schema_drift, time_jump, drift
+      - kwargs: kind-specific parameters (duration_s, rate, etc.)
+    """
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    kind = body.get("kind")
+    if not kind:
+        return {"error": "kind required"}
+    kwargs = {k: v for k, v in body.items() if k != "kind"}
+    try:
+        fault = _antifragility_coord.inject_fault(kind, **kwargs)
+        return {"ok": True, "fault": fault}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/antifragility/faults/active")
+async def antifragility_faults_active():
+    """List currently-active faults."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    return {"active": _antifragility_coord.active_faults()}
+
+
+@app.post("/api/antifragility/experiments/register")
+async def antifragility_experiments_register(body: dict):
+    """Register a new experiment for reproducibility tracking."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    required = ("name", "kind", "params", "metrics")
+    for k in required:
+        if k not in body:
+            return {"error": f"missing required field: {k}"}
+    return _antifragility_coord.register_experiment(
+        name=body["name"], kind=body["kind"],
+        params=body["params"], metrics=body["metrics"],
+        artifacts=body.get("artifacts"),
+        notes=body.get("notes", ""),
+    )
+
+
+@app.get("/api/antifragility/experiments/{experiment_id}/report")
+async def antifragility_experiments_report(experiment_id: str):
+    """Generate a reproducibility report for an experiment."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    return _antifragility_coord.get_reproducibility_report(experiment_id)
+
+
+@app.get("/api/antifragility/benchmarks")
+async def antifragility_benchmarks_list():
+    """List registered benchmarks and recent history."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    return {
+        "registered": _antifragility_coord.benchmarks.list_benchmarks(),
+        "history": [r.to_dict() for r in _antifragility_coord.benchmarks.history(limit=20)],
+    }
+
+
+@app.post("/api/antifragility/benchmarks/run")
+async def antifragility_benchmarks_run():
+    """Run all registered benchmarks."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    return {"results": _antifragility_coord.run_benchmarks()}
+
+
+@app.get("/api/antifragility/checkpoint/{subsystem}")
+async def antifragility_checkpoint_restore(subsystem: str):
+    """Restore the latest clean checkpoint state for a subsystem."""
+    if _antifragility_coord is None:
+        return {"error": "antifragility coordinator not initialized"}
+    state = _antifragility_coord.resilience.checkpoints.restore(subsystem)
+    if state is None:
+        return {"error": f"no clean checkpoint for {subsystem}",
+                "subsystem": subsystem}
+    return {"subsystem": subsystem, "state": state}
+

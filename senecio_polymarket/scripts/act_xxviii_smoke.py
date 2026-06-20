@@ -641,8 +641,12 @@ def test_main_endpoints() -> bool:
     banner("TEST 8: main.py — 6 new endpoints + version bump")
     try:
         from backend.main import app
-        # Version
-        assert app.version == "ACT-XXVIII-institutional-validation", (
+        # Version — accept ACT-XXVIII or any later ACT that preserves all XXVIII endpoints
+        accepted_versions = (
+            "ACT-XXVIII-institutional-validation",
+            "ACT-XXIX-systemic-antifragility",
+        )
+        assert app.version in accepted_versions, (
             f"version mismatch: got {app.version!r}"
         )
         ok(f"app version = {app.version}")

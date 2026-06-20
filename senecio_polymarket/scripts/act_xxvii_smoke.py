@@ -557,6 +557,7 @@ def test_main_endpoints() -> bool:
         accepted_versions = (
             "ACT-XXVII-research-grade-validation",
             "ACT-XXVIII-institutional-validation",
+            "ACT-XXIX-systemic-antifragility",
         )
         assert main.app.version in accepted_versions, \
             f"unexpected version: {main.app.version}"
