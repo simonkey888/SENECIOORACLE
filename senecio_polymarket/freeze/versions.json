@@ -1,0 +1,41 @@
+{
+  "freeze_created_at_utc": "2026-06-20T04:07:18.671845+00:00",
+  "freeze_tag": "PRE_LONG_FIX_FREEZE",
+  "freeze_act": "FINAL_AUDIT_MYTHOS",
+  "freeze_mode": "STRICT_ADDITIVE",
+  "freeze_trade_mode": "PAPER_ONLY",
+  "freeze_live_gate": "LOCKED",
+  "freeze_do_not_touch": [
+    "prediction_model",
+    "feature_engineering",
+    "signal_generation",
+    "verifier",
+    "long_logic",
+    "thresholds"
+  ],
+  "git": {
+    "commit": "b4d31b1bcb6f9613c6ed53f97ce8525c29145c03",
+    "branch": "main",
+    "tag": null,
+    "dirty": true,
+    "remote": "https://x-access-token:[REDACTED]@github.com/simonkey888/SENECIOORACLE.git"
+  },
+  "python": {
+    "python_version": "3.12.13 (main, Jun 11 2026, 04:03:26) [Clang 22.1.3 ]",
+    "python_executable": "/home/z/.venv/bin/python",
+    "platform": "Linux-5.10.134-013.8.3.kangaroo.al8.x86_64-x86_64-with-glibc2.41",
+    "platform_machine": "x86_64",
+    "platform_processor": "",
+    "implementation": "CPython",
+    "compiler": "Clang 22.1.3 "
+  },
+  "file_count": 71,
+  "manifest_sha256_aggregate": "aec6a633e0b7f8e36ffcd0062ac4311f843a65b7a0352a1f5268708f5a592ec5",
+  "previous_acts_present": [
+    "ACT-XXV-institutional-portfolio",
+    "ACT-XXVI",
+    "ACT-XXVII",
+    "ACT-XXVIII-institutional-validation",
+    "ACT-XXIX-systemic-antifragility"
+  ]
+}
