@@ -1,0 +1,135 @@
+{
+  "aggregate_sha256": "22ee1690c981db68d0f0f0d318f5ab0fda449055b71113c12abe13413369ecd8",
+  "audit_infrastructure_files": {
+    "senecio_polymarket/backend/audit_enrichment.py": {
+      "exists": true,
+      "sha256": "9f710fa77b5230092934284e9b551990cf22ce320aed85b54a980af97cd900d8",
+      "size_bytes": 16826
+    },
+    "senecio_polymarket/backend/evidence_tracker.py": {
+      "exists": true,
+      "sha256": "2cbe1396276af65f1b8334cf86c88be3a8b9cd712ac2bb097e82b971479b6b2c",
+      "size_bytes": 2740
+    },
+    "senecio_polymarket/backend/forensics/__init__.py": {
+      "exists": true,
+      "sha256": "35c20615eaf9540445831faf768af0fa1522bef68372807159ec4630c175e866",
+      "size_bytes": 320
+    },
+    "senecio_polymarket/backend/forensics/pipeline.py": {
+      "exists": true,
+      "sha256": "0a43f7f8d94a9d0d8c74cd2b4cb56e86395d1a39d2895043951d85c2bf78b7a2",
+      "size_bytes": 31632
+    },
+    "senecio_polymarket/backend/research/decision_engine.py": {
+      "exists": true,
+      "sha256": "67af540f516bab04a7c87e45e508c9c3bac04ff41bd4fe96d25af47315e2fff6",
+      "size_bytes": 7320
+    },
+    "senecio_polymarket/backend/research/executive_report.py": {
+      "exists": true,
+      "sha256": "fa5e7d2661875c09e57afdd92c7ea599ad0ca63d8779b3704c27c907236e0e03",
+      "size_bytes": 10169
+    },
+    "senecio_polymarket/backend/research/final_audit_orchestrator.py": {
+      "exists": true,
+      "sha256": "80a0b0833d0395cc7f89c7a24224b0a593384a9c3928969fdac252bd6cac9c46",
+      "size_bytes": 3181
+    },
+    "senecio_polymarket/backend/research/statistical_study.py": {
+      "exists": true,
+      "sha256": "2bbed302bd4063872ea7f98946dbff432ba595d4e4fccefef79d27688cb42b7d",
+      "size_bytes": 32272
+    },
+    "senecio_polymarket/backend/watchdogs/__init__.py": {
+      "exists": true,
+      "sha256": "3c53d72106668cf9fe1603be9493e26aabe06af7f4b0f0338dee602240f24e7c",
+      "size_bytes": 265
+    },
+    "senecio_polymarket/backend/watchdogs/coordinator.py": {
+      "exists": true,
+      "sha256": "51d0b6cf1c584e1762d4c69c58d0851cca9bcccfdd604dc62457254aa65e43f2",
+      "size_bytes": 15080
+    },
+    "senecio_polymarket/scripts/act_final_audit_smoke.py": {
+      "exists": true,
+      "sha256": "61078e691c7bf2607fc51d68894800ea0c9465ac14df11d5d8fc205a313838b5",
+      "size_bytes": 29204
+    }
+  },
+  "branch": "main",
+  "constraints": {
+    "NO_ADJUST_THRESHOLDS_BY_INTUITION": true,
+    "NO_CHANGE_FEATURE_ENGINEERING": true,
+    "NO_CHANGE_PREDICTION_MODEL": true,
+    "NO_CHANGE_SIGNAL_GENERATION": true,
+    "NO_CHANGE_VERIFIER": true,
+    "NO_DEPLOY_LIVE": true,
+    "NO_TOUCH_LONG_LOGIC": true,
+    "NO_TRAIN": true,
+    "ONLY_ADDITIVE_CHANGES": true
+  },
+  "deploy_path": {
+    "cmd": "uvicorn backend.main:app --host 0.0.0.0 --port 8080 --workers 1",
+    "copies": [
+      "senecio_polymarket/backend to /app/backend",
+      "senecio_polymarket/frontend to /app/frontend",
+      "senecio_polymarket/oracle to /app/oracle"
+    ],
+    "dockerfile": "senecio_polymarket/Dockerfile",
+    "workdir": "/app"
+  },
+  "deployable": true,
+  "directive": "MYTHOS_FINAL_AUDIT",
+  "do_not_touch_files": {
+    "senecio_polymarket/oracle/institutional_core.py": {
+      "exists": true,
+      "sha256": "8d93224ea40118665f5e654b20fb9b6be30cef44842830abfe4befc800db968d",
+      "size_bytes": 69105
+    },
+    "senecio_polymarket/oracle/market_ev.py": {
+      "exists": true,
+      "sha256": "587caa35cc22e397df2c64b1b3c46aaf0a681e937295fbce2050962bac85f754",
+      "size_bytes": 18092
+    },
+    "senecio_polymarket/oracle/predict_only.py": {
+      "exists": true,
+      "sha256": "eb7aee5e725ea48e3f64d87484c3632d25c63ca351a30e599dbd72d3cd26793e",
+      "size_bytes": 38114
+    }
+  },
+  "evidence_state": {
+    "decision": {},
+    "evidence": {},
+    "source": "senecio_polymarket/data/executive_reports/executive_report_20260620T043824Z.json"
+  },
+  "evidence_targets": {
+    "long": 100,
+    "short": 100,
+    "verified": 200
+  },
+  "freeze_commit": "2199578e89d0600fb9fb62ee4950d0e284ea89b6",
+  "freeze_tag": "PRE_LONG_FIX_FREEZE",
+  "generated_at_utc": "2026-06-20T04:42:28.862939+00:00",
+  "head_commit": "00f8d0fd4a489f2e6a4c0d3f848386698ff1fe34",
+  "head_subject": "feat(ACT-FINAL_AUDIT): STRICT_ADDITIVE observability + evidence layer",
+  "live_gate": "LOCKED",
+  "live_gate_state": {
+    "file": "senecio_polymarket/backend/portfolio/live_gate.py",
+    "locked": true,
+    "sha256": "9b91514405a2553cd86251a6b491e37611e1efd7cfaa350e69617803a33549b8",
+    "status": "LOCKED"
+  },
+  "manifest_version": "1.0",
+  "mode": "PAPER_ONLY",
+  "next_steps": [
+    "PASO 2: Deploy this state to fly.io (PAPER_ONLY, LIVE_GATE LOCKED)",
+    "PASO 3: Run post-deploy verification (7 checks)",
+    "PASO 4: Let the system run and accumulate evidence",
+    "PASO 5: Monitor WR/CALIBRATION/DRIFT/WATCHDOGS/REGIME/EV/FEATURES",
+    "PASO 6: When verified>=200 AND long>=100 AND short>=100, run REEVALUACION",
+    "PASO 7: If GO, generate minimal patch (DO NOT APPLY); if NO_GO, keep accumulating",
+    "PASO 8: Only after strong+replicable statistical evidence, modify production logic"
+  ],
+  "python_version": "3.12.13"
+}

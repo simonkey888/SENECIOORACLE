@@ -36,3 +36,15 @@ senecio_output/scheduler.log
 senecio_output/cycle_state.json
 senecio_output/senecio_state.json
 senecio_output/senecio_trades.json
+
+# FINAL_AUDIT runtime artifacts (append-only evidence data, not source code)
+senecio_polymarket/data/research/
+senecio_polymarket/data/forensics/
+senecio_polymarket/data/watchdogs/
+senecio_polymarket/data/executive_reports/
+senecio_polymarket/data/audit/
+
+# Top-level legacy duplicates (NOT in deploy path — Dockerfile copies senecio_polymarket/ only)
+# Kept in working tree for history; do NOT commit changes to these.
+/institutional_core.py
+/predict_only.py
