@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     log.info("SENECIO ORACLE backend down")
 
 
-app = FastAPI(title="SENECIO ORACLE", version="ACT-XXIII-directional-routing", lifespan=lifespan)
+app = FastAPI(title="SENECIO ORACLE", version="ACT-XXV-hedge-fund-transition", lifespan=lifespan)
 
 # WebSocket / SSE router
 app.include_router(make_ws_router(_bus))
@@ -103,7 +103,7 @@ async def health():
         pass
     return {
         "status": "ok",
-        "version": "ACT-XXIII-directional-routing",
+        "version": "ACT-XXV-hedge-fund-transition",
         "oracle": {
             "started_at": oracle_state.get("started_at"),
             "last_prediction_ts": oracle_state.get("last_prediction_ts"),
@@ -221,7 +221,7 @@ async def oracle_score():
     live_capital_locked = runner_state.get("live_capital_locked", True)
 
     return {
-        "version": "ACT-XXIII-directional-routing",
+        "version": "ACT-XXV-hedge-fund-transition",
         "total_predictions": len(rows),
         "verified": len(verified),
         "wins": wins,
@@ -246,6 +246,119 @@ async def stats():
         "wallet_tracker": _wallet_tracker.stats(),
         "cursors": _retriever.cursor_state(),
     }
+
+
+# ---- ACT-XXV: Portfolio endpoints ----
+
+def _get_coordinator():
+    """Lazy access to the portfolio coordinator from oracle_runner."""
+    try:
+        return oracle_runner._get_portfolio_coordinator()
+    except Exception:
+        return None
+
+
+@app.get("/api/portfolio/state")
+async def portfolio_state():
+    """ACT-XXV: full portfolio subsystem snapshot."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized", "version": "ACT-XXV-hedge-fund-transition"}
+    return coord.get_state()
+
+
+@app.get("/api/portfolio/analytics")
+async def portfolio_analytics():
+    """ACT-XXV: Sharpe / Sortino / PF / Expectancy / Recovery / Calmar / Kelly / MaxDD."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    return coord.get_analytics()
+
+
+@app.get("/api/portfolio/trades")
+async def portfolio_trades(limit: int = Query(default=50, le=500)):
+    """ACT-XXV: recent closed trades from the journal."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized", "trades": []}
+    return {"count": limit, "trades": coord.get_recent_trades(limit=limit)}
+
+
+@app.get("/api/portfolio/audit")
+async def portfolio_audit(limit: int = Query(default=50, le=500)):
+    """ACT-XXV: recent execution audit events (order lifecycle)."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized", "events": []}
+    return {"count": limit, "events": coord.get_audit_log(limit=limit)}
+
+
+@app.get("/api/portfolio/shadow")
+async def portfolio_shadow():
+    """ACT-XXV: ShadowLive status + recent shadow trades."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    return {
+        "status": coord.shadow_live.stats(),
+        "report": coord.shadow_live.generate_report(),
+        "recent_trades": coord.shadow_live.fetch_trades(limit=20),
+    }
+
+
+@app.get("/api/portfolio/live_gate")
+async def portfolio_live_gate():
+    """ACT-XXV: evaluate the 6 LIVE_GATE unlock conditions.
+
+    Returns the current gate status. The gate stays LOCKED (PAPER mode)
+    until ALL 6 conditions pass simultaneously:
+      1. global_win_rate_pct >= 52
+      2. verified >= 300
+      3. profit_factor > 1.20
+      4. max_drawdown_pct < 10
+      5. shadow_live_passed = True
+      6. execution_engine_verified = True
+    """
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    # Pull oracle score for gate evaluation
+    try:
+        from . import supabase_client
+        rows = await supabase_client.fetch_predictions(limit=500)
+        verified = [r for r in rows if r.get("outcome") in ("WIN", "LOSS")]
+        wins = sum(1 for r in verified if r.get("outcome") == "WIN")
+        win_rate = (wins / len(verified) * 100) if verified else 0.0
+        oracle_score = {
+            "win_rate_pct": win_rate,
+            "verified": len(verified),
+            "by_window": oracle_runner.get_state().get("directional_stats", {}).get("by_window", {}),
+        }
+    except Exception:
+        oracle_score = {}
+    status = coord.evaluate_live_gate(oracle_score=oracle_score)
+    return status.to_dict()
+
+
+@app.post("/api/portfolio/kill_switch")
+async def portfolio_kill_switch(reason: str = "manual API trigger"):
+    """ACT-XXV: manually trip the kill switch (halts all new trades)."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    coord.trip_kill_switch(reason)
+    return {"status": "kill_switch_tripped", "reason": reason}
+
+
+@app.post("/api/portfolio/reset_kill_switch")
+async def portfolio_reset_kill_switch(reason: str = "manual API reset"):
+    """ACT-XXV: manually reset the kill switch (requires explicit action)."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"error": "portfolio coordinator not initialized"}
+    coord.reset_kill_switch(reason)
+    return {"status": "kill_switch_reset", "reason": reason}
 
 
 @app.get("/api/audit")

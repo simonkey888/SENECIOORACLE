@@ -198,6 +198,9 @@ async def _run_one_prediction(symbol: str) -> Optional[dict]:
             sb_row = await supabase_client.insert_prediction(prediction)
             if sb_row:
                 log.info("supabase insert OK id=%s", sb_row.get("id"))
+                # Attach the Supabase row id back onto the prediction dict so
+                # the portfolio coordinator can use it as prediction_id FK.
+                prediction["id"] = sb_row.get("id")
             else:
                 log.warning("supabase insert returned None — predictions.jsonl is source of truth")
         except Exception as sb_err:
@@ -210,6 +213,15 @@ async def _run_one_prediction(symbol: str) -> Optional[dict]:
         _state["predictions_count"] += 1
         _state["exchange_used_last"] = exchange_used
         _state["last_error"] = None
+
+        # ACT-XXV: Route prediction through the institutional portfolio
+        # pipeline (PortfolioEngine → RiskKernel → ExecutionEngine → Journal
+        # → ShadowLive). This is ADDITIVE — the prediction model, feature
+        # engineering, signal generation, and verifier are NOT touched.
+        try:
+            await _route_to_portfolio(prediction, market_data)
+        except Exception as pe_err:
+            log.warning("portfolio routing failed (non-fatal): %s", pe_err)
 
         log.info(
             "prediction logged: %s %s conf=%.4f ev=%.8f price=%s exchange=%s",
@@ -809,6 +821,101 @@ async def _oracle_loop() -> None:
 _tasks: list[asyncio.Task] = []
 
 
+# ACT-XXV: Portfolio coordinator singleton
+# Lazily initialized on first use to avoid import-time side effects.
+_portfolio_coordinator = None
+
+
+def _get_portfolio_coordinator():
+    """Lazily instantiate the PortfolioCoordinator (ACT-XXV)."""
+    global _portfolio_coordinator
+    if _portfolio_coordinator is None:
+        try:
+            from .portfolio import PortfolioCoordinator
+            _portfolio_coordinator = PortfolioCoordinator()
+            _portfolio_coordinator.start()
+            log.info("PortfolioCoordinator (ACT-XXV) initialized and started")
+        except Exception as e:
+            log.exception("failed to init PortfolioCoordinator: %s", e)
+            return None
+    return _portfolio_coordinator
+
+
+async def _route_to_portfolio(prediction: dict, market_data: dict) -> None:
+    """Route a new oracle prediction through the ACT-XXV portfolio pipeline.
+
+    Called after each prediction is persisted. The portfolio subsystem runs
+    in PAPER mode with live_capital_locked=True per the LIVE_GATE directive.
+
+    Best-effort: failures here do NOT block the prediction cycle.
+    """
+    coord = _get_portfolio_coordinator()
+    if coord is None:
+        return
+
+    # Extract last price + volatility from the market data (without modifying
+    # the prediction itself — we only read from market_data).
+    last_price = float(prediction.get("price_now") or 0)
+    # Realized vol: stdev of last 16 closes (4h on 15m) / mean
+    vol_pct = 0.0
+    try:
+        ohlcv = market_data.get("ohlcv") or []
+        if len(ohlcv) >= 16:
+            closes = [float(c[4]) for c in ohlcv[-16:] if c and len(c) > 4]
+            if len(closes) >= 8:
+                mean_c = sum(closes) / len(closes)
+                if mean_c > 0:
+                    var = sum((c - mean_c) ** 2 for c in closes) / len(closes)
+                    vol_pct = (var ** 0.5) / mean_c
+    except Exception:
+        pass
+
+    # Win-rate-by-direction passthrough (for Kelly)
+    by_window = _state.get("directional_stats", {}).get("by_window", {}) or {}
+    win_rate_by_dir = {}
+    try:
+        for d in ("LONG", "SHORT"):
+            d_stat = (by_window.get("1h") or {}).get(d) or {}
+            wr = d_stat.get("win_rate_pct", 0) / 100.0
+            win_rate_by_dir[d] = wr
+    except Exception:
+        pass
+
+    # SHORT_ONLY_PAPER_MODE passthrough
+    short_only = _state.get("short_only_paper_mode", False)
+    coord.portfolio_engine.update_config(short_only_paper_mode=short_only)
+    coord.risk_kernel.update_config(
+        short_only_paper_mode=short_only,
+        trade_mode=_state.get("trade_mode", "PAPER"),
+        live_capital_locked=_state.get("live_capital_locked", True),
+    )
+    coord.execution_engine.update_config(
+        trade_mode=_state.get("trade_mode", "PAPER"),
+        allow_live=not _state.get("live_capital_locked", True),
+    )
+
+    # Ingest the prediction
+    result = await coord.ingest_prediction(
+        prediction=prediction,
+        last_price=last_price,
+        vol_pct=vol_pct,
+        win_rate_by_direction=win_rate_by_dir,
+    )
+    if result:
+        if "skipped" in result:
+            log.info("portfolio skip: %s reason=%s", result.get("skipped"), result.get("reason"))
+        else:
+            order = (result.get("order") or {})
+            log.info(
+                "portfolio fill: %s %s status=%s filled_qty=%.6f avg=$%.4f",
+                (result.get("proposal") or {}).get("symbol"),
+                (result.get("proposal") or {}).get("direction"),
+                order.get("status"),
+                order.get("filled_qty", 0),
+                order.get("avg_fill_price", 0),
+            )
+
+
 def start() -> None:
     """Start the oracle runner. Called from main.py lifespan()."""
     if _state["started_at"] is not None:
@@ -830,6 +937,14 @@ async def stop() -> None:
         except asyncio.CancelledError:
             pass
     _tasks.clear()
+    # ACT-XXV: stop portfolio coordinator (generates shadow report)
+    global _portfolio_coordinator
+    if _portfolio_coordinator is not None:
+        try:
+            await _portfolio_coordinator.stop()
+        except Exception as e:
+            log.warning("portfolio coordinator stop error: %s", e)
+        _portfolio_coordinator = None
     # Close Supabase HTTP client
     try:
         from . import supabase_client
