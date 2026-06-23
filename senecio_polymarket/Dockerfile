@@ -25,6 +25,10 @@ COPY senecio_polymarket/frontend ./frontend
 # Copy Oracle modules (real prediction pipeline)
 COPY senecio_polymarket/oracle ./oracle
 
+# Copy start.sh (launches uvicorn + oracle_verifier.py)
+COPY senecio_polymarket/start.sh ./start.sh
+RUN chmod +x ./start.sh
+
 # Ensure runtime dirs exist
 RUN mkdir -p /app/data/audit && chmod -R 777 /app/data
 # senecio_output is already copied with seed predictions.jsonl via oracle/
@@ -43,5 +47,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -fsS http://localhost:8080/api/health || exit 1
 
-# Run uvicorn (single worker — fits in 256MB with both dashboard + oracle)
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--log-level", "info", "--no-access-log"]
+# Run uvicorn + oracle_verifier (start.sh manages both processes)
+CMD ["./start.sh"]
