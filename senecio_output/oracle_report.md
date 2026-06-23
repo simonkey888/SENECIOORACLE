@@ -1,15 +1,15 @@
 # SENECIO ORACLE_LAB — Statistical Evidence Report
 
-**Generated:** 2026-06-23T07:00:46.651965+00:00
+**Generated:** 2026-06-23T07:15:42.125595+00:00
 **Source:** predictions.jsonl
 
 ## Dataset Overview
 
 | Metric | Value |
 |--------|-------|
-| Total Predictions | 541 |
+| Total Predictions | 542 |
 | Directional (LONG/SHORT) | 21 |
-| FLAT | 520 |
+| FLAT | 521 |
 | Verified (outcome known) | 21 |
 | Verified Directional | 21 |
 
