@@ -26,9 +26,10 @@ COPY senecio_polymarket/frontend ./frontend
 COPY senecio_polymarket/oracle ./oracle
 
 # Copy start.sh (launches uvicorn + oracle_verifier.py)
-# Northflank dockerWorkDir="/" — must be at /start.sh for "./start.sh" CMD to resolve
+# Northflank customCommand="./start.sh" — must be findable from any cwd
 COPY senecio_polymarket/start.sh /start.sh
-RUN chmod +x /start.sh
+COPY senecio_polymarket/start.sh /app/start.sh
+RUN chmod +x /start.sh /app/start.sh
 
 # Ensure runtime dirs exist
 RUN mkdir -p /app/data/audit && chmod -R 777 /app/data

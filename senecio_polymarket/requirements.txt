@@ -1,5 +1,5 @@
 # SENECIO ORACLE — Python deps (Northflank unified — ACT XIX)
-# cache-bust: 2026-06-24T19:50
+# cache-bust: 2026-06-24T21:45
 fastapi==0.128.0
 uvicorn[standard]==0.44.0
 pydantic==2.12.5
