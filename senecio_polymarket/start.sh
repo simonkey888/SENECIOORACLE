@@ -1,11 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # SENECIO ORACLE — start.sh (ACT-XXXI PASO_2)
-# Launches both uvicorn (dashboard + prediction loop) and oracle_verifier.py
-# (15-min cron-style verifier). If either dies, the other is killed and the
-# container exits — Northflank will then restart it.
+# POSIX-compliant launcher: uvicorn (dashboard + prediction loop) + oracle_verifier.py
+# Either process dying exits the container — Northflank auto-restarts.
 set -u
 
-echo "[start.sh] launching uvicorn (dashboard + prediction loop)..."
+echo "[start.sh] launching uvicorn..."
 uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port 8080 \
@@ -18,7 +17,6 @@ echo "[start.sh] launching oracle_verifier (15-min cycle)..."
 python3 /app/oracle/oracle_verifier.py &
 VERIFIER_PID=$!
 
-# Cleanup on exit
 cleanup() {
   echo "[start.sh] cleanup: killing uvicorn ($UVICORN_PID) and verifier ($VERIFIER_PID)"
   kill -TERM "$UVICORN_PID" "$VERIFIER_PID" 2>/dev/null || true
@@ -27,8 +25,16 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Wait for either process to exit
-wait -n
-EXIT_CODE=$?
-echo "[start.sh] one process exited (code=$EXIT_CODE) — tearing down"
-exit $EXIT_CODE
+# POSIX: poll every 1s; exit if either PID is no longer alive
+while true; do
+  if ! kill -0 "$UVICORN_PID" 2>/dev/null; then
+    echo "[start.sh] uvicorn exited"
+    break
+  fi
+  if ! kill -0 "$VERIFIER_PID" 2>/dev/null; then
+    echo "[start.sh] verifier exited"
+    break
+  fi
+  sleep 1
+done
+exit 1
