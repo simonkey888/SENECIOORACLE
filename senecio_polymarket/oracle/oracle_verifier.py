@@ -56,6 +56,21 @@ MAX_AGE_MIN = int(os.environ.get("VERIFIER_MAX_AGE_MIN", "1440"))  # 24h
 OKX_REQUEST_DELAY = float(os.environ.get("OKX_REQUEST_DELAY", "0.3"))
 BATCH_LIMIT = int(os.environ.get("VERIFIER_BATCH_LIMIT", "50"))
 
+# ACT-XXXII Fix3 — checkpoint in Supabase for crash recovery.
+# Table is OPTIONAL: if it doesn't exist (HTTP 404 / PGRST205), checkpoint
+# load/save is silently skipped and the verifier runs as before. Create with:
+#   CREATE TABLE public.oracle_state (
+#     key text PRIMARY KEY,
+#     value jsonb NOT NULL DEFAULT '{}'::jsonb,
+#     updated_at timestamptz NOT NULL DEFAULT now()
+#   );
+#   ALTER TABLE public.oracle_state ENABLE ROW LEVEL SECURITY;
+#   CREATE POLICY "anon_read"  ON public.oracle_state FOR SELECT TO anon USING (true);
+#   CREATE POLICY "anon_write" ON public.oracle_state FOR INSERT TO anon WITH CHECK (true);
+#   CREATE POLICY "anon_upd"   ON public.oracle_state FOR UPDATE TO anon USING (true) WITH CHECK (true);
+CHECKPOINT_TABLE = os.environ.get("CHECKPOINT_TABLE", "oracle_state")
+CHECKPOINT_KEY = "verifier_state"
+
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 
 logging.basicConfig(
@@ -192,6 +207,77 @@ async def fetch_price_at(
 
 
 # ---------------------------------------------------------------------------
+# ACT-XXXII Fix3 — Checkpoint helpers (graceful: table is optional)
+# ---------------------------------------------------------------------------
+_checkpoint_warned = False  # one-shot warning if table missing
+
+
+async def sb_load_checkpoint(client: httpx.AsyncClient) -> Optional[dict]:
+    """Load last verifier checkpoint. Returns None if table missing or empty."""
+    global _checkpoint_warned
+    try:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}",
+            params={"key": f"eq.{CHECKPOINT_KEY}", "limit": "1"},
+            headers=_sb_headers(),
+            timeout=10.0,
+        )
+        if r.status_code == 404 or "PGRST205" in r.text:
+            if not _checkpoint_warned:
+                log.warning(
+                    "checkpoint table %s missing — run without crash-recovery "
+                    "(see SQL in oracle_verifier.py header to enable)",
+                    CHECKPOINT_TABLE,
+                )
+                _checkpoint_warned = True
+            return None
+        if r.status_code != 200:
+            log.warning("checkpoint load status=%s body=%s", r.status_code, r.text[:200])
+            return None
+        data = r.json() or []
+        if not data:
+            return None
+        v = data[0].get("value")
+        return v if isinstance(v, dict) else None
+    except Exception as e:
+        log.warning("checkpoint load error: %s", e)
+        return None
+
+
+async def sb_save_checkpoint(client: httpx.AsyncClient, state: dict) -> bool:
+    """Upsert verifier checkpoint. Returns False if table missing (non-fatal)."""
+    global _checkpoint_warned
+    try:
+        payload = {
+            "key": CHECKPOINT_KEY,
+            "value": state,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/{CHECKPOINT_TABLE}",
+            json=payload,
+            headers=_sb_headers(prefer="return=representation,resolution=merge-duplicates"),
+            timeout=10.0,
+        )
+        if r.status_code in (200, 201):
+            return True
+        if r.status_code == 404 or "PGRST205" in r.text:
+            if not _checkpoint_warned:
+                log.warning(
+                    "checkpoint table %s missing — skip save (non-fatal). "
+                    "Run SQL in oracle_verifier.py header to enable.",
+                    CHECKPOINT_TABLE,
+                )
+                _checkpoint_warned = True
+            return False
+        log.warning("checkpoint save status=%s body=%s", r.status_code, r.text[:200])
+        return False
+    except Exception as e:
+        log.warning("checkpoint save error: %s", e)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Core verifier logic
 # ---------------------------------------------------------------------------
 def compute_outcome(direction: str, price_now: float, price_then: float) -> str:
@@ -256,12 +342,22 @@ async def verify_one(
     return outcome, price_then
 
 
-async def run_cycle(dry_run: bool = False) -> dict:
-    """Run one verification cycle. Returns summary dict."""
+async def run_cycle(
+    dry_run: bool = False,
+    cycle_num: int = 0,
+    prior_checkpoint: Optional[dict] = None,
+) -> dict:
+    """Run one verification cycle. Returns summary dict.
+
+    ACT-XXXII Fix3: tracks last_resolved_id and saves a checkpoint to
+    oracle_state at the end of each cycle. Checkpoint save is best-effort
+    (non-fatal if table missing).
+    """
     started = time.time()
     summary = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "dry_run": dry_run,
+        "cycle_num": cycle_num,
         "fetched": 0,
         "patched": 0,
         "win": 0,
@@ -270,12 +366,16 @@ async def run_cycle(dry_run: bool = False) -> dict:
         "stale": 0,
         "pending": 0,
         "errors": 0,
+        "last_resolved_id": prior_checkpoint.get("last_resolved_id") if prior_checkpoint else None,
     }
 
     async with httpx.AsyncClient() as client:
         pending = await sb_fetch_pending(client, limit=BATCH_LIMIT)
         summary["fetched"] = len(pending)
-        log.info("cycle start: %d pending rows (dry_run=%s)", len(pending), dry_run)
+        log.info(
+            "cycle %d start: %d pending rows (dry_run=%s, prior_last_id=%s)",
+            cycle_num, len(pending), dry_run, summary["last_resolved_id"],
+        )
 
         for row in pending:
             try:
@@ -294,26 +394,73 @@ async def run_cycle(dry_run: bool = False) -> dict:
                     summary["errors"] += 1
                 if outcome in ("WIN", "LOSS", "SKIP", "STALE"):
                     summary["patched"] += 1
+                    rid = row.get("id")
+                    if isinstance(rid, int) and (
+                        summary["last_resolved_id"] is None
+                        or rid > summary["last_resolved_id"]
+                    ):
+                        summary["last_resolved_id"] = rid
                 await asyncio.sleep(OKX_REQUEST_DELAY)
             except Exception as e:
+                # ACT-XXXII Fix2 — per-row try/except: one bad row never kills the batch.
                 log.error("id=%s unexpected error: %s", row.get("id"), e)
                 summary["errors"] += 1
 
+        # ACT-XXXII Fix3 — save checkpoint (best-effort, non-fatal)
+        if not dry_run:
+            ck = {
+                "last_resolved_id": summary["last_resolved_id"],
+                "last_cycle_at": datetime.now(timezone.utc).isoformat(),
+                "cycles_run": cycle_num,
+                "last_summary": {
+                    k: v for k, v in summary.items()
+                    if k not in ("last_summary",)
+                },
+            }
+            try:
+                await sb_save_checkpoint(client, ck)
+            except Exception as cke:
+                log.warning("checkpoint save crashed (non-fatal): %s", cke)
+
     summary["duration_sec"] = round(time.time() - started, 2)
     log.info(
-        "cycle done: fetched=%d patched=%d W=%d L=%d SKIP=%d STALE=%d PENDING=%d ERR=%d (%.2fs)",
-        summary["fetched"], summary["patched"], summary["win"], summary["loss"],
+        "cycle %d done: fetched=%d patched=%d W=%d L=%d SKIP=%d STALE=%d PENDING=%d ERR=%d last_id=%s (%.2fs)",
+        cycle_num, summary["fetched"], summary["patched"], summary["win"], summary["loss"],
         summary["skip"], summary["stale"], summary["pending"], summary["errors"],
-        summary["duration_sec"],
+        summary["last_resolved_id"], summary["duration_sec"],
     )
     return summary
 
 
 async def daemon_loop():
+    """ACT-XXXII: load checkpoint on start, increment cycle_num, save after each cycle."""
     log.info("oracle_verifier daemon starting — interval=%ds", VERIFIER_INTERVAL_SEC)
+
+    # Load prior checkpoint to know where we left off (best-effort)
+    prior_ckpt = None
+    async with httpx.AsyncClient() as client:
+        prior_ckpt = await sb_load_checkpoint(client)
+    if prior_ckpt:
+        log.info(
+            "checkpoint recovered: last_resolved_id=%s cycles_run=%s last_cycle_at=%s",
+            prior_ckpt.get("last_resolved_id"),
+            prior_ckpt.get("cycles_run"),
+            prior_ckpt.get("last_cycle_at"),
+        )
+    else:
+        log.info("no prior checkpoint — starting fresh (cycle_num=1)")
+
+    start_cycle = (prior_ckpt.get("cycles_run") or 0) + 1 if prior_ckpt else 1
+
+    cycle_num = start_cycle
     while True:
         try:
-            await run_cycle(dry_run=False)
+            await run_cycle(
+                dry_run=False,
+                cycle_num=cycle_num,
+                prior_checkpoint=prior_ckpt,
+            )
+            cycle_num += 1
         except Exception as e:
             log.error("daemon cycle crashed (will retry): %s", e)
         await asyncio.sleep(VERIFIER_INTERVAL_SEC)
