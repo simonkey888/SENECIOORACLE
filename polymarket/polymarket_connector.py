@@ -120,32 +120,37 @@ def extract_markets(events: list[dict], categories: list[str] | None = None) -> 
     return results
 
 
-def persist_to_supabase(markets: list[dict]) -> int:
-    """Upsert markets into Supabase polymarket_markets table."""
+def persist_to_supabase(markets: list[dict], batch_size: int = 100) -> int:
+    """Bulk upsert markets into Supabase polymarket_markets table."""
     if not markets:
         return 0
+    inserted = 0
     with httpx.Client(base_url=f"{SUPABASE_URL}/rest/v1", headers={
         "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json", "Prefer": "return=minimal",
-    }, timeout=15.0) as c:
-        for s in markets:
-            row = {
+    }, timeout=30.0) as c:
+        for i in range(0, len(markets), batch_size):
+            batch = markets[i:i + batch_size]
+            rows = [{
                 "market_id": s["market_id"], "question": s["question"],
                 "p_yes": s["p_yes"], "p_no": s["p_no"],
                 "volume_usd": s["volume_usd"], "end_date": s["end_date"],
                 "signal": s["signal"], "event_title": s["event_title"],
                 "snapshot_utc": s["snapshot_utc"], "fee_bps": s["fee_bps"],
                 "outcome": None, "pnl_net": None,
-            }
-            # Upsert: try insert, on conflict update prices
-            r = c.post("/polymarket_markets", json=row,
+            } for s in batch]
+            r = c.post("/polymarket_markets", json=rows,
                        params={"on_conflict": "market_id,snapshot_utc"})
-            if r.status_code == 409:
-                c.patch("/polymarket_markets", json={
-                    "p_yes": s["p_yes"], "p_no": s["p_no"],
-                    "volume_usd": s["volume_usd"], "fee_bps": s["fee_bps"],
-                }, params={"market_id": f"eq.{s['market_id']}"})
-    return len(markets)
+            if r.status_code in (200, 201):
+                inserted += len(batch)
+            else:
+                # Fallback: insert one by one to handle partial conflicts
+                for row in rows:
+                    r2 = c.post("/polymarket_markets", json=row,
+                                params={"on_conflict": "market_id,snapshot_utc"})
+                    if r2.status_code in (200, 201):
+                        inserted += 1
+    return inserted
 
 
 if __name__ == "__main__":
