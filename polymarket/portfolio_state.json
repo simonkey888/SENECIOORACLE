@@ -1,0 +1,112 @@
+{
+  "bankroll": 10037.35,
+  "initial_bankroll": 10000,
+  "total_trades": 2,
+  "winning_trades": 1,
+  "total_pnl": 37.35,
+  "last_updated": "2026-06-30T08:35:39.554166+00:00",
+  "open_positions": [
+    {
+      "signal": {
+        "source": "fifa_test",
+        "domain": "Domain.SPORTS",
+        "market_id": "match_2",
+        "description": "Brazil vs Japan",
+        "diff_pp": 5.2,
+        "p_our": 0.58,
+        "p_market": 0.52,
+        "direction": "BUY_YES",
+        "bookmaker": "",
+        "snapshot_utc": "",
+        "fee_bps": 200,
+        "volume_usd": 0.0,
+        "raw_data": {}
+      },
+      "size_usd": 106.0,
+      "size_pct_bankroll": 1.06,
+      "kelly_full": 0.105217,
+      "kelly_quarter": 0.026304,
+      "entry_price": 0.52,
+      "status": "OPEN"
+    },
+    {
+      "signal": {
+        "source": "entertain_test",
+        "domain": "Domain.ENTERTAINMENT",
+        "market_id": "award_1",
+        "description": "Best Picture Oscar",
+        "diff_pp": 4.0,
+        "p_our": 0.4,
+        "p_market": 0.3,
+        "direction": "BUY_YES",
+        "bookmaker": "",
+        "snapshot_utc": "",
+        "fee_bps": 200,
+        "volume_usd": 0.0,
+        "raw_data": {}
+      },
+      "size_usd": 61.11,
+      "size_pct_bankroll": 0.6111,
+      "kelly_full": 0.135294,
+      "kelly_quarter": 0.033824,
+      "entry_price": 0.3,
+      "status": "OPEN"
+    }
+  ],
+  "closed_positions": [
+    {
+      "signal": {
+        "source": "fifa_test",
+        "domain": "Domain.SPORTS",
+        "market_id": "match_1",
+        "description": "Argentina vs Cape Verde",
+        "diff_pp": 6.5,
+        "p_our": 0.65,
+        "p_market": 0.55,
+        "direction": "BUY_YES",
+        "bookmaker": "",
+        "snapshot_utc": "",
+        "fee_bps": 200,
+        "volume_usd": 0.0,
+        "raw_data": {}
+      },
+      "size_usd": 145.0,
+      "size_pct_bankroll": 1.45,
+      "kelly_full": 0.202326,
+      "kelly_quarter": 0.050581,
+      "entry_price": 0.55,
+      "status": "CLOSED_WIN",
+      "exit_price": 1.0,
+      "pnl_usd": 62.35,
+      "pnl_pct": 43.0,
+      "closed_utc": "2026-06-30T08:35:39.553750+00:00"
+    },
+    {
+      "signal": {
+        "source": "election_test",
+        "domain": "Domain.POLITICS",
+        "market_id": "elec_1",
+        "description": "Will Candidate X win?",
+        "diff_pp": 8.0,
+        "p_our": 0.35,
+        "p_market": 0.75,
+        "direction": "BUY_NO",
+        "bookmaker": "",
+        "snapshot_utc": "",
+        "fee_bps": 1000,
+        "volume_usd": 0.0,
+        "raw_data": {}
+      },
+      "size_usd": 100.0,
+      "size_pct_bankroll": 1.0,
+      "kelly_full": 0.0,
+      "kelly_quarter": 0.0,
+      "entry_price": 0.25,
+      "status": "CLOSED_LOSS",
+      "exit_price": 0.0,
+      "pnl_usd": -25.0,
+      "pnl_pct": -25.0,
+      "closed_utc": "2026-06-30T08:35:39.554156+00:00"
+    }
+  ]
+}

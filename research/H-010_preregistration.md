@@ -164,4 +164,121 @@ Si paper predictions con n >= 15 tienen accuracy >= 0.60 → autorizar capital r
 
 ---
 
+## 15. PORTFOLIO Extension — H-010_PORTFOLIO (v8, 2026-06-30)
+
+> **Apendice al pre-registro original.** No modifica las secciones 1-14 (locked).
+> Define la extensión de portafolio multi-dominio con sizing Sakana.
+
+### 15.1 Motivación
+
+El pipeline original (secciones 1-14) define una estrategia mono-mercado con
+umbral de 10pp y posición fija de 1 unidad. Los datos empíricos del pipeline
+corregido muestran que los diffs binarios con Pinnacle oscilan entre 1-7pp
+(media 4.04pp), muy por debajo del umbral de 10pp. Esto genera 0 señales
+en 12/12 partidos.
+
+La extensión PORTFOLIO baja el umbral y diversifica la fuente de señales
+para operar múltiples mercados pequeños con posición chica, acumulando edge
+a través de volumen en vez de conviction individual.
+
+### 15.2 Parámetros Sakana (aprobados)
+
+| Parámetro | Valor | Justificación |
+|-----------|-------|---------------|
+| Kelly fraction | 1/4 (quarter-Kelly) | Reduce volatilidad; estándar para edge estimation impreciso |
+| Position size | 1-2.5% bankroll | Conservador para paper trading; ajustable post-validación |
+| Umbral deportes | 5 pp | Datos Pinnacle muestran diffs 1-7pp; 5pp captura 50%+ de oportunidades |
+| Umbral política | 6.5 pp | Mercados menos eficientes pero más ruidosos; requiere más edge |
+| Umbral entretenimiento | 3.5 pp | Mercados muy ineficientes; edge más fácil pero menos confiable |
+| n validación | 50 trades | Mismo n_min que H-010 original; poder estadístico equivalente |
+| Max exposición | 10% bankroll | Límite de riesgo total en posiciones abiertas simultáneamente |
+
+### 15.3 Sizing por dominio
+
+| Dominio | Threshold | Confidence Factor | Min Position | Max Position | Descripción |
+|---------|-----------|-------------------|-------------|-------------|-------------|
+| Sports | 5.0 pp | 0.80 | 1.0% | 2.5% | FIFA WC, major leagues — mercados moderadamente eficientes |
+| Politics | 6.5 pp | 0.70 | 1.0% | 2.0% | Elecciones nacionales — favorite-longshot bias documentado |
+| Entertainment | 3.5 pp | 0.60 | 0.5% | 1.5% | Awards, reality TV — baja liquidez, alto edge potencial |
+
+### 15.4 Fuentes de señal
+
+| Fuente | Dominio | Módulo | Status |
+|--------|---------|--------|--------|
+| FIFA WC pipeline (Odds API) | Sports | `source_scraper_fifa.py` → `portfolio_trader.py` | Operativo |
+| Election fade (favorite-longshot) | Politics | `polymarket_connector.py` → `portfolio_trader.py` | Operativo |
+| Entertainment markets | Entertainment | Futuro: scraper genérico | Pendiente |
+
+### 15.5 Criterios GO/NO-GO (PORTFOLIO)
+
+> Adicionales a los criterios originales de H-010 (sección 8).
+
+**GO (proceder a paper trading extendido):**
+
+1. Al menos 50 trades cerrados acumulados (multi-dominio)
+2. Win rate global > 0.53 (significativamente > 0.50, p < 0.10 one-sided)
+3. PnL neto positivo después de fees simuladas
+4. Al menos 2 dominios con win rate > 0.50 (no depender de un solo dominio)
+
+**NO-GO (abortar extensión portfolio):**
+
+1. Win rate global ≤ 0.53 después de 50 trades
+2. PnL neto negativo después de fees
+3. Un solo dominio genera >90% del PnL (diversificación insuficiente)
+4. Menos de 50 trades en 120 días (insuficiente data)
+
+### 15.6 Regla: PAPER TRADING ONLY
+
+Todas las posiciones son simuladas. No se transfiere capital real a Polymarket.
+El portfolio state se persiste en `portfolio_state.json` con tracking completo
+de entradas, salidas, PnL, y métricas de validación.
+
+### 15.7 Independencia
+
+Esta extensión NO modifica:
+- Los criterios GO/NO-GO originales (sección 8) para el experimento de elecciones
+- El umbral de 70% del conector original
+- El n_min de 50 para el experimento político original
+- Los archivos del pipeline crypto
+
+### 15.8 Archivos nuevos
+
+| Archivo | Función | Líneas |
+|---------|---------|--------|
+| `polymarket/portfolio_trader.py` | Portfolio manager con Kelly fraccional | ~400 |
+| `polymarket/liquidity_scanner.py` | Escáner de arbitraje YES+NO (H-011) | ~450 |
+| `polymarket/polymarket_connector.py` | Extendido con fetch_orderbook() | ~170 |
+
+---
+
+## 16. H-011 Arbitraje de Liquidez (v8, 2026-06-30)
+
+> Nuevo experimento derivado del hallazgo de que YES+NO sum es típicamente
+> 1.01-1.02 en orderbooks CLOB. No requiere predecir dirección.
+
+### 16.1 Estrategia "Broken Math"
+
+Comprar YES y NO simultáneamente cuando `best_ask_YES + best_ask_NO < 1.00 - fee`.
+A resolución, un lado paga $1.00, garantizando profit sin importar el outcome.
+
+### 16.2 Datos empíricos (scan inicial 2026-06-30)
+
+- 200 mercados escaneados (Gamma + CLOB)
+- Gamma: YES+NO normalizado a 1.0000 en todos los mercados
+- CLOB: best_ask_YES + best_ask_NO típicamente 1.01-1.02
+- 0 oportunidades detectadas en scan inicial
+- Latencia API: ~25ms Gamma, ~30ms CLOB
+
+### 16.3 Veredicto preliminar
+
+El arbitraje "broken math" es **teóricamente posible pero empíricamente raro**.
+Los bots de alta frecuencia mantienen los spreads ajustados. Las oportunidades
+que aparecen se cierran en segundos. Sin infraestructura de ejecución de baja
+latencia, la probabilidad de capturar una oportunidad es baja.
+
+**Recomendación:** Continuar scanning pasivo por 2 semanas. Si la frecuencia
+de oportunidades es < 1/día, clasificar como NO-GO para ejecución propia.
+
+---
+
 *Pre-registro locked. Próxima edición = nuevo pre-registro con fecha posterior.*
