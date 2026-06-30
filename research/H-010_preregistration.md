@@ -279,6 +279,53 @@ latencia, la probabilidad de capturar una oportunidad es baja.
 **Recomendación:** Continuar scanning pasivo por 2 semanas. Si la frecuencia
 de oportunidades es < 1/día, clasificar como NO-GO para ejecución propia.
 
+### 16.4 Autenticación CLOB (documentación oficial, 2026-06-30)
+
+Polymarket usa un modelo de autenticación de dos niveles:
+
+| Nivel | Método | Uso |
+|-------|--------|-----|
+| L1 | Private Key + EIP-712 signature | Crear credenciales API, firmar órdenes |
+| L2 | API Key + HMAC-SHA256 | Autenticar requests de trading al CLOB |
+
+**Headers L2 requeridos para trading:**
+- `POLY_ADDRESS`: Dirección del signer en Polygon
+- `POLY_SIGNATURE`: HMAC-SHA256 del request
+- `POLY_TIMESTAMP`: UNIX timestamp actual
+- `POLY_API_KEY`: API key del usuario
+- `POLY_PASSPHRASE`: Passphrase del usuario
+
+**Signature types recomendados:**
+- `POLY_1271` (type 3): Deposit wallet flow, recomendado para nuevos API users
+- EOA (type 0): Standard Ethereum wallet, requiere POL para gas
+
+**Python SDK:** `py-clob-client` (no instalado aún en el entorno)
+
+**Endpoints públicos (sin auth):** `/book`, `/prices`, `/markets`
+**Endpoints autenticados:** `/order` (POST), `/order` (DELETE), `/balances`
+
+### 16.5 Timing de ejecución estimado
+
+| Paso | Latencia estimada |
+|------|-------------------|
+| Detección (CLOB /book read) | ~30ms |
+| Firma EIP-712 (Python) | ~50-100ms |
+| Submit orden (POST /order) | ~50-100ms |
+| **Total round-trip** | **~150-300ms** |
+| Competencia estimada (bots co-located) | ~50-100ms |
+
+**Conclusión:** Python es 3-5x más lento que óptimo. Para ventanas de arb < 5s,
+es marginal. FOK orders ayudan pero no eliminan el timing risk.
+
+### 16.6 Plan de implementación por fases
+
+| Fase | Acción | Requisito | Timeline |
+|------|--------|-----------|----------|
+| 1 | Scanning pasivo (actual) | Solo CLOB read | En curso → 2026-07-14 |
+| 2 | Setup wallet + py_clob_client | Si > 1 opp/día detectada | 2026-07-14 → 07-21 |
+| 3 | FOK order execution | Si phase 2 captura >50% | 2026-07-21 → 08-04 |
+| GO/NO-GO | Evaluación final | Datos de 2 semanas | 2026-07-14 |
+
 ---
 
 *Pre-registro locked. Próxima edición = nuevo pre-registro con fecha posterior.*
