@@ -1,0 +1,28 @@
+# SENECKIO H-011 — VWAP Detector Cron Service (Northflank)
+# Lightweight: solo httpx + numpy para correr vwap_detector_v2.py
+# Este Dockerfile vive en /polymarket/Dockerfile.h011 del repo
+# Northflank hace checkout del repo completo en /, y este Dockerfile se referencia
+# con dockerWorkDir=/ y dockerfilePath=/polymarket/Dockerfile.h011
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Instalar dependencias mínimas
+RUN pip install --no-cache-dir httpx numpy
+
+# Copiar SOLO lo necesario para H-011 (paths relativas al build context = repo root)
+COPY polymarket/polymarket_connector.py /app/polymarket/polymarket_connector.py
+COPY polymarket/vwap_detector_v2.py /app/polymarket/vwap_detector_v2.py
+COPY polymarket/__init__.py /app/polymarket/__init__.py
+COPY polymarket/cron_h011.sh /app/cron_h011.sh
+
+# Crear directorio de resultados y symlink al volumen persistente
+RUN mkdir -p /app/polymarket/results && chmod +x /app/cron_h011.sh
+
+# El cron job de Northflank ejecutará directamente el script Python
+WORKDIR /app/polymarket
+
+# Comando por defecto: una sola ejecución del detector
+# Northflank cronJob invocará este comando cada 15 minutos
+CMD ["python3", "vwap_detector_v2.py", "--mode", "monitor", "--window", "3600"]
