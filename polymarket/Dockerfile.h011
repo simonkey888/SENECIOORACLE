@@ -3,6 +3,11 @@
 # Este Dockerfile vive en /polymarket/Dockerfile.h011 del repo
 # Northflank hace checkout del repo completo en /, y este Dockerfile se referencia
 # con dockerWorkDir=/ y dockerfilePath=/polymarket/Dockerfile.h011
+#
+# ESTRATEGIA: como el servicio es "combined" (siempre corriendo), usamos un loop
+# infinito que ejecuta el detector cada 15 minutos (900s). Esto evita que el pod
+# se caiga y Northflank lo reinicie en loop.
+# El volumen persistente h011-results-vol se monta en /app/polymarket/results.
 
 FROM python:3.11-slim
 
@@ -23,6 +28,7 @@ RUN mkdir -p /app/polymarket/results && chmod +x /app/cron_h011.sh
 # El cron job de Northflank ejecutará directamente el script Python
 WORKDIR /app/polymarket
 
-# Comando por defecto: una sola ejecución del detector
-# Northflank cronJob invocará este comando cada 15 minutos
-CMD ["python3", "vwap_detector_v2.py", "--mode", "monitor", "--window", "3600"]
+# Comando por defecto: loop infinito cada 15 minutos
+# Ejecuta el detector una vez, espera 900s (15 min), repite.
+# Esto mantiene el pod vivo mientras genera scans periódicos.
+CMD ["sh", "-c", "while true; do echo '=== H-011 scan starting at ' $(date -u '+%Y-%m-%dT%H:%M:%SZ') ' ==='; python3 vwap_detector_v2.py --mode monitor --window 3600 2>&1; echo '=== H-011 scan finished, sleeping 900s ==='; sleep 900; done"]
