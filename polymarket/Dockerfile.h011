@@ -1,34 +1,42 @@
-# SENECKIO H-011 — VWAP Detector Cron Service (Northflank)
-# Lightweight: solo httpx + numpy para correr vwap_detector_v2.py
-# Este Dockerfile vive en /polymarket/Dockerfile.h011 del repo
-# Northflank hace checkout del repo completo en /, y este Dockerfile se referencia
-# con dockerWorkDir=/ y dockerfilePath=/polymarket/Dockerfile.h011
+# SENECKIO H-011 — VWAP Detector + Dashboard (Northflank)
+# Lightweight: httpx + numpy + fastapi + uvicorn
+# Sirve dashboard web en :8080 + corre loop del detector cada 15 min en paralelo.
 #
-# ESTRATEGIA: como el servicio es "combined" (siempre corriendo), usamos un loop
-# infinito que ejecuta el detector cada 15 minutos (900s). Esto evita que el pod
-# se caiga y Northflank lo reinicie en loop.
+# Este Dockerfile vive en /polymarket/Dockerfile.h011 del repo.
+# Northflank hace checkout del repo completo en / y este Dockerfile se referencia
+# con dockerWorkDir=/ y dockerfilePath=/polymarket/Dockerfile.h011.
+#
 # El volumen persistente h011-results-vol se monta en /app/polymarket/results.
 
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependencias mínimas
-RUN pip install --no-cache-dir httpx numpy
+# Instalar dependencias mínimas del detector + dashboard web
+RUN pip install --no-cache-dir httpx numpy fastapi uvicorn
 
-# Copiar SOLO lo necesario para H-011 (paths relativas al build context = repo root)
-COPY polymarket/polymarket_connector.py /app/polymarket/polymarket_connector.py
-COPY polymarket/vwap_detector_v2.py /app/polymarket/vwap_detector_v2.py
-COPY polymarket/__init__.py /app/polymarket/__init__.py
-COPY polymarket/cron_h011.sh /app/cron_h011.sh
+# CACHE BUST: forzar rebuild de layers posteriores (fix: dashboard.py no se copiaba)
+ARG CACHE_BUST=20260707
+RUN echo "cache bust ${CACHE_BUST}"
 
-# Crear directorio de resultados y symlink al volumen persistente
-RUN mkdir -p /app/polymarket/results && chmod +x /app/cron_h011.sh
+# Crear estructura de directorios
+RUN mkdir -p /app/polymarket/results
 
-# El cron job de Northflank ejecutará directamente el script Python
+# Copiar TODOS los archivos necesarios en un solo COPY (más eficiente + evita cache stale)
+COPY polymarket/polymarket_connector.py \
+     polymarket/vwap_detector_v2.py \
+     polymarket/dashboard.py \
+     polymarket/start.sh \
+     polymarket/__init__.py \
+     /app/polymarket/
+
+# Dar permisos de ejecución
+RUN chmod +x /app/polymarket/start.sh
+
 WORKDIR /app/polymarket
 
-# Comando por defecto: loop infinito cada 15 minutos
-# Ejecuta el detector una vez, espera 900s (15 min), repite.
-# Esto mantiene el pod vivo mientras genera scans periódicos.
-CMD ["sh", "-c", "while true; do echo '=== H-011 scan starting at ' $(date -u '+%Y-%m-%dT%H:%M:%SZ') ' ==='; python3 vwap_detector_v2.py --mode monitor --window 3600 2>&1; echo '=== H-011 scan finished, sleeping 900s ==='; sleep 900; done"]
+# Exponer puerto del dashboard
+EXPOSE 8080
+
+# El orquestador arranca dashboard + loop detector en paralelo
+CMD ["sh", "-c", "python3 /app/polymarket/dashboard.py 2>&1 & sleep 3 && while true; do echo '=== H-011 scan starting at' $(date -u '+%Y-%m-%dT%H:%M:%SZ') '==='; python3 /app/polymarket/vwap_detector_v2.py --mode monitor --window 3600 2>&1; echo '=== H-011 scan finished, sleeping 900s ==='; sleep 900; done"]
