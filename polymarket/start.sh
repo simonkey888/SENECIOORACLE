@@ -18,9 +18,24 @@ echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Volume mounted: $(test -d /app/polymark
 
 # ─── PROCESO 1: Dashboard web (background) ───────────────────────────
 echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Starting dashboard on :8080 ..."
-python3 /app/polymarket/dashboard.py &
+# Redirect stderr to stdout so import errors are visible in Northflank logs
+python3 /app/polymarket/dashboard.py 2>&1 &
 DASHBOARD_PID=$!
 echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Dashboard PID: ${DASHBOARD_PID}"
+
+# Wait 3s and check if dashboard is still alive (catch import errors)
+sleep 3
+if ! kill -0 ${DASHBOARD_PID} 2>/dev/null; then
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] !!! Dashboard process died — check import errors above"
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] !!! Testing imports manually..."
+    python3 -c "import fastapi; print('fastapi OK')" 2>&1
+    python3 -c "import uvicorn; print('uvicorn OK')" 2>&1
+    python3 -c "import httpx; print('httpx OK')" 2>&1
+    python3 -c "import numpy; print('numpy OK')" 2>&1
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] !!! Dashboard will NOT be available. Detector loop continues."
+else
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Dashboard started successfully on :8080"
+fi
 
 # ─── PROCESO 2: Loop del detector (foreground) ───────────────────────
 # Loop infinito: ejecuta el detector cada 15 minutos (900s).
