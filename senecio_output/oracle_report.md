@@ -1,47 +1,47 @@
 # SENECIO ORACLE_LAB — Statistical Evidence Report
 
-**Generated:** 2026-07-07T15:15:42.602728+00:00
+**Generated:** 2026-07-07T15:31:04.869941+00:00
 **Source:** predictions.jsonl
 
 ## Dataset Overview
 
 | Metric | Value |
 |--------|-------|
-| Total Predictions | 1916 |
+| Total Predictions | 1917 |
 | Directional (LONG/SHORT) | 98 |
-| FLAT | 1818 |
-| Verified (outcome known) | 97 |
-| Verified Directional | 97 |
+| FLAT | 1819 |
+| Verified (outcome known) | 98 |
+| Verified Directional | 98 |
 
 ## Classification Metrics
 
 | Metric | LONG | SHORT | Overall |
 |--------|------|--------|---------|
-| Precision | 0.4706 | 0.4783 | — |
-| Recall | 0.5000 | 0.4490 | — |
-| F1 | 0.4848 | 0.4632 | — |
-| **Accuracy** | — | — | **0.4742** |
+| Precision | 0.4706 | 0.4681 | — |
+| Recall | 0.4898 | 0.4490 | — |
+| F1 | 0.4800 | 0.4583 | — |
+| **Accuracy** | — | — | **0.4694** |
 
 ### Confusion Matrix
 
 | | Market UP | Market DOWN |
 |-----------|-----------|-------------|
 | **Predicted LONG** | 24 | 27 |
-| **Predicted SHORT** | 24 | 22 |
+| **Predicted SHORT** | 25 | 22 |
 
 ## Probabilistic Calibration
 
 | Metric | Value | Interpretation |
 |--------|-------|----------------|
-| Brier Score | 0.266945 | 0=perfect, 0.25=random, 1=worst |
-| ECE | 0.128496 | 0=perfectly calibrated |
+| Brier Score | 0.268101 | 0=perfect, 0.25=random, 1=worst |
+| ECE | 0.133468 | 0=perfectly calibrated |
 
 ### Calibration Bins
 
 | Confidence Range | Count | Avg Confidence | Actual Accuracy | Gap |
 |-----------------|-------|---------------|-----------------|-----|
 | [0.50, 0.60) | 33 | 0.5813 | 0.4848 | 0.0964 ✅ |
-| [0.60, 0.70) | 63 | 0.6119 | 0.4762 | 0.1358 ⚠️ |
+| [0.60, 0.70) | 64 | 0.6120 | 0.4688 | 0.1433 ⚠️ |
 | [0.70, 0.80) | 1 | 0.7275 | 0.0000 | 0.7275 ⚠️ |
 
 ## Expected Value Analysis
@@ -51,30 +51,30 @@
 | Bucket | Count | Model EV | Realized EV | Win Rate |
 |--------|-------|----------|-------------|----------|
 | 0.50-0.60 | 33 | 0.00066532 | 0.06906136 | 48.48% |
-| 0.60-0.70 | 63 | 0.00053989 | 1.14865048 | 47.62% |
+| 0.60-0.70 | 64 | 0.00053846 | 1.13068597 | 46.88% |
 | 0.70-0.80 | 1 | 0.00402102 | -0.00126846 | 0.00% |
 
 ### EV by Market Regime
 
 | Regime | Count | Model EV | Realized EV | Win Rate |
 |--------|-------|----------|-------------|----------|
-| RANGING | 95 | 0.00057009 | 0.78571052 | 47.37% |
+| RANGING | 96 | 0.00056882 | 0.77751480 | 46.88% |
 | TRENDING | 2 | 0.00291560 | 0.00011890 | 50.00% |
 
 ### EV by Symbol
 
 | Symbol | Count | Model EV | Realized EV | Win Rate |
 |--------|-------|----------|-------------|----------|
-| ETHUSDT | 97 | 0.00061845 | 0.76951275 | 47.42% |
+| ETHUSDT | 98 | 0.00061671 | 0.76164958 | 46.94% |
 
 ## Theoretical Sharpe Ratio
 
 | Metric | Value |
 |--------|-------|
-| Sharpe (annualized) | 16.1759 |
-| Mean Return | 0.76951275 |
-| Std Return | 8.90490618 |
-| N Returns | 97 |
+| Sharpe (annualized) | 16.0923 |
+| Mean Return | 0.76164958 |
+| Std Return | 8.85969497 |
+| N Returns | 98 |
 | Cycles/Year | 35040 |
 
 ## Signal Rankings
@@ -83,20 +83,20 @@
 
 | Rank | Signal | Agreed Accuracy | Total Influence | Predictive Score |
 |------|--------|----------------|-----------------|------------------|
-| 1 | orderflow | 47.42% | 78.7871 | 0.385185 |
-| 2 | bidask | 47.42% | 33.7506 | 0.165005 |
-| 3 | volume_delta | 52.27% | 0.0829 | 0.000447 |
-| 4 | price_momentum | 42.59% | 0.0780 | 0.000342 |
+| 1 | orderflow | 46.94% | 80.1252 | 0.383773 |
+| 2 | bidask | 46.94% | 34.3004 | 0.164288 |
+| 3 | volume_delta | 51.11% | 0.0830 | 0.000433 |
+| 4 | price_momentum | 42.59% | 0.0782 | 0.000340 |
 | 5 | funding | 0.00% | 0.0004 | 0.000000 |
 
 ### Most Destructive Signals (agreement → wrong outcome)
 
 | Rank | Signal | Agreed Failure Rate | Total Influence | Destructive Score |
 |------|--------|---------------------|-----------------|-------------------|
-| 1 | orderflow | 52.58% | 78.7871 | 0.427053 |
-| 2 | bidask | 52.58% | 33.7506 | 0.182940 |
-| 3 | price_momentum | 57.41% | 0.0780 | 0.000462 |
-| 4 | volume_delta | 47.73% | 0.0829 | 0.000408 |
+| 1 | orderflow | 53.06% | 80.1252 | 0.433831 |
+| 2 | bidask | 53.06% | 34.3004 | 0.185717 |
+| 3 | price_momentum | 57.41% | 0.0782 | 0.000458 |
+| 4 | volume_delta | 48.89% | 0.0830 | 0.000414 |
 | 5 | funding | 100.00% | 0.0004 | 0.000352 |
 
 ## Top 20 Best Predictions
