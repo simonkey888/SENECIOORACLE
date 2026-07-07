@@ -78,6 +78,12 @@ EXCLUDE_LEG_ABOVE = 0.95     # mercados ya resueltos
 # Ventana por defecto (definitiva tras FASE 0.6 + validación V2)
 DEFAULT_WINDOW_SEC = 300     # 5 minutos
 
+# GEMINI Q7 — Staleness filter: excluir mercados donde el Δt entre avg timestamp
+# YES y avg timestamp NO supere este umbral. Mitiga artefactos de microestructura
+# (stale leg trades creating artificial deviations).
+# Default: 60 segundos (recomendación Gemini).
+STALENESS_THRESHOLD_SEC = int(os.environ.get("H011_STALENESS_THRESHOLD", "60"))
+
 # Paginación client-side
 PAGE_SIZE = 500              # max soportado por el endpoint
 MAX_PAGES_PER_MARKET = 20    # límite de paginación por mercado (suficiente para ventanas ≤30min en mercados líquidos)
@@ -278,34 +284,47 @@ def compute_vwap(trades: list[dict]) -> tuple[Optional[float], int, float, Optio
 def compute_ewma(
     trades: list[dict],
     half_life_sec: int,
+    evaluation_ts: Optional[int] = None,
 ) -> tuple[Optional[float], int, float, Optional[float], int, float]:
     """
     EWMA (Exponentially Weighted Moving Average) con half-life = half_life_sec.
 
-    Para cada trade (ordenado por timestamp asc), el peso es:
-      w = 0.5 ^ ((t_now - t_trade) / half_life_sec)
+    Para cada trade, el peso es:
+      w = 0.5 ^ ((t_eval - t_trade) / half_life_sec)
 
     EWMA = sum(price * size * w) / sum(size * w)
 
-    Esto da más peso a trades recientes y decae exponencialmente.
-    half_life define el tiempo para que el peso caiga a 50%.
+    GEMINI FIX (Q3 Issue A): El timestamp de referencia (t_now) NO debe ser
+    el max trade timestamp (eso hace que trades stale en mercados ilíquidos
+    tengan peso 1.0). Debe ser evaluation_ts (el now_ts del scan actual).
+    Esto penaliza correctamente los trades antiguos incluso si el mercado
+    está poco líquido.
+
+    Args:
+        trades: lista de trades en la ventana
+        half_life_sec: tiempo para que el peso caiga a 50%
+        evaluation_ts: timestamp de referencia (now_ts del scan). Si es None,
+                       usa max(trades.timestamp) como fallback (comportamiento
+                       legacy, NO recomendado).
 
     Returns (ewma_yes, n_yes, vol_yes, ewma_no, n_no, vol_no).
     """
     if not trades:
         return (None, 0, 0.0, None, 0, 0.0)
 
-    # Ordenar trades por timestamp ascendente
-    sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", 0))
-    # t_now = timestamp del trade más reciente (look-ahead bias: no usamos tiempo real)
-    t_now = max(t.get("timestamp", 0) for t in sorted_trades)
+    # GEMINI FIX: usar evaluation_ts (now_ts del scan) en lugar de max(trades)
+    if evaluation_ts is None:
+        # Fallback legacy (NO recomendado — mantiene bug para compatibilidad)
+        t_now = max(t.get("timestamp", 0) for t in trades)
+    else:
+        t_now = evaluation_ts
 
     yes_ps = yes_s = 0.0
     no_ps = no_s = 0.0
     n_yes = n_no = 0
     decay = math.log(2) / half_life_sec if half_life_sec > 0 else 0.0
 
-    for t in sorted_trades:
+    for t in trades:
         try:
             p = float(t.get("price", 0))
             s = float(t.get("size", 0))
@@ -313,7 +332,7 @@ def compute_ewma(
             idx = int(t.get("outcomeIndex", -1))
             if p <= 0 or s <= 0 or idx not in (0, 1):
                 continue
-            # Peso EWMA
+            # Peso EWMA relativo a evaluation_ts (no al último trade)
             age = max(0.0, t_now - ts)
             w = math.exp(-decay * age)
             if idx == 0:
@@ -378,7 +397,9 @@ def analyze_market(
     if estimator == "vwap":
         v_yes, n_yes, vol_yes, v_no, n_no, vol_no = compute_vwap(trades)
     elif estimator == "ewma":
-        v_yes, n_yes, vol_yes, v_no, n_no, vol_no = compute_ewma(trades, window_s)
+        # GEMINI FIX Q3: pasar now_ts como evaluation_ts para que el decay
+        # sea relativo al momento del scan, no al último trade
+        v_yes, n_yes, vol_yes, v_no, n_no, vol_no = compute_ewma(trades, window_s, evaluation_ts=now_ts)
     else:
         result.excluded_reason = f"unknown_estimator_{estimator}"
         return result
@@ -394,6 +415,23 @@ def analyze_market(
     if n_yes < 1 or n_no < 1:
         result.excluded_reason = f"insufficient_trades_yes={n_yes}_no={n_no}"
         return result
+
+    # GEMINI Q7 — STALENESS FILTER (microstructure artifact mitigation)
+    # Descartar mercados donde el Δt entre avg timestamp YES y avg timestamp NO
+    # supere STALENESS_THRESHOLD_SEC. Esto filtra mercados donde un leg tiene
+    # trades frescos y el otro leg tiene trades stale (creando deviaciones
+    # artificiales que NO son arbitraje ejecutable).
+    yes_ts_list = [t.get("timestamp", 0) for t in trades if t.get("outcomeIndex") == 0]
+    no_ts_list = [t.get("timestamp", 0) for t in trades if t.get("outcomeIndex") == 1]
+    if yes_ts_list and no_ts_list:
+        yes_avg_ts = sum(yes_ts_list) / len(yes_ts_list)
+        no_avg_ts = sum(no_ts_list) / len(no_ts_list)
+        staleness_delta = abs(yes_avg_ts - no_avg_ts)
+        if staleness_delta > STALENESS_THRESHOLD_SEC:
+            result.excluded_reason = (
+                f"staleness_filter_delta={int(staleness_delta)}s_yes_avg={int(yes_avg_ts)}_no_avg={int(no_avg_ts)}"
+            )
+            return result
 
     # Exclusion: leg above 0.95 (already resolved)
     if v_yes > EXCLUDE_LEG_ABOVE or v_no > EXCLUDE_LEG_ABOVE:
