@@ -1,10 +1,10 @@
 {
   "meta": {
-    "generated_at": "2026-07-08T07:01:06.966785+00:00",
+    "generated_at": "2026-07-08T07:15:44.327433+00:00",
     "source": "predictions.jsonl",
-    "total_predictions": 1979,
+    "total_predictions": 1980,
     "directional": 104,
-    "flat": 1875,
+    "flat": 1876,
     "verified": 104,
     "verified_directional": 104
   },
