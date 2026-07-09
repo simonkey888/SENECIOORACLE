@@ -1,49 +1,49 @@
 {
   "meta": {
-    "generated_at": "2026-07-09T14:15:49.591540+00:00",
+    "generated_at": "2026-07-09T14:31:02.721077+00:00",
     "source": "predictions.jsonl",
-    "total_predictions": 2101,
-    "directional": 113,
+    "total_predictions": 2102,
+    "directional": 114,
     "flat": 1988,
-    "verified": 112,
-    "verified_directional": 112
+    "verified": 113,
+    "verified_directional": 113
   },
   "classification": {
-    "n_directional": 112,
-    "accuracy": 0.473214,
-    "precision_long": 0.508475,
+    "n_directional": 113,
+    "accuracy": 0.469027,
+    "precision_long": 0.5,
     "precision_short": 0.433962,
     "recall_long": 0.5,
-    "recall_short": 0.442308,
-    "f1_long": 0.504202,
-    "f1_short": 0.438095,
+    "recall_short": 0.433962,
+    "f1_long": 0.5,
+    "f1_short": 0.433962,
     "confusion_matrix": {
       "predicted_long_actual_up": 30,
-      "predicted_long_actual_down": 29,
+      "predicted_long_actual_down": 30,
       "predicted_short_actual_down": 23,
       "predicted_short_actual_up": 30
     },
     "counts": {
       "tp_long": 30,
-      "fp_long": 29,
+      "fp_long": 30,
       "tp_short": 23,
       "fp_short": 30,
       "fn_long": 30,
-      "fn_short": 29
+      "fn_short": 30
     }
   },
   "probabilistic": {
-    "brier_score": 0.267039,
+    "brier_score": 0.267374,
     "ece": {
-      "ece": 0.129064,
+      "ece": 0.132788,
       "n_bins_with_data": 3,
       "bins": [
         {
           "range": "[0.50, 0.60)",
-          "count": 39,
-          "avg_confidence": 0.581,
-          "accuracy": 0.4872,
-          "gap": 0.0939
+          "count": 40,
+          "avg_confidence": 0.5803,
+          "accuracy": 0.475,
+          "gap": 0.1053
         },
         {
           "range": "[0.60, 0.70)",
@@ -67,10 +67,10 @@
       "buckets": [
         {
           "bucket": "0.50-0.60",
-          "count": 39,
-          "avg_model_ev": 0.00063617,
-          "avg_realized_ev": 0.05843995,
-          "win_rate": 0.4872
+          "count": 40,
+          "avg_model_ev": 0.00062676,
+          "avg_realized_ev": 0.05695653,
+          "win_rate": 0.475
         },
         {
           "bucket": "0.60-0.70",
@@ -92,10 +92,10 @@
       "regimes": [
         {
           "regime": "RANGING",
-          "count": 110,
-          "avg_model_ev": 0.0005462,
-          "avg_realized_ev": 0.67845829,
-          "win_rate": 0.4727
+          "count": 111,
+          "avg_model_ev": 0.00054362,
+          "avg_realized_ev": 0.67233798,
+          "win_rate": 0.4685
         },
         {
           "regime": "TRENDING",
@@ -110,60 +110,60 @@
       "symbols": [
         {
           "symbol": "ETHUSDT",
-          "count": 112,
-          "avg_model_ev": 0.00058852,
-          "avg_realized_ev": 0.66634509,
-          "win_rate": 0.4732
+          "count": 113,
+          "avg_model_ev": 0.0005856,
+          "avg_realized_ev": 0.66044029,
+          "win_rate": 0.469
         }
       ]
     }
   },
   "sharpe": {
-    "sharpe": 15.0438,
-    "mean_return": 0.66634509,
-    "std_return": 8.29132088,
-    "n_returns": 112,
+    "sharpe": 14.9765,
+    "mean_return": 0.66044029,
+    "std_return": 8.25478863,
+    "n_returns": 113,
     "cycles_per_year": 35040
   },
   "signal_rankings": {
     "most_predictive": [
       {
         "signal": "orderflow",
-        "agreed_total": 112,
-        "agreed_accuracy": 0.4732,
+        "agreed_total": 113,
+        "agreed_accuracy": 0.469,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 89.7643,
-        "predictive_score": 0.379265,
-        "destructive_score": 0.422201
+        "total_influence": 90.1643,
+        "predictive_score": 0.374243,
+        "destructive_score": 0.423671
       },
       {
         "signal": "bidask",
-        "agreed_total": 112,
-        "agreed_accuracy": 0.4732,
+        "agreed_total": 113,
+        "agreed_accuracy": 0.469,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 38.538,
-        "predictive_score": 0.162828,
-        "destructive_score": 0.181261
+        "total_influence": 38.7176,
+        "predictive_score": 0.160704,
+        "destructive_score": 0.181929
       },
       {
         "signal": "volume_delta",
-        "agreed_total": 53,
-        "agreed_accuracy": 0.5094,
+        "agreed_total": 54,
+        "agreed_accuracy": 0.5,
         "disagreed_total": 59,
         "disagreed_accuracy": 0.4407,
-        "total_influence": 0.0908,
-        "predictive_score": 0.000413,
-        "destructive_score": 0.000398
+        "total_influence": 0.0915,
+        "predictive_score": 0.000405,
+        "destructive_score": 0.000405
       },
       {
         "signal": "price_momentum",
         "agreed_total": 60,
         "agreed_accuracy": 0.4333,
-        "disagreed_total": 52,
-        "disagreed_accuracy": 0.5192,
-        "total_influence": 0.0861,
+        "disagreed_total": 53,
+        "disagreed_accuracy": 0.5094,
+        "total_influence": 0.0868,
         "predictive_score": 0.000333,
         "destructive_score": 0.000435
       },
@@ -181,43 +181,43 @@
     "most_destructive": [
       {
         "signal": "orderflow",
-        "agreed_total": 112,
-        "agreed_accuracy": 0.4732,
+        "agreed_total": 113,
+        "agreed_accuracy": 0.469,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 89.7643,
-        "predictive_score": 0.379265,
-        "destructive_score": 0.422201
+        "total_influence": 90.1643,
+        "predictive_score": 0.374243,
+        "destructive_score": 0.423671
       },
       {
         "signal": "bidask",
-        "agreed_total": 112,
-        "agreed_accuracy": 0.4732,
+        "agreed_total": 113,
+        "agreed_accuracy": 0.469,
         "disagreed_total": 0,
         "disagreed_accuracy": 0,
-        "total_influence": 38.538,
-        "predictive_score": 0.162828,
-        "destructive_score": 0.181261
+        "total_influence": 38.7176,
+        "predictive_score": 0.160704,
+        "destructive_score": 0.181929
       },
       {
         "signal": "price_momentum",
         "agreed_total": 60,
         "agreed_accuracy": 0.4333,
-        "disagreed_total": 52,
-        "disagreed_accuracy": 0.5192,
-        "total_influence": 0.0861,
+        "disagreed_total": 53,
+        "disagreed_accuracy": 0.5094,
+        "total_influence": 0.0868,
         "predictive_score": 0.000333,
         "destructive_score": 0.000435
       },
       {
         "signal": "volume_delta",
-        "agreed_total": 53,
-        "agreed_accuracy": 0.5094,
+        "agreed_total": 54,
+        "agreed_accuracy": 0.5,
         "disagreed_total": 59,
         "disagreed_accuracy": 0.4407,
-        "total_influence": 0.0908,
-        "predictive_score": 0.000413,
-        "destructive_score": 0.000398
+        "total_influence": 0.0915,
+        "predictive_score": 0.000405,
+        "destructive_score": 0.000405
       },
       {
         "signal": "funding",
