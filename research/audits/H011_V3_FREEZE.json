@@ -1,0 +1,30 @@
+{
+  "git_sha": "46d9f8ec44c4b599c8473d592aa3dd0482833652",
+  "created_at_utc": "2026-07-10T11:02:46.448830+00:00",
+  "mode": "PAPER_ONLY",
+  "live_capital_locked": true,
+  "files": {
+    "polymarket/vwap_detector_v2.py": "5db2a29af9c29a64ad09c549a16b0ef497715074898423cb4bcc3ebd069fdee5",
+    "polymarket/dashboard.py": "2e49750ac5f125d0074a622db089795294fa35860792df92532cafee85ca0463",
+    "polymarket/Dockerfile.h011": "b0e4e974a7c94a5fd9b1bd2f115264be626a4cf1b5c7feac8cf3128c70669e1c",
+    "polymarket/polymarket_connector.py": "771455f0d1dd682d1315533d9c557e7373ff43cedaf569beca6062d4db227bdf",
+    "polymarket/__init__.py": "20ac523ae11437abd647244d8befb419c60416eba171fd7d0e8dfe4d191228ce",
+    "polymarket/start.sh": "bea016b85e75eb92a668584a6c3b96099c6b50f3ab774668c314de94c1a4f5dd",
+    "polymarket/cron_h011.sh": "0bba439e4a4a932c724b7dfcd326a69013b0969d586a72ba7bf51871bf7c9055",
+    "polymarket/results/_master_log.jsonl": "24e330f64c4ca17d96625376e092d6593855405ad49ce774b433c39d7c1ab3f3",
+    "polymarket/results/_master_log_pre_fase0.jsonl": "d0cdc6dcde5368e69500bb24816d8201412f94c4afb679e5cd3dfdfe64adae24",
+    "polymarket/results/scan_20260630_120356.jsonl": "fbfeef6ceda188c24a5a35f628db954d2d77dfbd97f434e8e05479167b431f89",
+    "polymarket/results/scan_20260630_120814.jsonl": "7a1826a4b4dfea86acba7d0d9fdaab92bb923ab87756e1569244a7c9faf6bc64",
+    "polymarket/results/scan_20260630_135644.jsonl": "89c2ce4dab56aba5a79ee9db88873d6f45e67843cf8c7b58a1c7fb354971d98d",
+    "polymarket/results/scan_20260630_135652.jsonl": "7537a7a8107bce2af78247fb14f7f7a16329f447552f3a90eedede11412ae876",
+    "polymarket/results/scan_20260630_141546.jsonl": "7e9868c0d34ce5f4e961804263f91b027085ada8b48da0b65cf3de5615972222",
+    "polymarket/results/scan_20260630_141722.jsonl": "e2ee8bc135a73fa304f45a7ae4a98c0cc8795ba167aa8d6ffbd295b50da75ca9",
+    "polymarket/results/scan_20260630_141954.jsonl": "f7b094e79b2a5eddbaa74ebd67297c90852460fe01179ae866f0d99a6335a1a0",
+    "polymarket/results/scan_20260701_212131.jsonl": "18bd6b8591f533589291948875d6cbf2af3917bfd5a864930edcebbd47715e4d",
+    "polymarket/results/scan_20260701_212245.jsonl": "3bdf0f294cbed23745ac2a1677ac1d5b3c9f3766fe4dc8a2a1ee3c90f38eb991",
+    "polymarket/results/scan_20260701_212341.jsonl": "44488f9fdbb91765d15840c65fcb9436d6048c18b1409594ac7a28e81f80802f",
+    "polymarket/results/scan_20260701_212348.jsonl": "3c84a403dfedfa606c0e213c055690fe06dde1162037e1e5975d570407964dec",
+    "polymarket/results/scan_20260701_212438.jsonl": "b2533193b51529f254178bf3d8c371786469fdd5707ba5d7b1fcf62bba543179",
+    "polymarket/results/scan_20260701_212449.jsonl": "349f9346c426a88e6db7db5a6cb83c7eb89c742178026810ad4f9118d0f848b1"
+  }
+}
