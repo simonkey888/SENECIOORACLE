@@ -12,7 +12,7 @@ RUN echo "cache bust ${CACHE_BUST}"
 
 RUN mkdir -p /app/polymarket/results/v3/raw /app/polymarket/results/v3/scans /app/polymarket/results/v3/replay
 
-# Copiar TODOS los módulos V3
+# Copiar TODOS los módulos V3 + control_plane + dashboard
 COPY polymarket/h011_v3_pipeline.py \
      polymarket/evidence_state.py \
      polymarket/validation_semantics.py \
@@ -22,12 +22,19 @@ COPY polymarket/h011_v3_pipeline.py \
      polymarket/clob_readonly.py \
      polymarket/polymarket_connector.py \
      polymarket/vwap_detector_v2.py \
+     polymarket/dashboard_v3.py \
+     polymarket/dashboard.py \
      polymarket/__init__.py \
+     polymarket/start.sh \
+     polymarket/cron_h011.sh \
      /app/polymarket/
+
+# Copiar control_plane como paquete
+COPY polymarket/control_plane/ /app/polymarket/control_plane/
 
 WORKDIR /app/polymarket
 
 EXPOSE 8080
 
-# V3 runtime: window=300, pipeline=integrity-v3
-CMD ["sh", "-c", "python3 /app/polymarket/dashboard_v3.py 2>&1 & sleep 3 && while true; do python3 /app/polymarket/vwap_detector_v2.py --pipeline integrity-v3 --mode monitor --window 300 2>&1; sleep 900; done"]
+# V3 runtime: dashboard_v3 + single-scan-per-invocation (Docker controls periodicity)
+CMD ["sh", "-c", "python3 /app/polymarket/dashboard_v3.py 2>&1 & sleep 3 && while true; do python3 /app/polymarket/vwap_detector_v2.py --pipeline integrity-v3 --mode scan --window 300 --max-markets 10 2>&1; sleep 300; done"]

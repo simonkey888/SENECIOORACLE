@@ -610,4 +610,54 @@ def run_scan_v3(
     print(f"[V3] Historical only: {summary['historical_signal_only']}")
     print(f"[V3] Rejected: {summary['rejected']}")
 
+    # ── Generate snapshot ──
+    try:
+        from control_plane.state_snapshot import build_snapshot, save_snapshot
+        funnel = {
+            "discovered": len(markets),
+            "identity_valid": sum(1 for r in records if r.get("record_status") != "REJECTED_METADATA"),
+            "structure_verified": sum(1 for r in records if r.get("validation", {}).get("structure") == "market_structure_verified_v2"),
+            "trade_binding_verified": sum(1 for r in records if r.get("validation", {}).get("trade_binding") == "trade_token_binding_verified_v1"),
+            "historical_signal_available": sum(1 for r in records if r.get("historical_signal", {}).get("status") == "AVAILABLE"),
+            "shadow_executable": summary["shadow_executable"],
+            "rejected": summary["rejected"],
+        }
+        market_records_compact = [
+            {
+                "condition_id": r.get("condition_id", r.get("metadata", {}).get("condition_id", "")),
+                "question": r.get("metadata", {}).get("question", r.get("question", ""))[:80],
+                "record_status": r.get("record_status", "UNKNOWN"),
+                "reason_code": r.get("reason_code", ""),
+                "dev_signed": r.get("historical_signal", {}).get("dev_signed"),
+                "sum_vwap": r.get("historical_signal", {}).get("sum_vwap"),
+                "net_edge": r.get("shadow_execution", {}).get("net_edge"),
+                "equal_fillable_quantity": r.get("shadow_execution", {}).get("equal_fillable_quantity"),
+                "record_hash": r.get("evidence", {}).get("record_hash", ""),
+                "real_order_sent": False,
+                "real_fill": False,
+                "realized_pnl": None,
+            }
+            for r in records
+        ]
+        snapshot = build_snapshot(
+            scan_id=scan_id,
+            run_id=run_id,
+            pipeline_version="h011-integrity-v3",
+            cohort_id=H011_COHORT_ID,
+            window_s=config.window_s,
+            estimator=config.estimator,
+            code_sha="unknown",
+            config_sha="unknown",
+            scan_status="COMPLETE",
+            source_health={},
+            funnel=funnel,
+            market_records=market_records_compact,
+        )
+        save_snapshot(snapshot)
+        print(f"[V3] Snapshot saved: {snapshot.snapshot_hash[:16]}...")
+        summary["snapshot_hash"] = snapshot.snapshot_hash
+    except Exception as e:
+        print(f"[V3] WARNING: Snapshot generation failed: {e}")
+        summary["snapshot_hash"] = None
+
     return {"scan": summary, "records": records}

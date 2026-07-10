@@ -114,6 +114,26 @@ def api_drift():
     return JSONResponse(snap.get("drift", {}))
 
 
+@app.get("/api/v3/operations")
+def api_operations():
+    snap = _load_latest()
+    if not snap:
+        return JSONResponse({"operations": [], "total": 0})
+    records = snap.get("market_records", [])
+    ops = [r for r in records if r.get("record_status") == "SHADOW_EXECUTABLE"]
+    return JSONResponse({"operations": ops, "total": len(ops)})
+
+
+@app.get("/api/v3/rejections")
+def api_rejections():
+    snap = _load_latest()
+    if not snap:
+        return JSONResponse({"rejections": [], "total": 0})
+    records = snap.get("market_records", [])
+    rejs = [r for r in records if "REJECTED" in r.get("record_status", "") or r.get("record_status") == "HISTORICAL_SIGNAL_ONLY"]
+    return JSONResponse({"rejections": rejs, "total": len(rejs)})
+
+
 @app.get("/api/v3/alerts")
 def api_alerts():
     snap = _load_latest()
