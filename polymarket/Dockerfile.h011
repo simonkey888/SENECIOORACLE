@@ -16,11 +16,11 @@ WORKDIR /app
 RUN pip install --no-cache-dir httpx numpy fastapi uvicorn
 
 # CACHE BUST: forzar rebuild de layers posteriores (fix: dashboard.py no se copiaba)
-ARG CACHE_BUST=20260707
+ARG CACHE_BUST=20260710-dashboard-signal-field
 RUN echo "cache bust ${CACHE_BUST}"
 
 # Crear estructura de directorios
-RUN mkdir -p /app/polymarket/results
+RUN mkdir -p /app/polymarket/results /app/polymarket/templates
 
 # Copiar TODOS los archivos necesarios en un solo COPY (más eficiente + evita cache stale)
 COPY polymarket/polymarket_connector.py \
@@ -29,6 +29,7 @@ COPY polymarket/polymarket_connector.py \
      polymarket/start.sh \
      polymarket/__init__.py \
      /app/polymarket/
+COPY polymarket/templates/dashboard.html /app/polymarket/templates/dashboard.html
 
 # Dar permisos de ejecución
 RUN chmod +x /app/polymarket/start.sh

@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#050708">
+  <title>SENECIO H-011b — Observabilidad dry-run</title>
+  <style>
+    :root {
+      --bg: #050708;
+      --surface: #0b1015;
+      --surface-raised: #111820;
+      --border: #1d2933;
+      --text: #eef5f4;
+      --muted: #84929a;
+      --green: #51e5ab;
+      --red: #ff6b6b;
+      --orange: #ffad5c;
+      --blue: #72b7ff;
+      --danger-bg: #30191c;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--bg); }
+    body {
+      min-width: 320px; margin: 0; background: radial-gradient(circle at 50% -20%, #17272d 0, var(--bg) 38rem);
+      color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-feature-settings: "tnum" 1; -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; }
+    .container { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 72px; }
+    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 26px; }
+    h1 { margin: 0; font-size: clamp(1.35rem, 3vw, 2rem); font-weight: 650; letter-spacing: -.04em; }
+    .sub { color: var(--muted); font-weight: 400; }
+    .eyebrow, h2, .card-label { color: var(--muted); font-size: .68rem; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+    .eyebrow { margin: 0 0 8px; }
+    .status { min-width: 180px; color: var(--muted); font-size: .8rem; line-height: 1.5; text-align: right; }
+    .dot { display: inline-block; width: .55rem; height: .55rem; margin-right: .4rem; border-radius: 99px; background: #5e6a71; }
+    .dot.fresh { background: var(--green); box-shadow: 0 0 14px color-mix(in srgb, var(--green), transparent 45%); }
+    .dot.stale, .dot.error { background: var(--red); }
+    .notice { margin: 0 0 24px; padding: 13px 15px; border: 1px solid #485a60; border-radius: 10px; background: #0d1719; color: #b6d0c8; font-size: .84rem; }
+    .notice.warning { border-color: #734442; background: var(--danger-bg); color: #ffc8c0; }
+    .viz-card { overflow: hidden; position: relative; min-height: 285px; margin: 0 0 30px; border: 1px solid var(--border); border-radius: 16px; background: linear-gradient(145deg, #0d161b, #090d10); }
+    #signal-field { display: block; width: 100%; height: 285px; }
+    .viz-copy { position: absolute; top: 18px; left: 20px; max-width: 330px; pointer-events: none; }
+    .viz-copy h2 { margin: 0 0 7px; color: var(--text); font-size: .77rem; }
+    .viz-copy p, .viz-caption { margin: 0; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+    .viz-caption { position: absolute; right: 18px; bottom: 14px; max-width: 460px; text-align: right; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 29px; }
+    .grid.quality { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card { min-height: 109px; padding: 17px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface), transparent 2%); }
+    .card-label { margin-bottom: 9px; }
+    .card-value { overflow-wrap: anywhere; font-size: clamp(1.25rem, 2.3vw, 1.8rem); font-weight: 620; letter-spacing: -.04em; }
+    .card-detail { margin-top: 6px; color: var(--muted); font-size: .74rem; }
+    .green { color: var(--green); } .red { color: var(--red); } .orange { color: var(--orange); } .blue { color: var(--blue); }
+    h2 { margin: 30px 0 12px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    table { width: 100%; min-width: 720px; border-collapse: collapse; }
+    th, td { padding: 12px 13px; border-bottom: 1px solid var(--border); text-align: left; font-size: .8rem; vertical-align: middle; }
+    th { color: var(--muted); font-size: .65rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .mono { font-family: var(--mono); font-size: .76rem; white-space: nowrap; }
+    .market { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tag { display: inline-block; padding: 3px 6px; border: 1px solid #335160; border-radius: 5px; color: var(--blue); font-family: var(--mono); font-size: .62rem; font-weight: 700; letter-spacing: .04em; }
+    .tag.under { border-color: #2d765e; color: var(--green); } .tag.over { border-color: #73543a; color: var(--orange); }
+    .empty { padding: 32px; color: var(--muted); text-align: center; }
+    .footer { display: flex; justify-content: space-between; gap: 16px; margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: .7rem; line-height: 1.5; }
+    .footer a { color: #a9c8d4; }
+    @media (max-width: 820px) {
+      .grid, .grid.quality { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .viz-copy { max-width: 250px; }
+    }
+    @media (max-width: 560px) {
+      .container { width: min(100% - 22px, 1120px); padding-top: 22px; }
+      .header, .footer { display: block; }
+      .status { margin-top: 12px; text-align: left; }
+      .grid, .grid.quality { grid-template-columns: 1fr; }
+      .viz-card, #signal-field { min-height: 310px; height: 310px; }
+      .viz-caption { right: 14px; bottom: 12px; left: 14px; max-width: none; text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">SENECIO H-011b · Fase 0.5</p>
+        <h1>Observabilidad <span class="sub">dry-run</span></h1>
+      </div>
+      <div class="status">
+        <div><span class="dot" id="status-dot"></span><span id="status-text">conectando…</span></div>
+        <div id="last-updated">—</div>
+      </div>
+    </header>
+
+    <p class="notice" id="execution-notice">
+      Solo lectura. Las cifras del ledger son estimaciones por VWAP histórico; no son órdenes, fills ni PnL realizado.
+    </p>
+
+    <section class="viz-card" aria-labelledby="field-title">
+      <canvas id="signal-field" aria-label="Campo tridimensional de señal por scans"></canvas>
+      <div class="viz-copy">
+        <h2 id="field-title">Campo de señal</h2>
+        <p>La altura muestra la desviación absoluta máxima y la línea central su media por scan.</p>
+      </div>
+      <p class="viz-caption" id="field-caption">Cargando historial de scans…</p>
+    </section>
+
+    <section class="grid" aria-label="Ledger de simulación">
+      <article class="card"><div class="card-label">Balance teórico</div><div class="card-value green" id="val-balance">—</div><div class="card-detail">base virtual + estimación</div></article>
+      <article class="card"><div class="card-label">Registros simulados</div><div class="card-value" id="val-records">—</div><div class="card-detail">no son operaciones ejecutadas</div></article>
+      <article class="card"><div class="card-label">PnL teórico</div><div class="card-value" id="val-pnl">—</div><div class="card-detail">sin resolución ni fills</div></article>
+      <article class="card"><div class="card-label">Modelo de ejecución</div><div class="card-value blue" id="val-model">—</div><div class="card-detail">estado del experimento</div></article>
+    </section>
+
+    <h2>Calidad del último scan</h2>
+    <section class="grid quality" aria-label="Calidad de señal">
+      <article class="card"><div class="card-label">Mercados con trades</div><div class="card-value" id="stat-coverage">—</div><div class="card-detail" id="stat-coverage-detail">—</div></article>
+      <article class="card"><div class="card-label">Candidatos UNDER</div><div class="card-value green" id="stat-under">—</div><div class="card-detail">solo candidatos H-011b</div></article>
+      <article class="card"><div class="card-label">Máx. desviación</div><div class="card-value orange" id="stat-maxdev">—</div><div class="card-detail">|YES + NO − 1|</div></article>
+      <article class="card"><div class="card-label">Líneas corruptas</div><div class="card-value" id="stat-corrupt">—</div><div class="card-detail" id="stat-corrupt-detail">JSONL descartado al leer</div></article>
+    </section>
+
+    <h2>Ledger teórico (sin fills CLOB)</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Hora UTC</th><th>Mercado</th><th>YES</th><th>NO</th><th>Suma</th><th>Tamaño</th><th>PnL teórico</th></tr></thead>
+        <tbody id="trades-body"><tr><td colspan="7" class="empty">Cargando…</td></tr></tbody>
+      </table>
+    </div>
+
+    <h2>Señales activas del último scan</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Dirección</th><th>Mercado</th><th>Suma</th><th>Desviación</th><th>Trades Y / N</th></tr></thead>
+        <tbody id="signals-body"><tr><td colspan="5" class="empty">Cargando…</td></tr></tbody>
+      </table>
+    </div>
+
+    <footer class="footer">
+      <div>H-011b · Fase 0.5 · dry-run · sin capital real · <a href="/api/data" target="_blank" rel="noopener noreferrer">API</a> · <a href="/healthz" target="_blank" rel="noopener noreferrer">salud</a></div>
+      <div>Visualización original inspirada en el lenguaje de data portraits de <a href="https://wc26.bogachev.fr/" target="_blank" rel="noopener noreferrer">Alexander Bogachev</a>; sin reutilizar su código ni sus assets.</div>
+    </footer>
+  </main>
+
+  <script type="module">
+    const byId = (id) => document.getElementById(id);
+    const number = (value, fallback = 0) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const fixed = (value, decimals = 4) => value === null || value === undefined || !Number.isFinite(Number(value)) ? "—" : Number(value).toFixed(decimals);
+    const money = (value) => {
+      const amount = number(value);
+      return (amount < 0 ? "-$" : "$") + Math.abs(amount).toFixed(2);
+    };
+    const signedMoney = (value) => {
+      const amount = number(value);
+      return (amount >= 0 ? "+$" : "-$") + Math.abs(amount).toFixed(2);
+    };
+    const pp = (value) => (number(value) * 100).toFixed(2) + "pp";
+    const elapsed = (seconds) => {
+      if (seconds === null || seconds === undefined) return "edad desconocida";
+      if (seconds < 60) return "hace " + seconds + "s";
+      if (seconds < 3600) return "hace " + Math.floor(seconds / 60) + " min";
+      return "hace " + (seconds / 3600).toFixed(1) + " h";
+    };
+    const emptyRow = (body, span, message) => {
+      body.replaceChildren();
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = span;
+      cell.className = "empty";
+      cell.textContent = message;
+      row.append(cell);
+      body.append(row);
+    };
+    const appendCell = (row, text, className = "") => {
+      const cell = document.createElement("td");
+      cell.className = className;
+      cell.textContent = text;
+      row.append(cell);
+      return cell;
+    };
+
+    let fieldState = null;
+    const threeUrl = "https://cdn.jsdelivr.net/npm/three@0.176.0/build/three.module.js";
+
+    async function initSignalField() {
+      const canvas = byId("signal-field");
+      if (!canvas || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        byId("field-caption").textContent = "Animación reducida por la preferencia del dispositivo.";
+        return;
+      }
+      try {
+        const THREE = await import(threeUrl);
+        const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: "low-power" });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 100);
+        camera.position.set(0, 3.6, 8.8);
+        camera.lookAt(0, 0.55, 0);
+        const field = new THREE.Group();
+        scene.add(field);
+        const grid = new THREE.GridHelper(12, 12, 0x28404a, 0x172b32);
+        grid.position.y = -0.08;
+        field.add(grid);
+        const playhead = new THREE.Mesh(
+          new THREE.SphereGeometry(0.08, 14, 14),
+          new THREE.MeshBasicMaterial({ color: 0x51e5ab })
+        );
+        field.add(playhead);
+        const surface = new THREE.Mesh(
+          new THREE.BufferGeometry(),
+          new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.72, side: THREE.DoubleSide })
+        );
+        field.add(surface);
+        const pulses = new THREE.Points(
+          new THREE.BufferGeometry(),
+          new THREE.PointsMaterial({ color: 0x51e5ab, size: 0.14, transparent: true, opacity: 0.92, sizeAttenuation: true })
+        );
+        field.add(pulses);
+        const clock = new THREE.Clock();
+        const resize = () => {
+          const rect = canvas.getBoundingClientRect();
+          renderer.setSize(rect.width, rect.height, false);
+          camera.aspect = rect.width / rect.height;
+          camera.updateProjectionMatrix();
+        };
+        new ResizeObserver(resize).observe(canvas);
+        resize();
+        fieldState = { THREE, renderer, scene, camera, field, surface, pulses, playhead, clock, columns: 0 };
+        const render = () => {
+          if (!fieldState) return;
+          const time = fieldState.clock.getElapsedTime();
+          field.rotation.y = Math.sin(time * 0.16) * 0.065;
+          playhead.position.y = 0.18 + Math.sin(time * 2.3) * 0.045;
+          if (fieldState.columns > 1) {
+            playhead.position.x = -5.2 + ((Math.sin(time * 0.58) + 1) / 2) * 10.4;
+          }
+          pulses.material.size = 0.13 + Math.sin(time * 3.0) * 0.018;
+          renderer.render(scene, camera);
+          requestAnimationFrame(render);
+        };
+        requestAnimationFrame(render);
+      } catch (error) {
+        console.warn("Three.js unavailable", error);
+        byId("field-caption").textContent = "WebGL no está disponible; las métricas y tablas siguen activas.";
+      }
+    }
+
+    function updateSignalField(payload) {
+      const history = (payload.history || []).slice(-20);
+      const current = payload.scan || [];
+      const caption = byId("field-caption");
+      const under = current.filter((row) => number(row.dev_signed) < 0).length;
+      caption.textContent = history.length + " scans: superficie = máximo absoluto; franja central = media; " +
+        under + " pulso(s) verde(s) = candidato(s) UNDER actual(es). No representa precio ni profundidad del libro.";
+      if (!fieldState || !history.length) return;
+
+      const THREE = fieldState.THREE;
+      const rows = 3;
+      const columns = history.length;
+      const positions = [];
+      const colors = [];
+      const indices = [];
+      const palette = [new THREE.Color(0xffad5c), new THREE.Color(0x72b7ff), new THREE.Color(0x51e5ab)];
+      const height = (value) => Math.min(Math.max(number(value) / 0.25, 0), 1.25) * 2.25;
+      history.forEach((scan, column) => {
+        const stats = scan.deviation_stats || {};
+        const scanned = number(scan.markets_scanned);
+        const valid = number(scan.markets_with_trades);
+        const values = [number(stats.max), number(stats.mean), scanned ? valid / scanned : 0];
+        values.forEach((value, row) => {
+          positions.push(-5.2 + (column / Math.max(columns - 1, 1)) * 10.4, height(value), (row - 1) * 0.9);
+          const color = palette[row].clone();
+          color.multiplyScalar(0.55 + Math.min(value / (row === 2 ? 1 : 0.25), 1) * 0.45);
+          colors.push(color.r, color.g, color.b);
+        });
+      });
+      for (let column = 0; column < columns - 1; column += 1) {
+        for (let row = 0; row < rows - 1; row += 1) {
+          const a = column * rows + row;
+          const b = (column + 1) * rows + row;
+          indices.push(a, b, a + 1, b, b + 1, a + 1);
+        }
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+      fieldState.surface.geometry.dispose();
+      fieldState.surface.geometry = geometry;
+      fieldState.columns = columns;
+
+      const pulsePositions = [];
+      current.filter((row) => number(row.dev_signed) < 0).slice(0, 8).forEach((row, index) => {
+        pulsePositions.push(-4.7 + index * 1.25, height(Math.abs(number(row.dev_signed))) + 0.22, 1.5);
+      });
+      const pulseGeometry = new THREE.BufferGeometry();
+      pulseGeometry.setAttribute("position", new THREE.Float32BufferAttribute(pulsePositions, 3));
+      fieldState.pulses.geometry.dispose();
+      fieldState.pulses.geometry = pulseGeometry;
+    }
+
+    function renderLedger(trades) {
+      const body = byId("trades-body");
+      if (!trades || !trades.length) return emptyRow(body, 7, "Sin registros simulados todavía.");
+      body.replaceChildren();
+      trades.slice().reverse().forEach((trade) => {
+        const row = document.createElement("tr");
+        const timestamp = new Date(trade.timestamp);
+        appendCell(row, Number.isNaN(timestamp.getTime()) ? "—" : timestamp.toISOString().slice(11, 19), "mono");
+        appendCell(row, trade.question || trade.condition_id || "—", "market");
+        appendCell(row, fixed(trade.price_yes), "mono");
+        appendCell(row, fixed(trade.price_no), "mono");
+        appendCell(row, fixed(trade.sum), "mono");
+        appendCell(row, money(trade.size), "mono");
+        appendCell(row, signedMoney(trade.pnl), "mono " + (number(trade.pnl) >= 0 ? "green" : "red"));
+        body.append(row);
+      });
+    }
+
+    function renderSignals(signals) {
+      const body = byId("signals-body");
+      if (!signals || !signals.length) return emptyRow(body, 5, "Sin anomalías flaggeadas en el último scan.");
+      body.replaceChildren();
+      signals.forEach((signal) => {
+        const row = document.createElement("tr");
+        const under = number(signal.dev_signed) < 0;
+        const direction = appendCell(row, under ? "UNDER" : "OVER");
+        direction.className = "tag " + (under ? "under" : "over");
+        appendCell(row, signal.question || signal.market || "—", "market");
+        appendCell(row, fixed(signal.sum_vwap), "mono");
+        appendCell(row, (under ? "−" : "+") + pp(Math.abs(number(signal.dev_signed))), "mono " + (under ? "green" : "orange"));
+        appendCell(row, number(signal.num_trades_yes) + " / " + number(signal.num_trades_no), "mono");
+        body.append(row);
+      });
+    }
+
+    function render(payload) {
+      const summary = payload.summary || {};
+      const dryRun = payload.dry_run || {};
+      const freshness = payload.freshness || {};
+      const quality = payload.signal_quality || {};
+      const integrity = payload.data_quality || {};
+      const dot = byId("status-dot");
+      const status = byId("status-text");
+      dot.className = "dot " + (freshness.is_fresh ? "fresh" : (summary.error ? "error" : "stale"));
+      status.textContent = freshness.label || "sin datos";
+      const stamp = freshness.source_timestamp_utc ? freshness.source_timestamp_utc.replace("T", " ").replace("+00:00", " UTC") : "sin timestamp";
+      byId("last-updated").textContent = "último scan: " + stamp + " · " + elapsed(freshness.age_sec);
+
+      byId("val-balance").textContent = money(dryRun.virtual_balance_theoretical);
+      byId("val-records").textContent = String(number(dryRun.total_records));
+      const pnl = number(dryRun.theoretical_pnl);
+      const pnlElement = byId("val-pnl");
+      pnlElement.textContent = signedMoney(pnl);
+      pnlElement.className = "card-value " + (pnl >= 0 ? "green" : "red");
+      byId("val-model").textContent = "VWAP";
+
+      const coverage = quality.coverage_pct;
+      byId("stat-coverage").textContent = coverage === null || coverage === undefined ? "—" : coverage.toFixed(1) + "%";
+      byId("stat-coverage-detail").textContent = number(quality.markets_with_trades) + " de " + number(quality.markets_scanned) + " mercados";
+      byId("stat-under").textContent = String(number(quality.under_candidates));
+      const stats = summary.deviation_stats || {};
+      byId("stat-maxdev").textContent = stats.max === undefined ? "—" : pp(stats.max);
+      const corrupt = number(integrity.corrupt_lines);
+      byId("stat-corrupt").textContent = String(corrupt);
+      byId("stat-corrupt").className = "card-value " + (corrupt ? "red" : "green");
+      byId("stat-corrupt-detail").textContent = corrupt ? "revisar persistencia antes de interpretar" : "sin líneas inválidas detectadas";
+
+      const warnings = [];
+      if (!freshness.is_fresh) warnings.push("El último scan no está dentro de la ventana de frescura configurada.");
+      if (coverage !== null && coverage !== undefined && coverage < 25) warnings.push("Cobertura baja: pocos mercados escaneados tuvieron trades en la ventana.");
+      if (corrupt) warnings.push("Hay JSONL corrupto o incompleto: el dashboard lo excluyó de los cálculos.");
+      const notice = byId("execution-notice");
+      notice.className = "notice" + (warnings.length ? " warning" : "");
+      notice.textContent = "Solo lectura. Sin órdenes, fills, profundidad CLOB, latencia de ejecución ni PnL por resolución. " +
+        (warnings.length ? warnings.join(" ") : "El archivo de datos no reporta daños de lectura.");
+
+      renderLedger(dryRun.trades || []);
+      renderSignals(payload.scan || []);
+      updateSignalField(payload);
+    }
+
+    async function fetchData() {
+      try {
+        const response = await fetch("/api/data", { cache: "no-store" });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        render(await response.json());
+      } catch (error) {
+        console.error("Dashboard fetch error", error);
+        byId("status-dot").className = "dot error";
+        byId("status-text").textContent = "error de conexión";
+        byId("last-updated").textContent = "no se pudo actualizar /api/data";
+      }
+    }
+
+    initSignalField();
+    fetchData();
+    window.setInterval(fetchData, 10000);
+  </script>
+</body>
+</html>
