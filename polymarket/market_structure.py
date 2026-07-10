@@ -178,3 +178,28 @@ def is_market_stub(market: dict) -> bool:
     has_outcomes = market.get("outcomes") is not None
     has_prices = market.get("outcomePrices") is not None
     return not (has_tokens and has_outcomes and has_prices)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cross-source Market Truth Contract
+# ═══════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class MarketTruthContract:
+    """
+    Cross-source validation contract for a market.
+
+    Gamma determines: conditionId, outcomes, clobTokenIds, metadata.
+    CLOB determines: token books exist, ticksize, fees, depth.
+    Data API determines: trades belong to the conditionId, asset matches a leg.
+
+    No source alone constitutes full validation.
+    """
+    condition_id: str
+    structure: MarketStructure
+    gamma_payload_hash: str
+    token_book_verified: tuple[bool, bool]
+    trade_assets_verified: bool
+    contract_status: str  # EvidenceStatus value
+    reasons: tuple[str, ...]
+    contract_hash: str
