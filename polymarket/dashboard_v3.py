@@ -19,6 +19,7 @@ app = FastAPI(title="SENECIO H-011 V3 Control Plane", docs_url=None, redoc_url=N
 
 RESULTS_DIR = Path(os.environ.get("H011_RESULTS_DIR", "/app/polymarket/results"))
 V3_STATE_DIR = RESULTS_DIR / "v3" / "state"
+V3_RAW_DIR = RESULTS_DIR / "v3" / "raw"
 
 
 def _load_latest() -> dict | None:
@@ -58,6 +59,8 @@ def api_integrity():
             "invariants": {"pass": 0, "fail": 0, "unknown": 31},
         })
     invariants = snap.get("invariants", {})
+    raw_store_available = V3_RAW_DIR.exists() and any(V3_RAW_DIR.iterdir())
+    replay_verified = bool(snap.get("replay", {}).get("verified") is True)
     return JSONResponse({
         "pipeline_version": snap.get("pipeline_version", "h011-integrity-v3"),
         "cohort_id": snap.get("cohort_id", "h011-v3-w300-vwap-structure-v2"),
@@ -68,8 +71,8 @@ def api_integrity():
         "code_sha": snap.get("code_sha", "unknown"),
         "config_sha": snap.get("config_sha", "unknown"),
         "snapshot_hash": snap.get("snapshot_hash"),
-        "raw_store_available": True,
-        "replay_verified": True,
+        "raw_store_available": raw_store_available,
+        "replay_verified": replay_verified,
         "invariants": invariants.get("summary", {"pass": 0, "fail": 0, "unknown": 31}),
     })
 
@@ -167,16 +170,25 @@ def healthz():
     invariants = snap.get("invariants", {}).get("results", [])
     failed = [i for i in invariants if i.get("status") == "FAIL" and i.get("severity") == "BLOCKING"]
 
-    ok = len(blocking) == 0 and len(failed) == 0
-    status = "HEALTHY" if ok else ("BLOCKED" if blocking else "DEGRADED")
+    summary = snap.get("invariants", {}).get("summary", {})
+    unknown = int(summary.get("unknown", 0) or 0)
+    operational_ok = len(blocking) == 0 and len(failed) == 0
+    validation_complete = unknown == 0 and bool(snap.get("source_health"))
+    status = (
+        "BLOCKED" if blocking or failed
+        else "HEALTHY" if validation_complete
+        else "DEGRADED"
+    )
 
     return JSONResponse({
-        "ok": ok,
+        "ok": operational_ok,
         "status": status,
+        "validation_complete": validation_complete,
+        "unknown_invariants": unknown,
         "snapshot_age_sec": None,
         "blocking_alerts": [a.get("code") for a in blocking],
         "failed_invariants": [i.get("invariant_id") for i in failed],
-        "source_summary": {},
+        "source_summary": snap.get("source_health", {}),
     })
 
 

@@ -159,6 +159,59 @@ V3_RAW_DIR = V3_RESULTS_DIR / "raw"
 V3_SCANS_DIR = V3_RESULTS_DIR / "scans"
 V3_REPLAY_DIR = V3_RESULTS_DIR / "replay"
 V3_MASTER_LOG = V3_RESULTS_DIR / "_master_log_v3.jsonl"
+UNEVALUATED_INVARIANT_COUNT = 31
+
+
+def _unevaluated_control_plane_state() -> tuple[dict[str, dict[str, object]], dict[str, object], list[dict[str, object]]]:
+    """Expose missing control-plane checks as UNKNOWN rather than as success."""
+    source_health = {
+        "gamma_metadata": {
+            "level": "UNKNOWN",
+            "reason": "source health timing is not yet measured by the V3 scan",
+            "age_ms": None,
+            "latency_ms": None,
+            "consecutive_failures": None,
+            "fallback_used": False,
+        },
+        "data_api_trades": {
+            "level": "UNKNOWN",
+            "reason": "source health timing is not yet measured by the V3 scan",
+            "age_ms": None,
+            "latency_ms": None,
+            "consecutive_failures": None,
+            "fallback_used": False,
+        },
+        "clob_orderbook": {
+            "level": "UNKNOWN",
+            "reason": "source health timing is not yet measured by the V3 scan",
+            "age_ms": None,
+            "latency_ms": None,
+            "consecutive_failures": None,
+            "fallback_used": False,
+        },
+    }
+    invariants = {
+        "summary": {"pass": 0, "fail": 0, "unknown": UNEVALUATED_INVARIANT_COUNT},
+        "results": [{
+            "invariant_id": "CONTROL_PLANE_EXECUTION_COVERAGE",
+            "status": "UNKNOWN",
+            "severity": "WARNING",
+            "reason": (
+                f"{UNEVALUATED_INVARIANT_COUNT} declared controls are not executed in run_scan_v3 yet"
+            ),
+        }],
+    }
+    alerts = [{
+        "severity": "WARNING",
+        "blocking": False,
+        "code": "VALIDATION_INCOMPLETE",
+        "title": "Control-plane validation incomplete",
+        "detail": (
+            f"{UNEVALUATED_INVARIANT_COUNT} invariants and source-health checks are UNKNOWN; "
+            "this scan is not a replay-verified acceptance decision."
+        ),
+    }]
+    return source_health, invariants, alerts
 
 
 def _ensure_v3_dirs():
@@ -183,6 +236,9 @@ def _empty_v3_record(
         "run_id": run_id,
         "scan_id": scan_id,
         "condition_id": condition_id,
+        "metadata": {
+            "question": structure.question,
+        },
         "market_structure": {
             "metadata_hash": structure.metadata_hash,
             "legs": [
@@ -622,12 +678,23 @@ def run_scan_v3(
             "shadow_executable": summary["shadow_executable"],
             "rejected": summary["rejected"],
         }
+        def compact_reason(record: dict[str, Any]) -> str:
+            """Keep the terminal rejection reason visible without changing the record."""
+            direct = record.get("reason_code")
+            if direct:
+                return str(direct)
+            historical = record.get("historical_signal", {}).get("reason_code")
+            if historical:
+                return str(historical)
+            reasons = record.get("shadow_execution", {}).get("rejection_reasons") or []
+            return ", ".join(str(reason) for reason in reasons) or "not_recorded"
+
         market_records_compact = [
             {
                 "condition_id": r.get("condition_id", r.get("metadata", {}).get("condition_id", "")),
                 "question": r.get("metadata", {}).get("question", r.get("question", ""))[:80],
                 "record_status": r.get("record_status", "UNKNOWN"),
-                "reason_code": r.get("reason_code", ""),
+                "reason_code": compact_reason(r),
                 "dev_signed": r.get("historical_signal", {}).get("dev_signed"),
                 "sum_vwap": r.get("historical_signal", {}).get("sum_vwap"),
                 "net_edge": r.get("shadow_execution", {}).get("net_edge"),
@@ -639,6 +706,7 @@ def run_scan_v3(
             }
             for r in records
         ]
+        source_health, invariants, alerts = _unevaluated_control_plane_state()
         snapshot = build_snapshot(
             scan_id=scan_id,
             run_id=run_id,
@@ -648,10 +716,12 @@ def run_scan_v3(
             estimator=config.estimator,
             code_sha="unknown",
             config_sha="unknown",
-            scan_status="COMPLETE",
-            source_health={},
+            scan_status="COMPLETE_WITH_UNKNOWN_VALIDATION",
+            source_health=source_health,
             funnel=funnel,
             market_records=market_records_compact,
+            invariants=invariants,
+            alerts=alerts,
         )
         save_snapshot(snapshot)
         print(f"[V3] Snapshot saved: {snapshot.snapshot_hash[:16]}...")
