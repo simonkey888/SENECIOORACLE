@@ -393,7 +393,7 @@ def process_market_v3(
         record["historical_signal"]["status"] = "UNAVAILABLE"
         record["shadow_execution"]["status"] = "REJECTED"
         record["shadow_execution"]["rejection_reasons"] = ["no_trades_in_window"]
-        record["record_status"] = "REJECTED_TRADE_BINDING"
+        record["record_status"] = "REJECTED_NO_TRADES"
         return _finalize_record(record)
 
     # ── Step 4: Validate trade-to-token binding ──
@@ -426,7 +426,7 @@ def process_market_v3(
         if staleness_delta > config.staleness_threshold_sec:
             record["shadow_execution"]["status"] = "REJECTED"
             record["shadow_execution"]["rejection_reasons"] = [f"staleness_{staleness_delta:.0f}s_exceeds_{config.staleness_threshold_sec}s"]
-            record["record_status"] = "REJECTED_TRADE_BINDING"
+            record["record_status"] = "REJECTED_STALENESS"
             return _finalize_record(record)
 
     # ── Step 6: Compute VWAP by index ──
@@ -435,7 +435,7 @@ def process_market_v3(
     leg_1 = vwap_results.get(1, {})
 
     if leg_0.get("vwap") is None or leg_1.get("vwap") is None:
-        record["record_status"] = "REJECTED_TRADE_BINDING"
+        record["record_status"] = "REJECTED_INSUFFICIENT_LEG_TRADES"
         record["shadow_execution"]["rejection_reasons"] = ["insufficient_trades_one_leg"]
         return _finalize_record(record)
 
