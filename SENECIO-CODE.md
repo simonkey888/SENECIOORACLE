@@ -1,159 +1,14 @@
-# SENECIO — Código completo del checkout
+# SENECIO — código consolidado
 
-**Repositorio**: github.com/simonkey888/SENECIOORACLE
-**Commit**: a0102b2adeb39d99a547a1dc3daf6007e25e2be7
-**Generado**: 2026-07-10T09:20:30.0920410Z
-**Archivos incluidos**: 139
-
-> Se excluyen únicamente salidas mutables de runtime (`senecio_output/` y auditorías generadas).
-
-## Índice
-
-- `.github/workflows/oracle.yml`
-- `.github/workflows/smoke-tests.yml`
-- `.gitignore`
-- `Dockerfile`
-- `GO_NOGO_CRITERIA.md`
-- `SENECIO_SPEC.py`
-- `absolute_kill_switch.py`
-- `config.py`
-- `cross_exchange_detector.py`
-- `deploy_act_xvii.sh`
-- `desync_detector.py`
-- `entropy_guard.py`
-- `event_store.py`
-- `exchange_connector.py`
-- `index.html`
-- `institutional_core.py`
-- `lean_executor.py`
-- `live_bridge_layer.py`
-- `market_ev.py`
-- `market_physics_engine.py`
-- `market_state_vector.py`
-- `oracle_lab.py`
-- `polymarket/.rebuild_trigger`
-- `polymarket/Dockerfile.h011`
-- `polymarket/__init__.py`
-- `polymarket/cron_h011.sh`
-- `polymarket/dashboard.py`
-- `polymarket/liquidity_scanner.py`
-- `polymarket/polymarket_connector.py`
-- `polymarket/portfolio_state.json`
-- `polymarket/portfolio_trader.py`
-- `polymarket/schema.sql`
-- `polymarket/source_scraper_fifa.py`
-- `polymarket/start.sh`
-- `polymarket/templates/dashboard.html`
-- `polymarket/vwap_detector.py`
-- `polymarket/vwap_detector_v2.py`
-- `predict_only.py`
-- `requirements.txt`
-- `research/H-009_preregistration.md`
-- `research/H-010_preregistration.md`
-- `research/H-011_preregistration_updated.md`
-- `research/H-011b_preregistration.md`
-- `research/H010_sports_postmortem.md`
-- `research/pre_registro_H010.md`
-- `risk_shadow_mirror.py`
-- `senecio_polymarket/.dockerignore`
-- `senecio_polymarket/Dockerfile`
-- `senecio_polymarket/README.md`
-- `senecio_polymarket/backend/__init__.py`
-- `senecio_polymarket/backend/antifragility/__init__.py`
-- `senecio_polymarket/backend/antifragility/architecture_validator.py`
-- `senecio_polymarket/backend/antifragility/coordinator.py`
-- `senecio_polymarket/backend/antifragility/diagnostics.py`
-- `senecio_polymarket/backend/antifragility/event_sourcing.py`
-- `senecio_polymarket/backend/antifragility/invariant_checker.py`
-- `senecio_polymarket/backend/antifragility/lineage.py`
-- `senecio_polymarket/backend/antifragility/market_simulation.py`
-- `senecio_polymarket/backend/antifragility/reproducibility.py`
-- `senecio_polymarket/backend/antifragility/resilience.py`
-- `senecio_polymarket/backend/audit_enrichment.py`
-- `senecio_polymarket/backend/audit_store.py`
-- `senecio_polymarket/backend/data_retriever.py`
-- `senecio_polymarket/backend/event_bus.py`
-- `senecio_polymarket/backend/evidence_tracker.py`
-- `senecio_polymarket/backend/execution_simulator.py`
-- `senecio_polymarket/backend/forensics/__init__.py`
-- `senecio_polymarket/backend/forensics/pipeline.py`
-- `senecio_polymarket/backend/liquidity.py`
-- `senecio_polymarket/backend/main.py`
-- `senecio_polymarket/backend/models.py`
-- `senecio_polymarket/backend/oracle_engine.py`
-- `senecio_polymarket/backend/oracle_runner.py`
-- `senecio_polymarket/backend/portfolio/__init__.py`
-- `senecio_polymarket/backend/portfolio/coordinator.py`
-- `senecio_polymarket/backend/portfolio/execution_engine.py`
-- `senecio_polymarket/backend/portfolio/execution_fidelity.py`
-- `senecio_polymarket/backend/portfolio/live_gate.py`
-- `senecio_polymarket/backend/portfolio/meta_labeler.py`
-- `senecio_polymarket/backend/portfolio/microstructure.py`
-- `senecio_polymarket/backend/portfolio/portfolio_analytics.py`
-- `senecio_polymarket/backend/portfolio/portfolio_engine.py`
-- `senecio_polymarket/backend/portfolio/regime_hmm.py`
-- `senecio_polymarket/backend/portfolio/risk_kernel.py`
-- `senecio_polymarket/backend/portfolio/shadow_live.py`
-- `senecio_polymarket/backend/portfolio/trade_journal.py`
-- `senecio_polymarket/backend/research/__init__.py`
-- `senecio_polymarket/backend/research/calibration.py`
-- `senecio_polymarket/backend/research/capacity_model.py`
-- `senecio_polymarket/backend/research/coordinator.py`
-- `senecio_polymarket/backend/research/decision_engine.py`
-- `senecio_polymarket/backend/research/drift_detector.py`
-- `senecio_polymarket/backend/research/executive_report.py`
-- `senecio_polymarket/backend/research/explainability.py`
-- `senecio_polymarket/backend/research/final_audit_orchestrator.py`
-- `senecio_polymarket/backend/research/institutional_report.py`
-- `senecio_polymarket/backend/research/monte_carlo_validation.py`
-- `senecio_polymarket/backend/research/observability.py`
-- `senecio_polymarket/backend/research/purged_cv.py`
-- `senecio_polymarket/backend/research/research_metrics.py`
-- `senecio_polymarket/backend/research/statistical_study.py`
-- `senecio_polymarket/backend/research/statistical_validation.py`
-- `senecio_polymarket/backend/research/stress_testing.py`
-- `senecio_polymarket/backend/research/walk_forward_optimizer.py`
-- `senecio_polymarket/backend/scanner_a.py`
-- `senecio_polymarket/backend/scanner_b.py`
-- `senecio_polymarket/backend/scheduler.py`
-- `senecio_polymarket/backend/supabase_client.py`
-- `senecio_polymarket/backend/wallet_tracker.py`
-- `senecio_polymarket/backend/watchdogs/__init__.py`
-- `senecio_polymarket/backend/watchdogs/coordinator.py`
-- `senecio_polymarket/backend/ws_server.py`
-- `senecio_polymarket/freeze/FINAL_STATE_MANIFEST.json`
-- `senecio_polymarket/freeze/environment.json`
-- `senecio_polymarket/freeze/manifest_sha256.txt`
-- `senecio_polymarket/freeze/pip_freeze.txt`
-- `senecio_polymarket/freeze/versions.json`
-- `senecio_polymarket/frontend/app.js`
-- `senecio_polymarket/frontend/index.html`
-- `senecio_polymarket/frontend/styles.css`
-- `senecio_polymarket/oracle/exchange_connector.py`
-- `senecio_polymarket/oracle/institutional_core.py`
-- `senecio_polymarket/oracle/market_ev.py`
-- `senecio_polymarket/oracle/oracle_lab.py`
-- `senecio_polymarket/oracle/oracle_verifier.py`
-- `senecio_polymarket/oracle/predict_only.py`
-- `senecio_polymarket/oracle/survivability.py`
-- `senecio_polymarket/requirements.txt`
-- `senecio_polymarket/scripts/act_final_audit_smoke.py`
-- `senecio_polymarket/scripts/act_xxix_smoke.py`
-- `senecio_polymarket/scripts/act_xxv_smoke.py`
-- `senecio_polymarket/scripts/act_xxvi_smoke.py`
-- `senecio_polymarket/scripts/act_xxvii_smoke.py`
-- `senecio_polymarket/scripts/act_xxviii_smoke.py`
-- `senecio_polymarket/scripts/backfill_supabase.py`
-- `senecio_polymarket/scripts/create_oracle_state.sql`
-- `senecio_polymarket/start.sh`
-- `shadow_execution_engine.py`
-- `survivability.py`
+Fuente: simonkey888/SENECIOORACLE · commit 4a4e7fdb400dae6a35de59f2c6de2b964f9121fa · generado: 2026-07-10 09:39:00 UTC.
+Incluye archivos de código y configuración versionados. Excluye este archivo para evitar recursión y datos operativos mutables (senecio_output/, auditorías runtime).
+Archivos incluidos: 138.
 
 ---
 
 ## .github/workflows/oracle.yml
 
-```yaml
+```text
 # SENECIO Oracle Cycle — Predict + Deploy Pages in one workflow
 # NOTE (ACT XIX): scheduled cron DISABLED — oracle now runs in Northflank
 # every 15 min via backend/oracle_runner.py. This workflow is kept for
@@ -290,7 +145,7 @@ jobs:
 
 ## .github/workflows/smoke-tests.yml
 
-```yaml
+```text
 # SENECIO Smoke Tests — read-only CI guardian for the FINAL_AUDIT freeze
 #
 # PURPOSE
@@ -457,7 +312,7 @@ senecio_polymarket/data/proposed_patches/
 
 ## Dockerfile
 
-```dockerfile
+```text
 # SENECIO ORACLE — Root Dockerfile for Fly.io
 # This file lives at repo root so Fly auto-detects it (no [build] section needed in fly.toml).
 # Build context = repo root, so COPY paths reference senecio_polymarket/ subfolder.
@@ -501,7 +356,7 @@ CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--wo
 
 ## GO_NOGO_CRITERIA.md
 
-```markdown
+```text
 # SENECIO Oracle — GO / NO-GO Criteria (Pre-Registered)
 
 > **INMUTABLE desde el commit.** Cualquier modificación a este archivo después del commit inicial invalida el pre-registro y requiere re-registrar con nueva fecha y justificación auditable.
@@ -554,7 +409,7 @@ CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--wo
 
 ## SENECIO_SPEC.py
 
-```python
+```text
 """
 SENECIO — REALITY-ANCHORED SPECIFICATION
 ========================================
@@ -590,7 +445,7 @@ TARGET: 500+ verified predictions before execution consideration
 
 ## absolute_kill_switch.py
 
-```python
+```text
 """
 Module: absolute_kill_switch.py — SINGLE ABSOLUTE KILL SWITCH
 
@@ -1082,7 +937,7 @@ if __name__ == "__main__":
 
 ## config.py
 
-```python
+```text
 """
 GLM Decision Engine v2 — Configuration
 
@@ -1220,7 +1075,7 @@ class PipelineConfig:
 
 ## cross_exchange_detector.py
 
-```python
+```text
 """
 cross_exchange_detector.py — CrossExchangeDetector
 ===================================================
@@ -1867,7 +1722,7 @@ if __name__ == "__main__":
 
 ## deploy_act_xvii.sh
 
-```bash
+```text
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════
 # SENECIO Oracle — ACT XVII Deployment Script
@@ -2012,7 +1867,7 @@ echo ""
 
 ## desync_detector.py
 
-```python
+```text
 """
 desync_detector.py — DesyncDetector
 =====================================
@@ -2585,7 +2440,7 @@ if __name__ == "__main__":
 
 ## entropy_guard.py
 
-```python
+```text
 """
 Module: entropy_guard.py — ENTROPY GUARD (RISK GOVERNOR COMPONENT)
 
@@ -3004,7 +2859,7 @@ if __name__ == "__main__":
 
 ## event_store.py
 
-```python
+```text
 """
 Module: event_store.py — EVENT-SOURCED TIME SERIES STORE
 
@@ -3593,7 +3448,7 @@ if __name__ == "__main__":
 
 ## exchange_connector.py
 
-```python
+```text
 """
 LIVE_BRIDGE_LAYER_v1: exchange_connector.py — Dual-Exchange Public Data Connector
 
@@ -6064,13 +5919,14 @@ if __name__ == "__main__":
         # Run mock tests only (default)
         mock_ok = _run_mock_tests()
         sys.exit(0 if mock_ok else 1)
+
 ```
 
 ---
 
 ## index.html
 
-```html
+```text
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7337,7 +7193,7 @@ window.addEventListener('resize', () => { if (selectedPrediction) renderCausalit
 
 ## institutional_core.py
 
-```python
+```text
 """
 Module: institutional_core.py — SINGLE DECISION CORE
 
@@ -8643,7 +8499,7 @@ if __name__ == "__main__":
 
 ## lean_executor.py
 
-```python
+```text
 """
 Module: lean_executor.py — LEAN-STYLE EXECUTION ENGINE
 
@@ -9266,7 +9122,7 @@ if __name__ == "__main__":
 
 ## live_bridge_layer.py
 
-```python
+```text
 """
 LIVE_BRIDGE_LAYER_v1: live_bridge_layer.py — The Shadow Observation Bridge
 
@@ -11070,7 +10926,7 @@ if __name__ == "__main__":
 
 ## market_ev.py
 
-```python
+```text
 """
 Module: market_ev.py — MARKET-ANCHORED EXPECTED VALUE
 
@@ -11532,7 +11388,7 @@ if __name__ == "__main__":
 
 ## market_physics_engine.py
 
-```python
+```text
 """
 Module: market_physics_engine.py — THE INTEGRATION ENGINE
 
@@ -12930,7 +12786,7 @@ if __name__ == "__main__":
 
 ## market_state_vector.py
 
-```python
+```text
 """
 Module: market_state_vector.py — MARKET PHYSICS SIMULATOR STATE VECTOR
 
@@ -14391,7 +14247,7 @@ if __name__ == "__main__":
 
 ## oracle_lab.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 SENECIO — ORACLE_LAB
@@ -15490,17 +15346,6 @@ if __name__ == "__main__":
 
 ---
 
-## polymarket/.rebuild_trigger
-
-```text
-# trigger rebuild 1783665159
-# h011b rebuild 1783667959
-# kelly rebuild 1783668291
-# slippage rebuild 1783670390
-```
-
----
-
 ## polymarket/Dockerfile.h011
 
 ```text
@@ -15553,7 +15398,7 @@ CMD ["sh", "-c", "python3 /app/polymarket/dashboard.py 2>&1 & sleep 3 && while t
 
 ## polymarket/__init__.py
 
-```python
+```text
 """SENECIO Polymarket — H-010 Edge Detection + H-011 Arbitrage package.
 
 Modules:
@@ -15568,7 +15413,7 @@ Modules:
 
 ## polymarket/cron_h011.sh
 
-```bash
+```text
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════
 # SENECKIO H-011 FASE_0 — Cron wrapper con retry/backoff
@@ -15732,7 +15577,7 @@ exit 0
 
 ## polymarket/dashboard.py
 
-```python
+```text
 """SENECIO H-011b dashboard: observabilidad honesta para el dry-run.
 
 El proceso sigue siendo de solo lectura.  El ledger contiene estimaciones
@@ -15963,7 +15808,7 @@ if __name__ == "__main__":
 
 ## polymarket/liquidity_scanner.py
 
-```python
+```text
 """
 SENECIO Liquidity Scanner — H-011 Arbitrage Detection
 ======================================================
@@ -16577,7 +16422,7 @@ if __name__ == "__main__":
 
 ## polymarket/polymarket_connector.py
 
-```python
+```text
 """
 SENECIO Polymarket Connector — H-010 Edge Detection + H-011 Arbitrage
 ======================================================================
@@ -16865,7 +16710,7 @@ if __name__ == "__main__":
 
 ## polymarket/portfolio_state.json
 
-```json
+```text
 {
   "bankroll": 10037.35,
   "initial_bankroll": 10000,
@@ -16984,7 +16829,7 @@ if __name__ == "__main__":
 
 ## polymarket/portfolio_trader.py
 
-```python
+```text
 """
 SENECIO Portfolio Trader — H-010_PORTFOLIO
 ============================================
@@ -17767,7 +17612,7 @@ if __name__ == "__main__":
 
 ## polymarket/schema.sql
 
-```sql
+```text
 -- H-010 Polymarket Edge Detection — Supabase table schema
 -- Execute manually via Supabase dashboard SQL editor
 
@@ -17809,7 +17654,7 @@ CREATE POLICY "Allow anon update" ON polymarket_markets
 
 ## polymarket/source_scraper_fifa.py
 
-```python
+```text
 """
 SENECIO source_scraper_fifa.py — FIFA WC 2026 Edge Detection
 =============================================================
@@ -18674,7 +18519,7 @@ if __name__ == "__main__":
 
 ## polymarket/start.sh
 
-```bash
+```text
 #!/bin/bash
 # ══════════════════════════════════════════════════════════════════════
 # SENECKIO H-011 — Orquestador de 2 procesos
@@ -18742,7 +18587,7 @@ done
 
 ## polymarket/templates/dashboard.html
 
-```html
+```text
 <!doctype html>
 <html lang="es">
 <head>
@@ -19153,7 +18998,7 @@ done
 
 ## polymarket/vwap_detector.py
 
-```python
+```text
 """
 SENECIO H-011 — VWAP Cross-Leg Arbitrage Detector (FASE_0, READ-ONLY)
 =====================================================================
@@ -19780,7 +19625,7 @@ if __name__ == "__main__":
 
 ## polymarket/vwap_detector_v2.py
 
-```python
+```text
 """
 SENECIO H-011 — VWAP Cross-Leg Arbitrage Detector V2
 =====================================================
@@ -20810,7 +20655,7 @@ if __name__ == "__main__":
 
 ## predict_only.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 SENECIO — PREDICT_ONLY_MODE (Oracle Auditable)
@@ -21696,7 +21541,7 @@ ccxt==4.5.58
 
 ## research/H-009_preregistration.md
 
-```markdown
+```text
 # H-009 Pre-Registration — Regime Filter Retrospective Analysis
 
 > **INMUTABLE desde el commit.** Cualquier modificación posterior a este archivo invalida el pre-registro y requiere re-registrar con nueva fecha y justificación auditable.
@@ -21844,7 +21689,7 @@ Si H-009 resulta en NO-GO, no se crea ningún archivo nuevo.
 
 ## research/H-010_preregistration.md
 
-```markdown
+```text
 # H-010 Pre-Registration — Polymarket Edge Detection (Public Research vs Market Price)
 
 > **INMUTABLE desde el commit.** Cualquier modificación posterior a este archivo invalida el pre-registro y requiere re-registrar con nueva fecha y justificación auditable.
@@ -22182,7 +22027,7 @@ es marginal. FOK orders ayudan pero no eliminan el timing risk.
 
 ## research/H-011_preregistration_updated.md
 
-```markdown
+```text
 # H-011 — Pre-Registro Actualizado (post-FASE 0.6 + V2)
 
 **Fecha de actualización**: 2026-06-30
@@ -22324,7 +22169,7 @@ Estos cambios requieren nueva hipótesis con pre-registro fresco:
 
 ## research/H-011b_preregistration.md
 
-```markdown
+```text
 # H-011b — Pre-Registro (Hipótesis derivada de H-011)
 
 **Fecha creación**: 2026-07-07 (UTC)
@@ -22479,7 +22324,7 @@ considerado activo. Mientras tanto, H-011 sigue corriendo sin cambios.
 
 ## research/H010_sports_postmortem.md
 
-```markdown
+```text
 # H-010 Sports Markets Post-Mortem
 
 **Fecha**: 2026-06-28
@@ -22605,7 +22450,7 @@ Para deportes de alto perfil (FIFA World Cup, F1), el mercado de Polymarket se a
 
 ## research/pre_registro_H010.md
 
-```markdown
+```text
 # H-010 Pre-Registro — Pivot a Mercados Políticos Binarios
 
 **Fecha de pre-registro**: 2026-06-28
@@ -22754,7 +22599,7 @@ Cada mercado tiene una fuente independiente designada. **No se usará ninguna ot
 
 ## risk_shadow_mirror.py
 
-```python
+```text
 """
 risk_shadow_mirror.py — RiskShadowMirror
 ==========================================
@@ -23637,7 +23482,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/.dockerignore
 
-```dockerfile
+```text
 # SENECIO ORACLE — .dockerignore
 # Exclude anything that shouldn't enter the image
 
@@ -23693,7 +23538,7 @@ README.md
 
 ## senecio_polymarket/Dockerfile
 
-```dockerfile
+```text
 # SENECIO ORACLE — Dockerfile (ACT XIX — Unified Oracle + Dashboard)
 # Builds a single image containing:
 #   1. FastAPI dashboard (backend/ + frontend/)
@@ -23753,7 +23598,7 @@ CMD ["./start.sh"]
 
 ## senecio_polymarket/README.md
 
-```markdown
+```text
 # SENECIO ORACLE — Polymarket-Style Trading Intelligence Stack (ACT XX)
 
 A modular, event-sourced, paper-only autonomous trading system inspired by
@@ -23933,7 +23778,7 @@ To take this from paper to production:
 
 ## senecio_polymarket/backend/__init__.py
 
-```python
+```text
 """SENECIO ORACLE backend package."""
 ```
 
@@ -23941,7 +23786,7 @@ To take this from paper to production:
 
 ## senecio_polymarket/backend/antifragility/__init__.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT-XXIX: Systemic Anti-Fragility Layer
 =========================================================
@@ -24073,7 +23918,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/architecture_validator.py
 
-```python
+```text
 """
 ACT-XXIX — Module 8: Architecture Consistency Validator
 =======================================================
@@ -24681,7 +24526,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/coordinator.py
 
-```python
+```text
 """
 ACT-XXIX — Coordinator: AntiFragilityCoordinator
 =================================================
@@ -25086,7 +24931,7 @@ __all__ = ["AntiFragilityCoordinator"]
 
 ## senecio_polymarket/backend/antifragility/diagnostics.py
 
-```python
+```text
 """
 ACT-XXIX — Module 4: Self-Diagnostics, Health Scoring & Anomaly Detection
 ==========================================================================
@@ -25729,7 +25574,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/event_sourcing.py
 
-```python
+```text
 """
 ACT-XXIX — Module 1: Event Sourcing & Deterministic Replay
 ==========================================================
@@ -26342,7 +26187,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/invariant_checker.py
 
-```python
+```text
 """
 ACT-XXIX — Module 2: Invariant Checking & State-Machine Validation
 ==================================================================
@@ -27026,7 +26871,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/lineage.py
 
-```python
+```text
 """
 ACT-XXIX — Module 3: Data Lineage, Provenance & Schema Versioning
 ==================================================================
@@ -27580,7 +27425,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/market_simulation.py
 
-```python
+```text
 """
 ACT-XXIX — Module 7: Market Simulation, Chaos Engineering & Fault Injection
 ============================================================================
@@ -28483,7 +28328,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/reproducibility.py
 
-```python
+```text
 """
 ACT-XXIX — Module 6: Reproducibility — Seeds, Experiments, Benchmarks
 =====================================================================
@@ -29077,7 +28922,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/antifragility/resilience.py
 
-```python
+```text
 """
 ACT-XXIX — Module 5: Resilience — Checkpoints, Recovery, Circuit Breakers
 =========================================================================
@@ -29824,7 +29669,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/audit_enrichment.py
 
-```python
+```text
 """
 SENECIO ORACLE — Audit Enrichment (ACT FINAL_AUDIT — A2)
 =========================================================
@@ -30248,7 +30093,7 @@ def verify_enrichment(prediction: dict) -> dict:
 
 ## senecio_polymarket/backend/audit_store.py
 
-```python
+```text
 """
 SENECIO ORACLE — Audit Store
 ============================
@@ -30348,7 +30193,7 @@ class AuditStore:
 
 ## senecio_polymarket/backend/data_retriever.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 1: Incremental Data Retriever
 =====================================================
@@ -30513,7 +30358,7 @@ class DataRetriever:
 
 ## senecio_polymarket/backend/event_bus.py
 
-```python
+```text
 """
 SENECIO ORACLE — Event Bus
 ==========================
@@ -30605,7 +30450,7 @@ class EventBus:
 
 ## senecio_polymarket/backend/evidence_tracker.py
 
-```python
+```text
 """
 SENECIO ORACLE — Evidence Tracker (ACT FINAL_AUDIT — A6)
 ==========================================================
@@ -30695,7 +30540,7 @@ def get_progress(forensics_summary: Optional[dict] = None) -> dict:
 
 ## senecio_polymarket/backend/execution_simulator.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 4: Execution Simulator
 ==============================================
@@ -30948,7 +30793,7 @@ class ExecutionSimulator:
 
 ## senecio_polymarket/backend/forensics/__init__.py
 
-```python
+```text
 """SENECIO ORACLE — Forensics package (ACT FINAL_AUDIT A3)."""
 from .pipeline import (
     run_pipeline,
@@ -30971,7 +30816,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/forensics/pipeline.py
 
-```python
+```text
 """
 SENECIO ORACLE — Forensics Pipeline (ACT FINAL_AUDIT — A3)
 ============================================================
@@ -31842,7 +31687,7 @@ def list_runs(limit: int = 10) -> list:
 
 ## senecio_polymarket/backend/liquidity.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 2D: Liquidity Layer (poly-maker-inspired)
 ================================================================
@@ -31941,7 +31786,7 @@ def synth_book_from_tick(t: MarketTick, n_levels: int = 6) -> Orderbook:
 
 ## senecio_polymarket/backend/main.py
 
-```python
+```text
 """
 SENECIO ORACLE — FastAPI Main App
 ==================================
@@ -33536,13 +33381,15 @@ async def final_audit_state():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
 ```
 
 ---
 
 ## senecio_polymarket/backend/models.py
 
-```python
+```text
 """
 SENECIO ORACLE — Polymarket-style Canonical Event Schema
 =========================================================
@@ -33670,7 +33517,7 @@ def from_log_line(line: str) -> BaseEvent:
 
 ## senecio_polymarket/backend/oracle_engine.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 3: LLM-Driven Decision Brain
 ====================================================
@@ -33858,7 +33705,7 @@ class OracleEngine:
 
 ## senecio_polymarket/backend/oracle_runner.py
 
-```python
+```text
 """
 SENECIO ORACLE — Real Oracle Runner (ACT XXIII)
 ================================================
@@ -34909,7 +34756,7 @@ async def stop() -> None:
 
 ## senecio_polymarket/backend/portfolio/__init__.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVI: Portfolio subpackage
 ================================================
@@ -35020,7 +34867,7 @@ VERSION = "ACT-XXVI-deep-edge-integration"
 
 ## senecio_polymarket/backend/portfolio/coordinator.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: Portfolio Coordinator
 ================================================
@@ -35530,7 +35377,7 @@ class PortfolioCoordinator:
 
 ## senecio_polymarket/backend/portfolio/execution_engine.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: ExecutionEngine (priority 3)
 ======================================================
@@ -36402,7 +36249,7 @@ class ExecutionEngine:
 
 ## senecio_polymarket/backend/portfolio/execution_fidelity.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVI: Execution Fidelity (priority 1)
 ==========================================================
@@ -36962,7 +36809,7 @@ def book_snapshot_from_dict(d: dict) -> BookSnapshot:
 
 ## senecio_polymarket/backend/portfolio/live_gate.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: LIVE_GATE Evaluator
 ==============================================
@@ -37170,7 +37017,7 @@ class LiveGate:
 
 ## senecio_polymarket/backend/portfolio/meta_labeler.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVI: Meta-Labeling (priority 2)
 ======================================================
@@ -37646,7 +37493,7 @@ class MetaLabeler:
 
 ## senecio_polymarket/backend/portfolio/microstructure.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVI: Microstructure Intelligence (priority 3)
 ====================================================================
@@ -38076,7 +37923,7 @@ class MicrostructureIntelligence:
 
 ## senecio_polymarket/backend/portfolio/portfolio_analytics.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: PortfolioAnalytics (priority 5)
 =========================================================
@@ -38421,7 +38268,7 @@ class PortfolioAnalytics:
 
 ## senecio_polymarket/backend/portfolio/portfolio_engine.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: PortfolioEngine (priority 1)
 ======================================================
@@ -38868,7 +38715,7 @@ class PortfolioEngine:
 
 ## senecio_polymarket/backend/portfolio/regime_hmm.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVI: HMM Regime Overlay (priority 4)
 ===========================================================
@@ -39216,7 +39063,7 @@ class HMMRegimeOverlay:
 
 ## senecio_polymarket/backend/portfolio/risk_kernel.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: RiskKernel (priority 2)
 =================================================
@@ -39679,7 +39526,7 @@ class RiskKernel:
 
 ## senecio_polymarket/backend/portfolio/shadow_live.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: ShadowLive (priority 6)
 ==================================================
@@ -40096,7 +39943,7 @@ class ShadowLive:
 
 ## senecio_polymarket/backend/portfolio/trade_journal.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXV: TradeJournal (priority 4)
 ====================================================
@@ -40460,7 +40307,7 @@ class TradeJournal:
 
 ## senecio_polymarket/backend/research/__init__.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII: Research subpackage
 ================================================
@@ -40760,7 +40607,7 @@ VERSION = "ACT-XXVIII-institutional-validation"
 
 ## senecio_polymarket/backend/research/calibration.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII Priority 2: Probability Calibration
 ===============================================================
@@ -41339,7 +41186,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/capacity_model.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVIII Module 4: Capacity Model
 ======================================================
@@ -41786,7 +41633,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/coordinator.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII: Research Coordinator
 =================================================
@@ -42280,7 +42127,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/decision_engine.py
 
-```python
+```text
 """
 SENECIO ORACLE — Decision Engine (ACT FINAL_AUDIT — A8)
 ==========================================================
@@ -42485,7 +42332,7 @@ def make_decision(study: dict, evidence_progress: dict) -> dict:
 
 ## senecio_polymarket/backend/research/drift_detector.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII Priority 3: Drift Detection
 =======================================================
@@ -43013,7 +42860,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/executive_report.py
 
-```python
+```text
 """
 SENECIO ORACLE — Executive Report Generator (ACT FINAL_AUDIT — A9)
 =====================================================================
@@ -43290,7 +43137,7 @@ def latest_report() -> Optional[dict]:
 
 ## senecio_polymarket/backend/research/explainability.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII Priority 5: Explainability
 ======================================================
@@ -43788,7 +43635,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/final_audit_orchestrator.py
 
-```python
+```text
 """
 SENECIO ORACLE — Final Audit Orchestrator (ACT FINAL_AUDIT — A7+A8+A9)
 =========================================================================
@@ -43880,7 +43727,7 @@ def run_final_audit_sync() -> dict:
 
 ## senecio_polymarket/backend/research/institutional_report.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVIII Module 6: Institutional Report
 ============================================================
@@ -44496,7 +44343,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/monte_carlo_validation.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVIII Module 2: Monte Carlo Validation
 ==============================================================
@@ -44987,7 +44834,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/observability.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII Priority 6: Observability
 =====================================================
@@ -45466,7 +45313,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/purged_cv.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII Priority 1: Purged Walk-Forward Validation
 =====================================================================
@@ -46197,7 +46044,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/research_metrics.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVII Priority 4: Research Metrics
 ========================================================
@@ -46657,7 +46504,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/statistical_study.py
 
-```python
+```text
 """
 SENECIO ORACLE — Statistical Study Suite (ACT FINAL_AUDIT — A7)
 ==================================================================
@@ -47503,7 +47350,7 @@ def run_full_study(rows: list) -> dict:
 
 ## senecio_polymarket/backend/research/statistical_validation.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVIII Module 3: Statistical Validation
 ==============================================================
@@ -48360,7 +48207,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/stress_testing.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVIII Module 5: Stress Testing
 ======================================================
@@ -48916,7 +48763,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/research/walk_forward_optimizer.py
 
-```python
+```text
 """
 SENECIO ORACLE — ACT XXVIII Module 1: Walk-Forward Optimizer
 ==============================================================
@@ -49500,7 +49347,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/scanner_a.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 2A: Pre-Market Gap Scanner (Scanner A)
 ==============================================================
@@ -49614,7 +49461,7 @@ class ScannerA:
 
 ## senecio_polymarket/backend/scanner_b.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 2B: Trend Join Long Scanner (Scanner B)
 ===============================================================
@@ -49729,7 +49576,7 @@ class ScannerB:
 
 ## senecio_polymarket/backend/scheduler.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 5+: Scheduler / Agentic Loop
 ====================================================
@@ -49983,7 +49830,7 @@ class Scheduler:
 
 ## senecio_polymarket/backend/supabase_client.py
 
-```python
+```text
 """
 SENECIO ORACLE — Supabase Client (ACT XXIII)
 =============================================
@@ -50328,7 +50175,7 @@ async def close() -> None:
 
 ## senecio_polymarket/backend/wallet_tracker.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 2C: Wallet Tracker
 ==========================================
@@ -50423,7 +50270,7 @@ class WalletTracker:
 
 ## senecio_polymarket/backend/watchdogs/__init__.py
 
-```python
+```text
 """SENECIO ORACLE — Watchdogs package (ACT FINAL_AUDIT A4)."""
 from .coordinator import (
     run_all_watchdogs,
@@ -50444,7 +50291,7 @@ __all__ = [
 
 ## senecio_polymarket/backend/watchdogs/coordinator.py
 
-```python
+```text
 """
 SENECIO ORACLE — Watchdog Coordinator (ACT FINAL_AUDIT — A4)
 ==============================================================
@@ -50859,7 +50706,7 @@ def latest_alerts(limit: int = 50) -> list:
 
 ## senecio_polymarket/backend/ws_server.py
 
-```python
+```text
 """
 SENECIO ORACLE — Layer 5: WebSocket Server + SSE fallback
 ==========================================================
@@ -50954,7 +50801,7 @@ def make_router(bus: EventBus) -> APIRouter:
 
 ## senecio_polymarket/freeze/FINAL_STATE_MANIFEST.json
 
-```json
+```text
 {
   "aggregate_sha256": "22ee1690c981db68d0f0f0d318f5ab0fda449055b71113c12abe13413369ecd8",
   "audit_infrastructure_files": {
@@ -51096,7 +50943,7 @@ def make_router(bus: EventBus) -> APIRouter:
 
 ## senecio_polymarket/freeze/environment.json
 
-```json
+```text
 {
   "captured_at_utc": "2026-06-20T04:07:19.289490+00:00",
   "environment_vars": {
@@ -51650,7 +51497,7 @@ zopfli==0.4.1
 
 ## senecio_polymarket/freeze/versions.json
 
-```json
+```text
 {
   "freeze_created_at_utc": "2026-06-20T04:07:18.671845+00:00",
   "freeze_tag": "PRE_LONG_FIX_FREEZE",
@@ -51698,7 +51545,7 @@ zopfli==0.4.1
 
 ## senecio_polymarket/frontend/app.js
 
-```javascript
+```text
 /* SENECIO ORACLE — Polymarket Cockpit Frontend */
 (() => {
   'use strict';
@@ -52355,7 +52202,7 @@ zopfli==0.4.1
 
 ## senecio_polymarket/frontend/index.html
 
-```html
+```text
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -52552,7 +52399,7 @@ zopfli==0.4.1
 
 ## senecio_polymarket/frontend/styles.css
 
-```css
+```text
 /* SENECIO ORACLE — Polymarket-style dark terminal UI (v2 — responsive + scrollable panels) */
 :root {
   --bg: #07090d;
@@ -53140,7 +52987,7 @@ footer {
 
 ## senecio_polymarket/oracle/exchange_connector.py
 
-```python
+```text
 """
 LIVE_BRIDGE_LAYER_v1: exchange_connector.py — Dual-Exchange Public Data Connector
 
@@ -55611,13 +55458,14 @@ if __name__ == "__main__":
         # Run mock tests only (default)
         mock_ok = _run_mock_tests()
         sys.exit(0 if mock_ok else 1)
+
 ```
 
 ---
 
 ## senecio_polymarket/oracle/institutional_core.py
 
-```python
+```text
 """
 Module: institutional_core.py — SINGLE DECISION CORE (ACT XXIII)
 
@@ -57260,7 +57108,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/oracle/market_ev.py
 
-```python
+```text
 """
 Module: market_ev.py — MARKET-ANCHORED EXPECTED VALUE
 
@@ -57722,7 +57570,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/oracle/oracle_lab.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 SENECIO — ORACLE_LAB
@@ -58823,7 +58671,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/oracle/oracle_verifier.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 SENECIO Oracle — Standalone Verifier (ACT-XXXI PASO_2 Opción B)
@@ -59319,7 +59167,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/oracle/predict_only.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 SENECIO — PREDICT_ONLY_MODE (Oracle Auditable)
@@ -60303,7 +60151,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/oracle/survivability.py
 
-```python
+```text
 """
 Module: survivability.py — SURVIVABILITY FUNCTION
 
@@ -60833,7 +60681,7 @@ shap>=0.45
 
 ## senecio_polymarket/scripts/act_final_audit_smoke.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 ACT FINAL_AUDIT (MYTHOS) — Smoke Test Suite
@@ -61430,7 +61278,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/act_xxix_smoke.py
 
-```python
+```text
 """
 ACT-XXIX Smoke Test — Systemic Anti-Fragility Layer
 ====================================================
@@ -62327,7 +62175,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/act_xxv_smoke.py
 
-```python
+```text
 """
 ACT-XXV Smoke Test
 ==================
@@ -62914,7 +62762,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/act_xxvi_smoke.py
 
-```python
+```text
 """
 ACT-XXVI Smoke Test — Deep Edge Integration
 ===========================================
@@ -63619,7 +63467,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/act_xxvii_smoke.py
 
-```python
+```text
 """
 ACT-XXVII Smoke Test — Institutional Research-Grade Validation
 ==============================================================
@@ -64295,7 +64143,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/act_xxviii_smoke.py
 
-```python
+```text
 """
 ACT-XXVIII Smoke Test — Institutional Validation-Grade Robustness
 ==================================================================
@@ -65089,7 +64937,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/backfill_supabase.py
 
-```python
+```text
 #!/usr/bin/env python3
 """
 SENECIO Oracle — Backfill Supabase from predictions.jsonl (ACT XIX)
@@ -65177,7 +65025,7 @@ if __name__ == "__main__":
 
 ## senecio_polymarket/scripts/create_oracle_state.sql
 
-```sql
+```text
 -- SENECIO ORACLE — ACT-XXXII Fix3: oracle_state table
 -- Run this in the Supabase Dashboard SQL Editor to ENABLE verifier checkpoints.
 -- Until this is run, oracle_verifier.py runs WITHOUT checkpoint (graceful fallback).
@@ -65223,7 +65071,7 @@ COMMENT ON TABLE public.oracle_state IS
 
 ## senecio_polymarket/start.sh
 
-```bash
+```text
 #!/bin/sh
 # SENECIO ORACLE — start.sh (ACT-XXXII)
 # POSIX-compliant launcher: uvicorn (dashboard + prediction loop) + oracle_verifier.py
@@ -65281,7 +65129,7 @@ exit 1
 
 ## shadow_execution_engine.py
 
-```python
+```text
 """
 Module: shadow_execution_engine.py — SHADOW EXECUTION ENGINE
 
@@ -66898,7 +66746,7 @@ if __name__ == "__main__":
 
 ## survivability.py
 
-```python
+```text
 """
 Module: survivability.py — SURVIVABILITY FUNCTION
 
