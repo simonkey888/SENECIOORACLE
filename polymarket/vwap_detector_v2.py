@@ -98,6 +98,10 @@ H011B_MIN_DEPTH_USDC = 1.0     # depth_limit debe ser > $1 para operar
 H011B_VIRTUAL_BALANCE_INITIAL = 1000.0
 H011B_LEDGER_DATA_VALIDATION = "condition_id_match_v1"
 H011_IDENTITY_GATE_VERSION = "condition_id_match_v1"
+
+# U0 QUARANTINE: cuando es False, el detector viejo NO escribe al ledger
+# y todos los summaries nuevos se marcan como legacy no confirmatorio
+H011_LEGACY_WRITE_ENABLED = os.environ.get("H011_LEGACY_WRITE_ENABLED", "false").lower() == "true"
 H011_SUSTAINED_SEMANTICS = "current_scan_deviation_gte_5pp"
 
 # Dry-run ledger path (definido después de RESULTS_DIR más abajo)
@@ -617,33 +621,18 @@ def log_dry_run_trade(
         "pnl": round(pnl, 4),
         "data_validation": H011B_LEDGER_DATA_VALIDATION,
     }
+
+    # U0 QUARANTINE: no escribir al ledger si legacy write está deshabilitado
+    if not H011_LEGACY_WRITE_ENABLED:
+        print(f"    [H-011b] LEGACY QUARANTINE — ledger write skipped (H011_LEGACY_WRITE_ENABLED=false)")
+        return
+
     try:
         with open(DRY_RUN_LEDGER, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         print(f"    [H-011b] DRY-RUN TRADE | S={sum_vwap:.4f} edge={edge*100:.2f}% size=${size:.2f} pnl=${pnl:.4f}")
     except OSError as e:
         print(f"    [H-011b] Error writing to dry_run_ledger: {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Sostenido por historial
-# ═══════════════════════════════════════════════════════════════════════
-
-def get_sustained_in_history(condition_id: str, master_log_path: Path, n_scans_required: int = 3) -> bool:
-    """
-    Verifica si el mercado ha sido flaggeado (dev_abs >= THRESHOLD_SUSTAINED)
-    en al menos n_scans_required scans distintos a lo largo del historial.
-
-    Lee el _master_log.jsonl que contiene un summary por scan.
-    NOTE: el master_log solo guarda markets_sustained count, no la lista de
-    mercados. Para hacer este chequeo correctamente, habría que guardar la
-    lista de markets sustained en cada scan. Por ahora devolvemos None —
-    el criterio sostenido-in-history se evalúa offline al día 8.
-
-    En FASE_0, el criterio "≥3 scans distintos" se evalúa al día 8 sobre
-    todos los JSONL acumulados, no en tiempo real.
-    """
-    return None  # se evalúa offline
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -881,6 +870,11 @@ def run_scan(
         "sustained_markets": [r.market for r in results if r.sustained],  # umbral actual, no persistencia
         "flagged_markets": [r.market for r in results if r.flagged],  # para análisis día 8
         "jsonl_file": str(jsonl_path.name),
+        # U0 QUARANTINE: todos los summaries nuevos se marcan como legacy
+        "cohort_id": "legacy_w3600" if window_s == 3600 else f"legacy_w{window_s}",
+        "confirmatory_eligible": False,
+        "legacy_reason": "pre_v3_unbound_market_structure",
+        "legacy_write_enabled": H011_LEGACY_WRITE_ENABLED,
     }
     with open(master_log, "a") as f:
         f.write(json.dumps(summary_line, ensure_ascii=False, default=str) + "\n")
