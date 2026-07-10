@@ -261,6 +261,9 @@ th{color:var(--text2);font-weight:400;font-size:10px;text-transform:uppercase}
   <div class="footer">SENECIO H-011 V3 · PAPER_ONLY · LIVE_CAPITAL_LOCKED · <a href="/api/v3/integrity" style="color:var(--text2)">/api/v3/integrity</a></div>
 </div>
 <script>
+function displayMetric(value){
+  return value === null || value === undefined ? '—' : value;
+}
 async function load(){
   try{
     const r=await fetch('/api/v3/state');
@@ -276,7 +279,7 @@ async function load(){
 
     // Sources
     const st=document.querySelector('#sources-table tbody');st.innerHTML='';
-    Object.entries(d.source_health||{}).forEach(([k,v])=>{st.innerHTML+=`<tr><td>${k}</td><td><span class="tag ${v.level==='HEALTHY'?'pass':v.level==='UNKNOWN'?'unknown':'fail'}">${v.level}</span></td><td class="mono">${v.age_ms??'—'}</td><td class="mono">${v.latency_ms??'—'}</td><td>${v.consecutive_failures}</td><td>${v.fallback_used?'SÍ':'no'}</td></tr>`});
+    Object.entries(d.source_health||{}).forEach(([k,v])=>{st.innerHTML+=`<tr><td>${k}</td><td><span class="tag ${v.level==='HEALTHY'?'pass':v.level==='UNKNOWN'?'unknown':'fail'}">${v.level}</span></td><td class="mono">${displayMetric(v.age_ms)}</td><td class="mono">${displayMetric(v.latency_ms)}</td><td>${displayMetric(v.consecutive_failures)}</td><td>${v.fallback_used?'SÍ':'no'}</td></tr>`});
 
     // Funnel
     const ft=document.querySelector('#funnel-table tbody');ft.innerHTML='';
