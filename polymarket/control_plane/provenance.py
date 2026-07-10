@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from polymarket.control_plane.semantic_status import DataOrigin
+from control_plane.semantic_status import DataOrigin
 
 
 @dataclass(frozen=True)

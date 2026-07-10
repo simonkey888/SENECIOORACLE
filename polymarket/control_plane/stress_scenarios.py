@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from polymarket.clob_readonly import walk_asks, taker_fee, simulate_complete_set
+from clob_readonly import walk_asks, taker_fee, simulate_complete_set
 
 
 @dataclass(frozen=True)
