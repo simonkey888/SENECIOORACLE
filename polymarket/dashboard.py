@@ -91,16 +91,24 @@ def get_history(n: int = 20) -> list[dict[str, Any]]:
     return lines[-n:]
 
 
+def get_full_history() -> list[dict[str, Any]]:
+    """TODAS las entradas del master_log (para análisis Día 8)."""
+    master_log = RESULTS_DIR / "_master_log.jsonl"
+    return _safe_read_jsonl(master_log)
+
+
 @app.get("/api/data")
 def api_data() -> JSONResponse:
     """API JSON para el frontend JavaScript."""
     summary = get_latest_summary()
     scan = get_latest_scan(flagged_only=True, limit=15)
     history = get_history(n=20)
+    full_history = get_full_history()
     return JSONResponse({
         "summary": summary,
         "scan": scan,
         "history": history,
+        "full_history": full_history,
     })
 
 
