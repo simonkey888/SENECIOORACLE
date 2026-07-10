@@ -188,10 +188,7 @@
 
     async function initSignalField() {
       const canvas = byId("signal-field");
-      if (!canvas || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        byId("field-caption").textContent = "Animación reducida por la preferencia del dispositivo.";
-        return;
-      }
+      if (!canvas) return;
       try {
         const THREE = await import(threeUrl);
         const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: "low-power" });
