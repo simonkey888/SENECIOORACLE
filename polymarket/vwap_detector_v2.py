@@ -86,15 +86,15 @@ STALENESS_THRESHOLD_SEC = int(os.environ.get("H011_STALENESS_THRESHOLD", "60"))
 
 # ═══════════════════════════════════════════════════════════════════════
 # H-011b Configuration (DIRECTIONAL ARBITRAGE — Dry-Run)
+# Refinado por Gemini: Kelly fraccionado + depth proxy por cuello de botella
 # ═══════════════════════════════════════════════════════════════════════
-# Solo se ejecuta arbitraje cuando S < 1.0 - fee_proxy (underpriced)
-H011B_FEE_PROXY = 0.005        # 0.5% estimado de spread/slippage
-H011B_ENTRY_THRESHOLD = 1.0 - H011B_FEE_PROXY  # S < 0.995
-H011B_MIN_DEV_SIGNED = -H011B_FEE_PROXY         # dev_signed < -0.005
-
-# Kelly sizing simplificado (Gemini + CloddsBot)
-H011B_MAX_ORDER_USDC = 50.0    # cap fijo por trade
-H011B_KELLY_FRACTION = 0.10    # 10% del volumen de trades en ventana
+H011B_FEE_ESTIMATE = 0.005     # 0.5% fricción estimada (slippage + spread)
+H011B_ENTRY_THRESHOLD = 1.0 - H011B_FEE_ESTIMATE  # S < 0.995
+H011B_KELLY_FRACTION = 0.2     # 20% Fractional Kelly (Gemini spec)
+H011B_MAX_ORDER_SIZE = 50.0    # límite absoluto por operación
+H011B_DEPTH_FRACTION = 0.10    # 10% de la liquidez activa
+H011B_MIN_ORDER_USDC = 1.0     # ignorar transacciones < $1
+H011B_MIN_DEPTH_USDC = 1.0     # depth_limit debe ser > $1 para operar
 H011B_VIRTUAL_BALANCE_INITIAL = 1000.0
 
 # Dry-run ledger path (definido después de RESULTS_DIR más abajo)
@@ -469,31 +469,44 @@ def analyze_market(
     result.sustained = dev_abs_val >= THRESHOLD_SUSTAINED
 
     # ════════════════════════════════════════════════════════════════════
-    # H-011b DRY-RUN LOGIC (DIRECTIONAL ARBITRAGE)
+    # H-011b DRY-RUN LOGIC (DIRECTIONAL ARBITRAGE — Kelly refinado Gemini)
     # ════════════════════════════════════════════════════════════════════
     # Solo se ejecuta arbitraje simulado cuando:
-    #   1. dev_signed < H011B_MIN_DEV_SIGNED (-0.005) → underpriced
-    #   2. sum_vwap < H011B_ENTRY_THRESHOLD (0.995) → S < 1.0 - fee_proxy
-    # Circuit breakers ya aplicados arriba: staleness filter + leg > 0.95
-    if dev_signed_val < H011B_MIN_DEV_SIGNED and sum_vwap < H011B_ENTRY_THRESHOLD:
-        # Kelly sizing simplificado: min(10% del volumen de trades, $50)
-        total_volume = vol_yes + vol_no
-        kelly_size = total_volume * H011B_KELLY_FRACTION
-        order_size = min(kelly_size, H011B_MAX_ORDER_USDC)
-        if order_size > 0.01:  # mínimo $0.01 para registrar
-            # PnL estimado: comprar ambas patas a costo S*size, recibir size al resolution
-            # pnl = size * ((1.0 / S) - 1.0)
-            pnl = order_size * ((1.0 / sum_vwap) - 1.0)
-            log_dry_run_trade(
-                condition_id=condition_id,
-                question=question,
-                price_yes=v_yes,
-                price_no=v_no,
-                sum_vwap=sum_vwap,
-                size=order_size,
-                pnl=pnl,
-                timestamp=snapshot,
-            )
+    #   1. sum_vwap < H011B_ENTRY_THRESHOLD (0.995) → underpriced tras fees
+    #   2. Staleness filter ya aplicado arriba (Δt YES-NO ≤ 60s)
+    #   3. Leg > 0.95 ya excluido arriba
+    # Circuit breakers adicionales: depth limit, Kelly sizing, min order
+    if sum_vwap < H011B_ENTRY_THRESHOLD:
+        # Edge = 1.00 - S (ventaja matemática)
+        edge = 1.0 - sum_vwap
+
+        # Depth proxy: cuello de botella del leg menos líquido (Gemini spec)
+        # depth_proxy = 2 * min(vol_yes, vol_no)
+        # depth_limit = depth_proxy * 0.10
+        depth_proxy = 2.0 * min(vol_yes, vol_no)
+        depth_limit = depth_proxy * H011B_DEPTH_FRACTION
+
+        if depth_limit > H011B_MIN_DEPTH_USDC:
+            # Kelly sizing: base_size = balance * KELLY_FRACTION * edge
+            virtual_balance = get_current_virtual_balance()
+            base_size = virtual_balance * H011B_KELLY_FRACTION * edge
+            order_size = min(base_size, depth_limit, H011B_MAX_ORDER_SIZE)
+
+            if order_size >= H011B_MIN_ORDER_USDC:
+                # PnL simulado: size * ((1.0 / S) - 1.0)
+                # Neto de fee ya implícito en el umbral S < 0.995
+                pnl = order_size * ((1.0 / sum_vwap) - 1.0)
+                log_dry_run_trade(
+                    condition_id=condition_id,
+                    question=question,
+                    price_yes=v_yes,
+                    price_no=v_no,
+                    sum_vwap=sum_vwap,
+                    edge=edge,
+                    size=order_size,
+                    pnl=pnl,
+                    timestamp=snapshot,
+                )
 
     return result
 
@@ -502,12 +515,38 @@ def analyze_market(
 # H-011b Dry-Run Ledger
 # ═══════════════════════════════════════════════════════════════════════
 
+def get_current_virtual_balance() -> float:
+    """
+    Lee el balance virtual actual acumulado del dry_run_ledger.
+    Balance inicial = $1000 USDC + PnL acumulado de todos los trades.
+    """
+    base_balance = H011B_VIRTUAL_BALANCE_INITIAL
+    if not DRY_RUN_LEDGER.exists():
+        return base_balance
+    try:
+        accumulated_pnl = 0.0
+        with open(DRY_RUN_LEDGER, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    trade = json.loads(line)
+                    accumulated_pnl += trade.get("pnl", 0.0)
+                except json.JSONDecodeError:
+                    continue
+        return round(base_balance + accumulated_pnl, 4)
+    except OSError:
+        return base_balance
+
+
 def log_dry_run_trade(
     condition_id: str,
     question: str,
     price_yes: float,
     price_no: float,
     sum_vwap: float,
+    edge: float,
     size: float,
     pnl: float,
     timestamp: str,
@@ -516,9 +555,10 @@ def log_dry_run_trade(
     Escribe una línea en dry_run_ledger.jsonl (append-only).
     Cada línea representa un trade simulado de arbitraje H-011b.
 
-    Esquema JSON estricto (según spec Gemini):
+    Esquema JSON estricto (según spec Gemini + columnas extra):
     {"timestamp": "ISO-8601", "condition_id": "str", "question": "str",
-     "price_yes": float, "price_no": float, "sum": float, "size": float, "pnl": float}
+     "price_yes": float, "price_no": float, "sum": float, "edge": float,
+     "size": float, "pnl": float}
     """
     entry = {
         "timestamp": timestamp,
@@ -527,12 +567,14 @@ def log_dry_run_trade(
         "price_yes": round(price_yes, 6),
         "price_no": round(price_no, 6),
         "sum": round(sum_vwap, 6),
+        "edge": round(edge, 6),
         "size": round(size, 2),
         "pnl": round(pnl, 4),
     }
     try:
         with open(DRY_RUN_LEDGER, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        print(f"    [H-011b] DRY-RUN TRADE | S={sum_vwap:.4f} edge={edge*100:.2f}% size=${size:.2f} pnl=${pnl:.4f}")
     except OSError as e:
         print(f"    [H-011b] Error writing to dry_run_ledger: {e}")
 
