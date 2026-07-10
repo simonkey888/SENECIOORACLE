@@ -1,0 +1,33 @@
+# SENECKIO H-011 V3 — Integrity Pipeline (Staging)
+# Imagen separada del legacy. Ejecuta --pipeline integrity-v3 --window 300.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir httpx numpy fastapi uvicorn
+
+# CACHE BUST
+ARG CACHE_BUST=20260710v3
+RUN echo "cache bust ${CACHE_BUST}"
+
+RUN mkdir -p /app/polymarket/results/v3/raw /app/polymarket/results/v3/scans /app/polymarket/results/v3/replay
+
+# Copiar TODOS los módulos V3
+COPY polymarket/h011_v3_pipeline.py \
+     polymarket/evidence_state.py \
+     polymarket/validation_semantics.py \
+     polymarket/market_structure.py \
+     polymarket/trade_binding.py \
+     polymarket/raw_event_store.py \
+     polymarket/clob_readonly.py \
+     polymarket/polymarket_connector.py \
+     polymarket/vwap_detector_v2.py \
+     polymarket/__init__.py \
+     /app/polymarket/
+
+WORKDIR /app/polymarket
+
+EXPOSE 8080
+
+# V3 runtime: window=300, pipeline=integrity-v3
+CMD ["sh", "-c", "python3 /app/polymarket/dashboard_v3.py 2>&1 & sleep 3 && while true; do python3 /app/polymarket/vwap_detector_v2.py --pipeline integrity-v3 --mode monitor --window 300 2>&1; sleep 900; done"]
