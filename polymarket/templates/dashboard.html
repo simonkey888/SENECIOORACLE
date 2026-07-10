@@ -116,7 +116,7 @@
     <h2>Calidad del último scan</h2>
     <section class="grid quality" aria-label="Calidad de señal">
       <article class="card"><div class="card-label">Mercados con trades</div><div class="card-value" id="stat-coverage">—</div><div class="card-detail" id="stat-coverage-detail">—</div></article>
-      <article class="card"><div class="card-label">Candidatos UNDER</div><div class="card-value green" id="stat-under">—</div><div class="card-detail">solo candidatos H-011b</div></article>
+      <article class="card"><div class="card-label">UNDER ≥2pp</div><div class="card-value green" id="stat-under">—</div><div class="card-detail">umbral del scan actual; no persistencia</div></article>
       <article class="card"><div class="card-label">Máx. desviación</div><div class="card-value orange" id="stat-maxdev">—</div><div class="card-detail">|YES + NO − 1|</div></article>
       <article class="card"><div class="card-label">Líneas corruptas</div><div class="card-value" id="stat-corrupt">—</div><div class="card-detail" id="stat-corrupt-detail">JSONL descartado al leer</div></article>
     </section>
@@ -373,6 +373,10 @@
       if (coverage !== null && coverage !== undefined && coverage < 25) warnings.push("Cobertura baja: pocos mercados escaneados tuvieron trades en la ventana.");
       if (corrupt) warnings.push("Hay JSONL corrupto o incompleto: el dashboard lo excluyó de los cálculos.");
       if (number(dryRun.unverified_records) > 0) warnings.push(number(dryRun.unverified_records) + " registro(s) legacy fueron invalidados por no comprobar condición de mercado.");
+      const legacyScans = number(integrity.legacy_scans_without_identity_gate);
+      const gatedScans = number(integrity.identity_gate_scans);
+      if (legacyScans > 0) warnings.push(legacyScans + " scan(s) históricos no pertenecen a la cohorte con Gate-0; no sirven para persistencia ni decisión Día 8.");
+      if (gatedScans === 0) warnings.push("Aún no hay scans versionados con Gate-0 en el historial persistido.");
       const notice = byId("execution-notice");
       notice.className = "notice" + (warnings.length ? " warning" : "");
       notice.textContent = "Solo lectura. Sin órdenes, fills, profundidad CLOB, latencia de ejecución ni PnL por resolución. " +

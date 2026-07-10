@@ -25,6 +25,7 @@ TEMPLATE_FILE = Path(__file__).with_name("templates") / "dashboard.html"
 VIRTUAL_BALANCE_INITIAL = 1000.0
 FRESH_SCAN_MAX_AGE_SEC = int(os.environ.get("H011_FRESH_SCAN_MAX_AGE_SEC", "1200"))
 VERIFIED_LEDGER_VALIDATION = "condition_id_match_v1"
+IDENTITY_GATE_VALIDATION = "condition_id_match_v1"
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,12 @@ def build_payload() -> dict[str, Any]:
         "latest_scan": scan,
         "dry_run_ledger": ledger,
     }
+    identity_gate_scans = [
+        row for row in master.rows
+        if row.get("identity_gate_active") is True
+        and row.get("data_validation") == IDENTITY_GATE_VALIDATION
+    ]
+    legacy_scans = len(master.rows) - len(identity_gate_scans)
 
     return {
         "summary": summary,
@@ -184,6 +191,12 @@ def build_payload() -> dict[str, Any]:
                 name: reader.error for name, reader in readers.items() if reader.error
             },
             "latest_scan_file": scan_path.name if scan_path else None,
+            "identity_gate_validation": IDENTITY_GATE_VALIDATION,
+            "identity_gate_scans": len(identity_gate_scans),
+            "legacy_scans_without_identity_gate": legacy_scans,
+            "sustained_semantics": summary.get(
+                "sustained_semantics", "unknown_for_legacy_scan"
+            ),
         },
     }
 

@@ -1,6 +1,6 @@
 # SENECIO — código consolidado
 
-Fuente: simonkey888/SENECIOORACLE · commit 4a4e7fdb400dae6a35de59f2c6de2b964f9121fa · generado: 2026-07-10 09:39:00 UTC.
+Fuente: simonkey888/SENECIOORACLE · base commit c277c323ecf59748089f9fb15e3b35aadf852b46 · generado: 2026-07-10 09:49:01 UTC.
 Incluye archivos de código y configuración versionados. Excluye este archivo para evitar recursión y datos operativos mutables (senecio_output/, auditorías runtime).
 Archivos incluidos: 138.
 
@@ -15605,6 +15605,7 @@ TEMPLATE_FILE = Path(__file__).with_name("templates") / "dashboard.html"
 VIRTUAL_BALANCE_INITIAL = 1000.0
 FRESH_SCAN_MAX_AGE_SEC = int(os.environ.get("H011_FRESH_SCAN_MAX_AGE_SEC", "1200"))
 VERIFIED_LEDGER_VALIDATION = "condition_id_match_v1"
+IDENTITY_GATE_VALIDATION = "condition_id_match_v1"
 
 
 @dataclass(frozen=True)
@@ -15735,6 +15736,12 @@ def build_payload() -> dict[str, Any]:
         "latest_scan": scan,
         "dry_run_ledger": ledger,
     }
+    identity_gate_scans = [
+        row for row in master.rows
+        if row.get("identity_gate_active") is True
+        and row.get("data_validation") == IDENTITY_GATE_VALIDATION
+    ]
+    legacy_scans = len(master.rows) - len(identity_gate_scans)
 
     return {
         "summary": summary,
@@ -15764,6 +15771,12 @@ def build_payload() -> dict[str, Any]:
                 name: reader.error for name, reader in readers.items() if reader.error
             },
             "latest_scan_file": scan_path.name if scan_path else None,
+            "identity_gate_validation": IDENTITY_GATE_VALIDATION,
+            "identity_gate_scans": len(identity_gate_scans),
+            "legacy_scans_without_identity_gate": legacy_scans,
+            "sustained_semantics": summary.get(
+                "sustained_semantics", "unknown_for_legacy_scan"
+            ),
         },
     }
 
@@ -18706,7 +18719,7 @@ done
     <h2>Calidad del último scan</h2>
     <section class="grid quality" aria-label="Calidad de señal">
       <article class="card"><div class="card-label">Mercados con trades</div><div class="card-value" id="stat-coverage">—</div><div class="card-detail" id="stat-coverage-detail">—</div></article>
-      <article class="card"><div class="card-label">Candidatos UNDER</div><div class="card-value green" id="stat-under">—</div><div class="card-detail">solo candidatos H-011b</div></article>
+      <article class="card"><div class="card-label">UNDER ≥2pp</div><div class="card-value green" id="stat-under">—</div><div class="card-detail">umbral del scan actual; no persistencia</div></article>
       <article class="card"><div class="card-label">Máx. desviación</div><div class="card-value orange" id="stat-maxdev">—</div><div class="card-detail">|YES + NO − 1|</div></article>
       <article class="card"><div class="card-label">Líneas corruptas</div><div class="card-value" id="stat-corrupt">—</div><div class="card-detail" id="stat-corrupt-detail">JSONL descartado al leer</div></article>
     </section>
@@ -18963,6 +18976,10 @@ done
       if (coverage !== null && coverage !== undefined && coverage < 25) warnings.push("Cobertura baja: pocos mercados escaneados tuvieron trades en la ventana.");
       if (corrupt) warnings.push("Hay JSONL corrupto o incompleto: el dashboard lo excluyó de los cálculos.");
       if (number(dryRun.unverified_records) > 0) warnings.push(number(dryRun.unverified_records) + " registro(s) legacy fueron invalidados por no comprobar condición de mercado.");
+      const legacyScans = number(integrity.legacy_scans_without_identity_gate);
+      const gatedScans = number(integrity.identity_gate_scans);
+      if (legacyScans > 0) warnings.push(legacyScans + " scan(s) históricos no pertenecen a la cohorte con Gate-0; no sirven para persistencia ni decisión Día 8.");
+      if (gatedScans === 0) warnings.push("Aún no hay scans versionados con Gate-0 en el historial persistido.");
       const notice = byId("execution-notice");
       notice.className = "notice" + (warnings.length ? " warning" : "");
       notice.textContent = "Solo lectura. Sin órdenes, fills, profundidad CLOB, latencia de ejecución ni PnL por resolución. " +
@@ -19725,6 +19742,8 @@ H011B_MIN_ORDER_USDC = 1.0     # ignorar transacciones < $1
 H011B_MIN_DEPTH_USDC = 1.0     # depth_limit debe ser > $1 para operar
 H011B_VIRTUAL_BALANCE_INITIAL = 1000.0
 H011B_LEDGER_DATA_VALIDATION = "condition_id_match_v1"
+H011_IDENTITY_GATE_VERSION = "condition_id_match_v1"
+H011_SUSTAINED_SEMANTICS = "current_scan_deviation_gte_5pp"
 
 # Dry-run ledger path (definido después de RESULTS_DIR más abajo)
 DRY_RUN_LEDGER = None  # se setea después de RESULTS_DIR
@@ -19799,6 +19818,11 @@ class ScanReport:
     markets_sustained: int
     deviation_stats: dict
     top_deviations: list[dict]
+    # "sustained" is a per-scan magnitude threshold, not persistence across scans.
+    sustained_semantics: str = H011_SUSTAINED_SEMANTICS
+    # New scans explicitly identify the identity-validation cohort that produced them.
+    identity_gate_active: bool = True
+    data_validation: str = H011_IDENTITY_GATE_VERSION
     results: list[dict] = field(default_factory=list)
 
 
@@ -20495,8 +20519,11 @@ def run_scan(
         "markets_with_trades": markets_with_trades,
         "markets_flagged": markets_flagged,
         "markets_sustained": markets_sustained,
+        "sustained_semantics": H011_SUSTAINED_SEMANTICS,
+        "identity_gate_active": True,
+        "data_validation": H011_IDENTITY_GATE_VERSION,
         "deviation_stats": deviation_stats,
-        "sustained_markets": [r.market for r in results if r.sustained],  # para análisis día 8
+        "sustained_markets": [r.market for r in results if r.sustained],  # umbral actual, no persistencia
         "flagged_markets": [r.market for r in results if r.flagged],  # para análisis día 8
         "jsonl_file": str(jsonl_path.name),
     }
@@ -20527,6 +20554,9 @@ def run_scan(
         markets_sustained=markets_sustained,
         deviation_stats=deviation_stats,
         top_deviations=top_deviations,
+        sustained_semantics=H011_SUSTAINED_SEMANTICS,
+        identity_gate_active=True,
+        data_validation=H011_IDENTITY_GATE_VERSION,
         results=[asdict(r) for r in results],
     )
 
@@ -20561,7 +20591,7 @@ def _print_summary(report, jsonl_path, master_log):
     print(f"  Excluded (no trades):       {report.markets_excluded_no_trades}")
     print(f"  Excluded (leg > 0.95):      {report.markets_excluded_resolved}")
     print(f"  Flagged (dev_abs >= 2pp):   {report.markets_flagged}")
-    print(f"  Sustained (dev_abs >= 5pp): {report.markets_sustained}")
+    print(f"  Umbral actual (dev_abs >= 5pp; no persistencia): {report.markets_sustained}")
     if report.deviation_stats.get("n", 0) > 0:
         print(f"\n  Deviation distribution (n={report.deviation_stats['n']}):")
         print(f"    min:    {report.deviation_stats['min']:.6f}")

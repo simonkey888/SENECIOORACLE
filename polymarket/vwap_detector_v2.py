@@ -97,6 +97,8 @@ H011B_MIN_ORDER_USDC = 1.0     # ignorar transacciones < $1
 H011B_MIN_DEPTH_USDC = 1.0     # depth_limit debe ser > $1 para operar
 H011B_VIRTUAL_BALANCE_INITIAL = 1000.0
 H011B_LEDGER_DATA_VALIDATION = "condition_id_match_v1"
+H011_IDENTITY_GATE_VERSION = "condition_id_match_v1"
+H011_SUSTAINED_SEMANTICS = "current_scan_deviation_gte_5pp"
 
 # Dry-run ledger path (definido después de RESULTS_DIR más abajo)
 DRY_RUN_LEDGER = None  # se setea después de RESULTS_DIR
@@ -171,6 +173,11 @@ class ScanReport:
     markets_sustained: int
     deviation_stats: dict
     top_deviations: list[dict]
+    # "sustained" is a per-scan magnitude threshold, not persistence across scans.
+    sustained_semantics: str = H011_SUSTAINED_SEMANTICS
+    # New scans explicitly identify the identity-validation cohort that produced them.
+    identity_gate_active: bool = True
+    data_validation: str = H011_IDENTITY_GATE_VERSION
     results: list[dict] = field(default_factory=list)
 
 
@@ -867,8 +874,11 @@ def run_scan(
         "markets_with_trades": markets_with_trades,
         "markets_flagged": markets_flagged,
         "markets_sustained": markets_sustained,
+        "sustained_semantics": H011_SUSTAINED_SEMANTICS,
+        "identity_gate_active": True,
+        "data_validation": H011_IDENTITY_GATE_VERSION,
         "deviation_stats": deviation_stats,
-        "sustained_markets": [r.market for r in results if r.sustained],  # para análisis día 8
+        "sustained_markets": [r.market for r in results if r.sustained],  # umbral actual, no persistencia
         "flagged_markets": [r.market for r in results if r.flagged],  # para análisis día 8
         "jsonl_file": str(jsonl_path.name),
     }
@@ -899,6 +909,9 @@ def run_scan(
         markets_sustained=markets_sustained,
         deviation_stats=deviation_stats,
         top_deviations=top_deviations,
+        sustained_semantics=H011_SUSTAINED_SEMANTICS,
+        identity_gate_active=True,
+        data_validation=H011_IDENTITY_GATE_VERSION,
         results=[asdict(r) for r in results],
     )
 
@@ -933,7 +946,7 @@ def _print_summary(report, jsonl_path, master_log):
     print(f"  Excluded (no trades):       {report.markets_excluded_no_trades}")
     print(f"  Excluded (leg > 0.95):      {report.markets_excluded_resolved}")
     print(f"  Flagged (dev_abs >= 2pp):   {report.markets_flagged}")
-    print(f"  Sustained (dev_abs >= 5pp): {report.markets_sustained}")
+    print(f"  Umbral actual (dev_abs >= 5pp; no persistencia): {report.markets_sustained}")
     if report.deviation_stats.get("n", 0) > 0:
         print(f"\n  Deviation distribution (n={report.deviation_stats['n']}):")
         print(f"    min:    {report.deviation_stats['min']:.6f}")
