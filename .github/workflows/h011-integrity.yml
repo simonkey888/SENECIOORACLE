@@ -29,6 +29,10 @@ jobs:
         run: python -m compileall polymarket senecio_polymarket/backend
 
       - name: Run H-011 V3 tests
+        env:
+          # Tests import V3 modules directly and through their package names.
+          # Keep the repository root discoverable for both import styles.
+          PYTHONPATH: .
         run: pytest -q tests/h011_v3 tests/cp
 
       - name: Forbidden symbol scan

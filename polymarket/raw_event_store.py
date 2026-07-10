@@ -31,7 +31,10 @@ from typing import Any
 
 # This module is imported both as part of ``polymarket`` and directly by the
 # H-011 test harness (which places ``polymarket/`` on ``sys.path``).
-from validation_semantics import classify_window_cohort
+try:
+    from .validation_semantics import classify_window_cohort
+except ImportError:  # Direct-module execution in the H-011 test harness.
+    from validation_semantics import classify_window_cohort
 
 RAW_DIR = Path(__file__).parent / "results" / "raw"
 
