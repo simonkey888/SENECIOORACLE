@@ -393,21 +393,57 @@ class RiskKernel:
             self.state.vol_regime = VolRegime.EXTREME.value
 
     def trip_kill_switch(self, reason: str) -> None:
-        """Manually or automatically trip the kill switch."""
+        """Manually or automatically trip the kill switch. Persists to store."""
         self.state.kill_switch_active = True
         self.state.kill_switch_reason = reason
         self.state.kill_switch_set_at = datetime.now(timezone.utc).isoformat()
         log.error("KILL SWITCH TRIPPED: %s", reason)
+        # Persist to external store
+        try:
+            from ..kill_switch_store import save_control_state
+            save_control_state(self.state.to_dict())
+        except Exception as e:
+            log.error("Failed to persist kill switch state: %s — maintaining ACTIVE", e)
 
-    def reset_kill_switch(self, reason: str = "manual reset") -> None:
-        """Clear the kill switch (requires explicit human action)."""
-        log.warning("KILL SWITCH RESET: %s (was: %s)", reason, self.state.kill_switch_reason)
-        self.state.kill_switch_active = False
-        self.state.kill_switch_reason = ""
-        self.state.kill_switch_set_at = None
-        # Also reset cooldown + loss streak so we can resume
-        self.state.cooldown_until = None
-        self.state.consecutive_losses = 0
+    def reset_kill_switch(self, reason: str = "manual reset") -> bool:
+        """
+        Clear the kill switch (requires explicit human action).
+        REJECTED if active risk conditions (daily breach or drawdown breach) persist.
+        Does NOT clear cooldown or loss streak.
+        Returns True if accepted, False if rejected.
+        """
+        daily_breach = (
+            self.state.daily_pnl_pct
+            <= -self.cfg["max_daily_loss_pct"] * 100
+        )
+        drawdown_breach = (
+            self.state.drawdown_pct
+            >= self.cfg["max_drawdown_pct"] * 100
+        )
+
+        if daily_breach or drawdown_breach:
+            log.error(
+                "KILL SWITCH RESET REJECTED: active risk condition "
+                "daily_breach=%s drawdown_breach=%s",
+                daily_breach,
+                drawdown_breach,
+            )
+            return False
+
+        # Persist FIRST (before updating memory)
+        try:
+            from ..kill_switch_store import save_control_state
+            self.state.kill_switch_active = False
+            self.state.kill_switch_reason = ""
+            self.state.kill_switch_set_at = None
+            save_control_state(self.state.to_dict())
+        except Exception as e:
+            log.error("Failed to persist reset — maintaining ACTIVE: %s", e)
+            self.state.kill_switch_active = True
+            return False
+
+        log.warning("KILL SWITCH RESET: %s", reason)
+        return True
 
     def get_state(self) -> dict[str, Any]:
         """Snapshot for /api/risk/state endpoint."""

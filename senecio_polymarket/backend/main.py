@@ -438,7 +438,12 @@ async def portfolio_reset_kill_switch(reason: str = "manual API reset"):
     coord = _get_coordinator()
     if coord is None:
         return {"error": "portfolio coordinator not initialized"}
-    coord.reset_kill_switch(reason)
+    reset_ok = coord.reset_kill_switch(reason)
+    if not reset_ok:
+        raise HTTPException(
+            status_code=409,
+            detail="Reset rejected: active risk condition (daily breach or drawdown breach)",
+        )
     return {"status": "kill_switch_reset", "reason": reason}
 
 
