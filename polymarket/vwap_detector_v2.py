@@ -495,7 +495,12 @@ def analyze_market(
             if order_size >= H011B_MIN_ORDER_USDC:
                 # PnL simulado: size * ((1.0 / S) - 1.0)
                 # Neto de fee ya implícito en el umbral S < 0.995
-                pnl = order_size * ((1.0 / sum_vwap) - 1.0)
+                # PnL simulado con slippage penalty (Gemini Criterio A)
+                # PnL teórico: size * ((1.0 / S) - 1.0)
+                # Slippage penalty: 0.2% por leg × 2 legs = 0.4% del size
+                H011B_SLIPPAGE_PENALTY = 0.004  # 0.4% total
+                pnl_gross = order_size * ((1.0 / sum_vwap) - 1.0)
+                pnl = pnl_gross - (order_size * H011B_SLIPPAGE_PENALTY)
                 log_dry_run_trade(
                     condition_id=condition_id,
                     question=question,
