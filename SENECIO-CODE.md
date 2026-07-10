@@ -1,8 +1,8 @@
 # SENECIO — código consolidado
 
-Fuente: simonkey888/SENECIOORACLE · base commit c277c323ecf59748089f9fb15e3b35aadf852b46 · generado: 2026-07-10 09:49:01 UTC.
+Fuente: simonkey888/SENECIOORACLE · base commit 7a02bd86326417df68c7eeff88746df6c948b8cd · generado: 2026-07-10 09:52:16 UTC.
 Incluye archivos de código y configuración versionados. Excluye este archivo para evitar recursión y datos operativos mutables (senecio_output/, auditorías runtime).
-Archivos incluidos: 138.
+Archivos incluidos: 138. 
 
 ---
 
