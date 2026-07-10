@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from polymarket.validation_semantics import classify_window_cohort
+from validation_semantics import classify_window_cohort
 
 RAW_DIR = Path(__file__).parent / "results" / "raw"
 
