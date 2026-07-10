@@ -23,9 +23,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import json
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Depends, HTTPException, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+from .admin_auth import require_admin
 
 from .audit_store import AuditStore
 from .event_bus import EventBus
@@ -420,7 +422,7 @@ async def portfolio_live_gate():
     return status.to_dict()
 
 
-@app.post("/api/portfolio/kill_switch")
+@app.post("/api/portfolio/kill_switch", dependencies=[Depends(require_admin)])
 async def portfolio_kill_switch(reason: str = "manual API trigger"):
     """ACT-XXV: manually trip the kill switch (halts all new trades)."""
     coord = _get_coordinator()
@@ -430,7 +432,7 @@ async def portfolio_kill_switch(reason: str = "manual API trigger"):
     return {"status": "kill_switch_tripped", "reason": reason}
 
 
-@app.post("/api/portfolio/reset_kill_switch")
+@app.post("/api/portfolio/reset_kill_switch", dependencies=[Depends(require_admin)])
 async def portfolio_reset_kill_switch(reason: str = "manual API reset"):
     """ACT-XXV: manually reset the kill switch (requires explicit action)."""
     coord = _get_coordinator()
@@ -526,7 +528,7 @@ async def research_state():
     }
 
 
-@app.post("/api/research/run_full_pass")
+@app.post("/api/research/run_full_pass", dependencies=[Depends(require_admin)])
 async def research_run_full_pass(limit: int = Query(default=0, ge=0, le=10000)):
     """ACT-XXVII Priority 1-5: run a full research pass on loaded predictions.
 
@@ -601,7 +603,7 @@ async def research_metrics(window: int = Query(default=50, ge=10, le=1000)):
     return report.to_dict()
 
 
-@app.post("/api/research/explainer/fit")
+@app.post("/api/research/explainer/fit", dependencies=[Depends(require_admin)])
 async def research_explainer_fit(
     model_type: str = Query(default="tree"),
     prefer_shap: bool = Query(default=True),
@@ -631,7 +633,7 @@ async def research_explainer_fit(
     }
 
 
-@app.post("/api/research/explainer/explain")
+@app.post("/api/research/explainer/explain", dependencies=[Depends(require_admin)])
 async def research_explainer_explain(prediction: dict):
     """ACT-XXVII Priority 5: explain a single prediction's feature contributions.
 
