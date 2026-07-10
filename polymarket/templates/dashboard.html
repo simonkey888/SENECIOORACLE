@@ -84,8 +84,8 @@
   <main class="container">
     <header class="header">
       <div>
-        <p class="eyebrow">SENECIO H-011b · Fase 0.5</p>
-        <h1>Observabilidad <span class="sub">dry-run</span></h1>
+        <p class="eyebrow">SENECIO H-011b LEGACY · W=3600</p>
+        <h1>Observabilidad <span class="sub">legacy</span></h1>
       </div>
       <div class="status">
         <div><span class="dot" id="status-dot"></span><span id="status-text">conectando…</span></div>
@@ -93,8 +93,10 @@
       </div>
     </header>
 
-    <p class="notice" id="execution-notice">
-      Solo lectura. Las cifras del ledger son estimaciones por VWAP histórico; no son órdenes, fills ni PnL realizado.
+    <p class="notice" id="execution-notice" style="border-color:#ff453a;background:rgba(255,69,58,0.08);">
+      <strong>LEGACY DATASET — NO USAR PARA LA DECISIÓN H-011 V3.</strong><br>
+      Contiene mercados sin metadata completa, sin token binding, sin orderbooks CLOB y con ventana W=3600.<br>
+      Solo lectura. Las cifras son estimaciones por VWAP histórico; no son órdenes, fills ni PnL realizado.
     </p>
 
     <section class="viz-card" aria-labelledby="field-title">
@@ -107,9 +109,9 @@
     </section>
 
     <section class="grid" aria-label="Ledger de simulación">
-      <article class="card"><div class="card-label">Balance teórico</div><div class="card-value green" id="val-balance">—</div><div class="card-detail">base virtual + estimación</div></article>
-      <article class="card"><div class="card-label">Registros simulados</div><div class="card-value" id="val-records">—</div><div class="card-detail">no son operaciones ejecutadas</div></article>
-      <article class="card"><div class="card-label">PnL teórico</div><div class="card-value" id="val-pnl">—</div><div class="card-detail">sin resolución ni fills</div></article>
+      <article class="card"><div class="card-label">Acumulación matemática legacy</div><div class="card-value green" id="val-balance">—</div><div class="card-detail">base virtual + estimación legacy</div></article>
+      <article class="card"><div class="card-label">Señales históricas no ejecutables</div><div class="card-value" id="val-records">—</div><div class="card-detail">no son operaciones ejecutadas</div></article>
+      <article class="card"><div class="card-label">Suma de estimaciones legacy</div><div class="card-value" id="val-pnl">—</div><div class="card-detail">sin resolución ni fills</div></article>
       <article class="card"><div class="card-label">Modelo de ejecución</div><div class="card-value blue" id="val-model">—</div><div class="card-detail">estado del experimento</div></article>
     </section>
 
@@ -138,7 +140,7 @@
     </div>
 
     <footer class="footer">
-      <div>H-011b · Fase 0.5 · dry-run · sin capital real · <a href="/api/data" target="_blank" rel="noopener noreferrer">API</a> · <a href="/healthz" target="_blank" rel="noopener noreferrer">salud</a></div>
+      <div>LEGACY · H-011b · W=3600 · sin capital real · <a href="/api/data" target="_blank" rel="noopener noreferrer">API</a> · <a href="/healthz" target="_blank" rel="noopener noreferrer">salud</a></div>
       <div>Visualización original inspirada en el lenguaje de data portraits de <a href="https://wc26.bogachev.fr/" target="_blank" rel="noopener noreferrer">Alexander Bogachev</a>; sin reutilizar su código ni sus assets.</div>
     </footer>
   </main>
