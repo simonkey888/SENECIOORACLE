@@ -84,6 +84,22 @@ DEFAULT_WINDOW_SEC = 300     # 5 minutos
 # Default: 60 segundos (recomendación Gemini).
 STALENESS_THRESHOLD_SEC = int(os.environ.get("H011_STALENESS_THRESHOLD", "60"))
 
+# ═══════════════════════════════════════════════════════════════════════
+# H-011b Configuration (DIRECTIONAL ARBITRAGE — Dry-Run)
+# ═══════════════════════════════════════════════════════════════════════
+# Solo se ejecuta arbitraje cuando S < 1.0 - fee_proxy (underpriced)
+H011B_FEE_PROXY = 0.005        # 0.5% estimado de spread/slippage
+H011B_ENTRY_THRESHOLD = 1.0 - H011B_FEE_PROXY  # S < 0.995
+H011B_MIN_DEV_SIGNED = -H011B_FEE_PROXY         # dev_signed < -0.005
+
+# Kelly sizing simplificado (Gemini + CloddsBot)
+H011B_MAX_ORDER_USDC = 50.0    # cap fijo por trade
+H011B_KELLY_FRACTION = 0.10    # 10% del volumen de trades en ventana
+H011B_VIRTUAL_BALANCE_INITIAL = 1000.0
+
+# Dry-run ledger path (definido después de RESULTS_DIR más abajo)
+DRY_RUN_LEDGER = None  # se setea después de RESULTS_DIR
+
 # Paginación client-side
 PAGE_SIZE = 500              # max soportado por el endpoint
 MAX_PAGES_PER_MARKET = 20    # límite de paginación por mercado (suficiente para ventanas ≤30min en mercados líquidos)
@@ -92,6 +108,9 @@ REQUEST_DELAY_SEC = 0.15     # delay entre requests para respetar Cloudflare
 # Output paths
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+
+# H-011b dry-run ledger path (ahora que RESULTS_DIR existe)
+DRY_RUN_LEDGER = RESULTS_DIR / "dry_run_ledger.jsonl"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -449,7 +468,73 @@ def analyze_market(
     result.flagged = dev_abs_val >= THRESHOLD_DETECTION
     result.sustained = dev_abs_val >= THRESHOLD_SUSTAINED
 
+    # ════════════════════════════════════════════════════════════════════
+    # H-011b DRY-RUN LOGIC (DIRECTIONAL ARBITRAGE)
+    # ════════════════════════════════════════════════════════════════════
+    # Solo se ejecuta arbitraje simulado cuando:
+    #   1. dev_signed < H011B_MIN_DEV_SIGNED (-0.005) → underpriced
+    #   2. sum_vwap < H011B_ENTRY_THRESHOLD (0.995) → S < 1.0 - fee_proxy
+    # Circuit breakers ya aplicados arriba: staleness filter + leg > 0.95
+    if dev_signed_val < H011B_MIN_DEV_SIGNED and sum_vwap < H011B_ENTRY_THRESHOLD:
+        # Kelly sizing simplificado: min(10% del volumen de trades, $50)
+        total_volume = vol_yes + vol_no
+        kelly_size = total_volume * H011B_KELLY_FRACTION
+        order_size = min(kelly_size, H011B_MAX_ORDER_USDC)
+        if order_size > 0.01:  # mínimo $0.01 para registrar
+            # PnL estimado: comprar ambas patas a costo S*size, recibir size al resolution
+            # pnl = size * ((1.0 / S) - 1.0)
+            pnl = order_size * ((1.0 / sum_vwap) - 1.0)
+            log_dry_run_trade(
+                condition_id=condition_id,
+                question=question,
+                price_yes=v_yes,
+                price_no=v_no,
+                sum_vwap=sum_vwap,
+                size=order_size,
+                pnl=pnl,
+                timestamp=snapshot,
+            )
+
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# H-011b Dry-Run Ledger
+# ═══════════════════════════════════════════════════════════════════════
+
+def log_dry_run_trade(
+    condition_id: str,
+    question: str,
+    price_yes: float,
+    price_no: float,
+    sum_vwap: float,
+    size: float,
+    pnl: float,
+    timestamp: str,
+) -> None:
+    """
+    Escribe una línea en dry_run_ledger.jsonl (append-only).
+    Cada línea representa un trade simulado de arbitraje H-011b.
+
+    Esquema JSON estricto (según spec Gemini):
+    {"timestamp": "ISO-8601", "condition_id": "str", "question": "str",
+     "price_yes": float, "price_no": float, "sum": float, "size": float, "pnl": float}
+    """
+    entry = {
+        "timestamp": timestamp,
+        "condition_id": condition_id,
+        "question": question[:200],
+        "price_yes": round(price_yes, 6),
+        "price_no": round(price_no, 6),
+        "sum": round(sum_vwap, 6),
+        "size": round(size, 2),
+        "pnl": round(pnl, 4),
+    }
+    try:
+        with open(DRY_RUN_LEDGER, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"    [H-011b] Error writing to dry_run_ledger: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
