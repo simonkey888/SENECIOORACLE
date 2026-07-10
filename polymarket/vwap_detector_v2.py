@@ -1005,7 +1005,7 @@ def run_monitor_mode(window_s: int, estimator: str = "vwap") -> ScanReport:
 # ═══════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="SENECIO H-011 VWAP Detector V2 — FASE_0 READ-ONLY")
+    parser = argparse.ArgumentParser(description="SENECIO H-011 VWAP Detector — READ-ONLY")
     parser.add_argument("--mode", choices=["scan", "monitor"], default="scan",
                         help="scan: one-shot con --max-markets; monitor: top-100 para cron")
     parser.add_argument("--max-markets", type=int, default=30,
@@ -1016,20 +1016,91 @@ def main():
                         help="Estimator: vwap (default) o ewma con half-life=window")
     parser.add_argument("--gamma-limit", type=int, default=200,
                         help="How many markets to fetch from Gamma (default 200)")
+    parser.add_argument("--pipeline", choices=["legacy-v2", "integrity-v3"], default=None,
+                        help="Pipeline version: legacy-v2 (default) or integrity-v3")
     args = parser.parse_args()
 
-    print(f"SENECIO H-011 — VWAP Detector V2")
+    # Pipeline selection: CLI arg → env var → default
+    pipeline = args.pipeline
+    if pipeline is None:
+        pipeline = os.environ.get("H011_PIPELINE_VERSION", "legacy-v2")
+
+    print(f"SENECIO H-011 — VWAP Detector")
+    print(f"Pipeline: {pipeline}")
     print(f"FASE_0 — READ-ONLY — NO ORDERS — NO STATE CHANGES")
-    print(f"Pre-registro: window={args.window}s, det>={THRESHOLD_DETECTION}, "
-          f"sust>={THRESHOLD_SUSTAINED}, exclude_leg>{EXCLUDE_LEG_ABOVE}")
-    print()
 
-    if args.mode == "monitor":
-        report = run_monitor_mode(args.window, args.estimator)
+    if pipeline == "integrity-v3":
+        # V3 pipeline
+        from h011_v3_pipeline import (
+            H011V3Config, run_scan_v3,
+            HttpxDataApiClient, HttpxClobClient,
+        )
+        from polymarket_connector import fetch_all_active_markets
+
+        config = H011V3Config(window_s=args.window)
+        config.validate()  # Assert W=300, paper_only, live_capital_locked
+
+        print(f"V3 Config: {config}")
+        print(f"Cohort: h011-v3-w300-vwap-structure-v2")
+        print()
+
+        # Fetch markets from Gamma
+        import json as _json
+        markets = fetch_all_active_markets(limit=args.gamma_limit)
+
+        # Pre-filter resolved
+        pre_filtered = []
+        for m in markets:
+            try:
+                prices_raw = m.get("outcomePrices", "[]")
+                prices = _json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+                if isinstance(prices, list) and len(prices) == 2:
+                    p_yes, p_no = float(prices[0]), float(prices[1])
+                    if p_yes > 0.95 or p_no > 0.95:
+                        continue
+            except Exception:
+                continue
+            pre_filtered.append(m)
+
+        pre_filtered.sort(key=lambda m: float(m.get("volumeNum", 0) or 0), reverse=True)
+        markets_to_scan = pre_filtered[:args.max_markets]
+
+        now_ts = int(time.time())
+
+        if args.mode == "monitor":
+            while True:
+                result = run_scan_v3(
+                    markets=markets_to_scan,
+                    now_ts=now_ts,
+                    config=config,
+                    data_api_client=HttpxDataApiClient(),
+                    clob_client=HttpxClobClient(),
+                )
+                print(f"\n[V3] Scan complete. Sleeping 900s...")
+                time.sleep(900)
+        else:
+            result = run_scan_v3(
+                markets=markets_to_scan,
+                now_ts=now_ts,
+                config=config,
+                data_api_client=HttpxDataApiClient(),
+                clob_client=HttpxClobClient(),
+            )
+            sys.exit(0 if result["scan"]["markets_processed"] > 0 else 1)
+
     else:
-        report = run_scan(args.max_markets, args.window, args.estimator, args.gamma_limit)
+        # Legacy V2 pipeline
+        print(f"Pre-registro: window={args.window}s, det>={THRESHOLD_DETECTION}, "
+              f"sust>={THRESHOLD_SUSTAINED}, exclude_leg>{EXCLUDE_LEG_ABOVE}")
+        print(f"LEGACY: H011_LEGACY_WRITE_ENABLED={H011_LEGACY_WRITE_ENABLED}")
+        print()
 
-    sys.exit(0 if report.markets_scanned > 0 else 1)
+        if args.mode == "monitor":
+            report = run_monitor_mode(args.window, args.estimator)
+        else:
+            report = run_scan(args.max_markets, args.window, args.estimator, args.gamma_limit)
+
+        sys.exit(0 if report.markets_scanned > 0 else 1)
 
 
 if __name__ == "__main__":
