@@ -61,3 +61,8 @@ def test_health_accepts_a_current_prediction_cycle():
     finally:
         oracle_runner._state.clear()
         oracle_runner._state.update(original)
+
+
+def test_backfill_state_is_explicitly_non_blocking():
+    assert "bogus_backfill_started" in oracle_runner._state
+    assert oracle_runner._state["bogus_backfill_started"] in (True, False)

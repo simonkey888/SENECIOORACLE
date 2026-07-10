@@ -65,6 +65,7 @@ _state: dict[str, Any] = {
     "verified_total": 0,              # running total of verified predictions
     # ACT-XXII-prereq: bogus-outcome backfill state
     "bogus_backfill_done": False,     # set True after _backfill_bogus_outcomes() runs once
+    "bogus_backfill_started": False,  # run after the first fresh prediction cycle
     "bogus_backfill_count": None,     # how many rows re-settled with historical price
     "bogus_backfill_errors": None,    # how many rows we couldn't re-settle (no historical price)
     # ACT XXIII: directional gate state
@@ -877,15 +878,6 @@ async def _oracle_loop() -> None:
     log.info("oracle_loop waiting %ds before first cycle...", INITIAL_DELAY_S)
     await asyncio.sleep(INITIAL_DELAY_S)
 
-    # ACT-XXII-prereq: ONE-TIME backfill of bogus outcomes that were settled
-    # with current-price instead of historical price. Runs once at startup
-    # before the first prediction cycle, so the dashboard reflects correct
-    # win rates as soon as possible.
-    try:
-        await _backfill_bogus_outcomes()
-    except Exception as e:
-        log.exception("backfill error (non-fatal, continuing): %s", e)
-
     while True:
         cycle_start = datetime.now(timezone.utc)
         _state["last_cycle_at"] = cycle_start.isoformat()
@@ -912,6 +904,16 @@ async def _oracle_loop() -> None:
             # Small breather between symbols to keep memory bounded
             await asyncio.sleep(2)
 
+        # Historical repair is intentionally launched only AFTER the first
+        # fresh prediction cycle.  It can take tens of minutes and must never
+        # delay current forecasts after a deploy or restart.
+        if not _state["bogus_backfill_done"] and not _state["bogus_backfill_started"]:
+            _state["bogus_backfill_started"] = True
+            backfill_task = asyncio.create_task(
+                _run_backfill_background(), name="oracle_outcome_backfill"
+            )
+            _tasks.append(backfill_task)
+
         # Schedule next cycle
         next_at = datetime.now(timezone.utc).timestamp() + CYCLE_INTERVAL_S
         _state["next_cycle_at"] = datetime.fromtimestamp(next_at, tz=timezone.utc).isoformat()
@@ -920,6 +922,17 @@ async def _oracle_loop() -> None:
             _state["cycles_run"], _state["next_cycle_at"],
         )
         await asyncio.sleep(CYCLE_INTERVAL_S)
+
+
+async def _run_backfill_background() -> None:
+    """Repair historical outcomes without blocking fresh predictions."""
+    try:
+        await _backfill_bogus_outcomes()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.exception("background backfill error (non-fatal): %s", e)
+        _state["bogus_backfill_started"] = False
 
 
 _tasks: list[asyncio.Task] = []
