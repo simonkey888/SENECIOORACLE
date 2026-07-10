@@ -11,7 +11,7 @@ can contain multiple fills. Uses a composite dedup key.
 """
 from __future__ import annotations
 
-from polymarket.market_structure import (
+from market_structure import (
     MarketStructure,
     MarketStructureError,
     canonical_hash,
