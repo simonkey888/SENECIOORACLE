@@ -90,6 +90,8 @@ SYMBOLS = ["ETH/USDT", "BTC/USDT"]
 TIMEFRAME = "15m"
 INITIAL_DELAY_S = 30    # wait for uvicorn + scheduler to stabilize
 MAX_CONCURRENT_PREDICTIONS = 1  # serialize to keep memory bounded
+HEALTH_STARTUP_GRACE_S = 300
+HEALTH_MAX_CYCLE_AGE_S = (CYCLE_INTERVAL_S * 2) + 300
 
 # ACT XXIII: settlement windows (seconds after prediction ts)
 WINDOW_15M_S = 900
@@ -147,6 +149,79 @@ def _seed_state_from_existing() -> None:
 def get_state() -> dict[str, Any]:
     """Public accessor for /api/health and /api/oracle/state."""
     return dict(_state)
+
+
+def _parse_utc_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an ISO timestamp as UTC; invalid or absent values remain unknown."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_health_state(now: Optional[datetime] = None) -> dict[str, Any]:
+    """Return an honest liveness/freshness view for the paper predictor.
+
+    The API process can be alive while the prediction loop is stale.  This
+    separates those states so the platform can restart a wedged container
+    without treating model accuracy as an availability signal.
+    """
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    started_at = _parse_utc_timestamp(_state.get("started_at"))
+    last_cycle_at = _parse_utc_timestamp(_state.get("last_cycle_at"))
+    last_prediction_at = _parse_utc_timestamp(_state.get("last_prediction_ts"))
+
+    startup_age_s = (now_utc - started_at).total_seconds() if started_at else None
+    cycle_age_s = (now_utc - last_cycle_at).total_seconds() if last_cycle_at else None
+    prediction_age_s = (
+        (now_utc - last_prediction_at).total_seconds() if last_prediction_at else None
+    )
+
+    if started_at is None:
+        status = "NOT_STARTED"
+        healthy = False
+        reason = "oracle runner has not started"
+    elif last_cycle_at is None and startup_age_s is not None and startup_age_s <= HEALTH_STARTUP_GRACE_S:
+        status = "STARTING"
+        healthy = True
+        reason = "waiting for the first prediction cycle"
+    elif last_cycle_at is None:
+        status = "STALE"
+        healthy = False
+        reason = "first prediction cycle did not start within the grace period"
+    elif cycle_age_s is not None and cycle_age_s > HEALTH_MAX_CYCLE_AGE_S:
+        status = "STALE"
+        healthy = False
+        reason = "prediction loop has not completed on schedule"
+    else:
+        status = "HEALTHY"
+        healthy = True
+        reason = "prediction loop is current"
+
+    return {
+        "ok": healthy,
+        "status": status,
+        "reason": reason,
+        "paper_only": True,
+        "live_capital_locked": True,
+        "orders_enabled": False,
+        "cycle_interval_s": CYCLE_INTERVAL_S,
+        "max_cycle_age_s": HEALTH_MAX_CYCLE_AGE_S,
+        "startup_age_s": round(startup_age_s, 3) if startup_age_s is not None else None,
+        "cycle_age_s": round(cycle_age_s, 3) if cycle_age_s is not None else None,
+        "prediction_age_s": round(prediction_age_s, 3) if prediction_age_s is not None else None,
+        "last_cycle_at": _state.get("last_cycle_at"),
+        "last_prediction_ts": _state.get("last_prediction_ts"),
+        "last_prediction_symbol": _state.get("last_prediction_symbol"),
+        "cycles_run": _state.get("cycles_run", 0),
+        "cycles_failed": _state.get("cycles_failed", 0),
+        "last_error": _state.get("last_error"),
+    }
 
 
 async def _run_one_prediction(symbol: str) -> Optional[dict]:

@@ -152,6 +152,13 @@ async def oracle_state():
     }
 
 
+@app.get("/api/oracle/healthz")
+async def oracle_healthz():
+    """Platform health probe for the real paper-prediction loop."""
+    payload = oracle_runner.get_health_state()
+    return JSONResponse(payload, status_code=200 if payload["ok"] else 503)
+
+
 @app.get("/api/oracle/predictions")
 async def oracle_predictions(limit: int = Query(default=20, le=200)):
     """Return last N predictions from predictions.jsonl (most recent first)."""
