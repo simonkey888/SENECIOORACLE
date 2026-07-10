@@ -23,18 +23,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install httpx numpy fastapi uvicorn pytest
+        run: pip install httpx numpy fastapi uvicorn pytest
 
       - name: Compile all Python files
-        run: |
-          python -m compileall polymarket senecio_polymarket/backend
+        run: python -m compileall polymarket senecio_polymarket/backend
 
-      - name: Run tests (strict — no || true)
-        run: |
-          pytest -q tests/h011_v3
+      - name: Run H-011 V3 tests
+        run: pytest -q tests/h011_v3 tests/cp
 
       - name: Forbidden symbol scan
         run: |
-          ! grep -r "post_order\|place_order\|submit_order\|execute_order\|private_key\|PM_PRIVATE_KEY" polymarket/ 2>/dev/null
-          ! grep -r "ghp_\|nf-eyJ" polymarket/ senecio_polymarket/backend/ 2>/dev/null
+          ! grep -r "post_order\|place_order\|submit_order\|execute_order\|private_key\|PM_PRIVATE_KEY\|ghp_\|nf-eyJ" polymarket/ senecio_polymarket/backend/ 2>/dev/null
