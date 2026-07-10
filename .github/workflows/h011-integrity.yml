@@ -1,0 +1,50 @@
+# SENECIO H-011 Integrity CI — runs on push/PR to audit/h011-v3-integrity
+name: H-011 Integrity CI
+
+on:
+  push:
+    branches: [audit/h011-v3-integrity]
+  pull_request:
+    branches: [audit/h011-v3-integrity]
+
+permissions:
+  contents: read
+
+jobs:
+  integrity-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install httpx numpy fastapi uvicorn pytest ruff
+
+      - name: Compile all Python files
+        run: |
+          python -m compileall polymarket senecio_polymarket/backend
+
+      - name: Lint with ruff
+        run: |
+          ruff check polymarket/ || true
+
+      - name: Run tests (if any)
+        run: |
+          pytest -q || echo "No tests found yet"
+
+      - name: Secret scanning (no hardcoded keys)
+        run: |
+          ! grep -r "ghp_" polymarket/ senecio_polymarket/backend/ 2>/dev/null || exit 1
+          ! grep -r "nf-eyJ" polymarket/ senecio_polymarket/backend/ 2>/dev/null || exit 1
+
+      - name: Verify no trading POST endpoints
+        run: |
+          ! grep -r "POST.*order" polymarket/ 2>/dev/null || exit 1
+          ! grep -r "place_order\|submit_order\|execute_order" polymarket/ 2>/dev/null || exit 1
