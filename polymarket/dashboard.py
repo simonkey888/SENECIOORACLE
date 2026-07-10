@@ -24,6 +24,7 @@ RESULTS_DIR = Path(os.environ.get("H011_RESULTS_DIR", "/app/polymarket/results")
 TEMPLATE_FILE = Path(__file__).with_name("templates") / "dashboard.html"
 VIRTUAL_BALANCE_INITIAL = 1000.0
 FRESH_SCAN_MAX_AGE_SEC = int(os.environ.get("H011_FRESH_SCAN_MAX_AGE_SEC", "1200"))
+VERIFIED_LEDGER_VALIDATION = "condition_id_match_v1"
 
 
 @dataclass(frozen=True)
@@ -86,15 +87,22 @@ def latest_scan_file() -> Path | None:
 
 def dry_run_stats(ledger: JsonlRead) -> dict[str, Any]:
     """Resume el ledger sin presentarlo como rendimiento realizado."""
-    theoretical_pnl = sum(as_number(row.get("pnl")) for row in ledger.rows)
-    positive_records = sum(as_number(row.get("pnl")) > 0 for row in ledger.rows)
-    total_records = len(ledger.rows)
+    verified_rows = [
+        row
+        for row in ledger.rows
+        if row.get("data_validation") == VERIFIED_LEDGER_VALIDATION
+    ]
+    unverified_records = len(ledger.rows) - len(verified_rows)
+    theoretical_pnl = sum(as_number(row.get("pnl")) for row in verified_rows)
+    positive_records = sum(as_number(row.get("pnl")) > 0 for row in verified_rows)
+    total_records = len(verified_rows)
     return {
         "virtual_balance_theoretical": round(VIRTUAL_BALANCE_INITIAL + theoretical_pnl, 2),
         "theoretical_pnl": round(theoretical_pnl, 2),
         "total_records": total_records,
         "positive_expected_records": positive_records,
-        "trades": ledger.rows[-10:],
+        "trades": verified_rows[-10:],
+        "unverified_records": unverified_records,
         "execution_model": "historical_vwap_estimate",
         "is_realized": False,
         # Compatibilidad temporal con clientes que todavía leen estas claves.

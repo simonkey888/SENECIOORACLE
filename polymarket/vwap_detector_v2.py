@@ -96,6 +96,7 @@ H011B_DEPTH_FRACTION = 0.10    # 10% de la liquidez activa
 H011B_MIN_ORDER_USDC = 1.0     # ignorar transacciones < $1
 H011B_MIN_DEPTH_USDC = 1.0     # depth_limit debe ser > $1 para operar
 H011B_VIRTUAL_BALANCE_INITIAL = 1000.0
+H011B_LEDGER_DATA_VALIDATION = "condition_id_match_v1"
 
 # Dry-run ledger path (definido después de RESULTS_DIR más abajo)
 DRY_RUN_LEDGER = None  # se setea después de RESULTS_DIR
@@ -201,10 +202,17 @@ def fetch_trades_paginated(
       - Se descartan trades con ts < window_start_ts (fuera de ventana)
       - Se descartan duplicados por transactionHash
 
-    Returns: lista de trades únicos dentro de [window_start_ts, now_ts)
+    Returns: lista de trades únicos dentro de [window_start_ts, now_ts).
+
+    Fail-closed data-integrity rule:
+      The server must return conditionId == condition_id for every trade.
+      If the remote filter is ignored or returns the global stream, do not
+      attribute those trades to this market or create a dry-run record.
     """
     url = f"{DATA_API_BASE}/trades"
     all_trades_by_hash: dict[str, dict] = {}
+    expected_condition_id = condition_id.lower()
+    mismatched_trades = 0
 
     try:
         with httpx.Client(timeout=15.0) as c:
@@ -220,6 +228,19 @@ def fetch_trades_paginated(
                     break  # HTTP 400 = offset excede límite, no más historia
                 data = r.json()
                 if not isinstance(data, list) or not data:
+                    break
+
+                returned_condition_ids = {
+                    str(t.get("conditionId", "")).lower()
+                    for t in data
+                    if t.get("conditionId")
+                }
+                if expected_condition_id not in returned_condition_ids:
+                    print(
+                        "    [data-api] REJECTED market filter mismatch "
+                        f"requested={condition_id[:18]}... "
+                        f"returned={next(iter(returned_condition_ids), 'none')[:18]}..."
+                    )
                     break
 
                 # Verificar si toda la página está fuera de ventana
@@ -238,6 +259,9 @@ def fetch_trades_paginated(
 
                 # Filtrar trades dentro de [window_start_ts, now_ts)
                 for t in data:
+                    if str(t.get("conditionId", "")).lower() != expected_condition_id:
+                        mismatched_trades += 1
+                        continue
                     ts = t.get("timestamp", 0)
                     if not isinstance(ts, (int, float)):
                         continue
@@ -261,6 +285,11 @@ def fetch_trades_paginated(
     except (httpx.TimeoutException, httpx.HTTPError) as e:
         print(f"    [data-api] Error fetching trades for {condition_id[:18]}...: {e}")
 
+    if mismatched_trades:
+        print(
+            f"    [data-api] Rejected {mismatched_trades} trades with a foreign conditionId "
+            f"for {condition_id[:18]}..."
+        )
     return list(all_trades_by_hash.values())
 
 
@@ -537,8 +566,12 @@ def get_current_virtual_balance() -> float:
                     continue
                 try:
                     trade = json.loads(line)
-                    accumulated_pnl += trade.get("pnl", 0.0)
+                    if trade.get("data_validation") != H011B_LEDGER_DATA_VALIDATION:
+                        continue
+                    accumulated_pnl += float(trade.get("pnl", 0.0))
                 except json.JSONDecodeError:
+                    continue
+                except (TypeError, ValueError):
                     continue
         return round(base_balance + accumulated_pnl, 4)
     except OSError:
@@ -563,7 +596,7 @@ def log_dry_run_trade(
     Esquema JSON estricto (según spec Gemini + columnas extra):
     {"timestamp": "ISO-8601", "condition_id": "str", "question": "str",
      "price_yes": float, "price_no": float, "sum": float, "edge": float,
-     "size": float, "pnl": float}
+     "size": float, "pnl": float, "data_validation": "condition_id_match_v1"}
     """
     entry = {
         "timestamp": timestamp,
@@ -575,6 +608,7 @@ def log_dry_run_trade(
         "edge": round(edge, 6),
         "size": round(size, 2),
         "pnl": round(pnl, 4),
+        "data_validation": H011B_LEDGER_DATA_VALIDATION,
     }
     try:
         with open(DRY_RUN_LEDGER, "a", encoding="utf-8") as f:

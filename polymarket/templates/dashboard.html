@@ -375,6 +375,7 @@
       if (!freshness.is_fresh) warnings.push("El último scan no está dentro de la ventana de frescura configurada.");
       if (coverage !== null && coverage !== undefined && coverage < 25) warnings.push("Cobertura baja: pocos mercados escaneados tuvieron trades en la ventana.");
       if (corrupt) warnings.push("Hay JSONL corrupto o incompleto: el dashboard lo excluyó de los cálculos.");
+      if (number(dryRun.unverified_records) > 0) warnings.push(number(dryRun.unverified_records) + " registro(s) legacy fueron invalidados por no comprobar condición de mercado.");
       const notice = byId("execution-notice");
       notice.className = "notice" + (warnings.length ? " warning" : "");
       notice.textContent = "Solo lectura. Sin órdenes, fills, profundidad CLOB, latencia de ejecución ni PnL por resolución. " +
