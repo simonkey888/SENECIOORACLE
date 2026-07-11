@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .engine_contracts import h011_contract, oracle_contract
+
 
 BTC_MARKERS = ("bitcoin", "btc")
 
@@ -18,6 +20,8 @@ def _is_btc_market(record: dict[str, Any]) -> bool:
 
 
 def arbitrate(oracle: dict[str, Any], h011_state: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
+    alpha = oracle_contract(oracle)
+    execution = h011_contract(h011_state, operations)
     result: dict[str, Any] = {
         "version": "arbiter-shadow-v3.0",
         "mode": "PAPER_ONLY",
@@ -26,6 +30,10 @@ def arbitrate(oracle: dict[str, Any], h011_state: dict[str, Any], operations: li
         "decision": "UNKNOWN",
         "action": "FLAT",
         "reasons": [],
+        "contracts": {
+            "alpha_signal": {**alpha.model_dump(mode="json"), "evidence_hash": alpha.evidence_hash},
+            "execution_evidence": {**execution.model_dump(mode="json"), "evidence_hash": execution.evidence_hash},
+        },
         "oracle": {
             "action": oracle.get("shadow_action"),
             "gate_status": oracle.get("gate_status"),
