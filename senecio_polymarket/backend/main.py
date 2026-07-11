@@ -174,6 +174,37 @@ async def oracle_btc_v2_shadow():
     return payload
 
 
+@app.get("/api/oracle/arbiter-v3")
+async def oracle_arbiter_v3():
+    """Cross-check the BTC oracle against H-011 without enabling execution."""
+    import httpx
+    from . import supabase_client
+    from .arbiter_shadow_v3 import arbitrate
+    from .btc_shadow_v2 import evaluate_btc_shadow
+
+    rows = await supabase_client.fetch_predictions(limit=500, symbol="BTCUSDT")
+    current = next((row for row in rows if row.get("prediction") in ("LONG", "SHORT", "FLAT")), None)
+    history = [row for row in rows if row.get("outcome") in ("WIN", "LOSS") and row is not current]
+    oracle = evaluate_btc_shadow(current, history)
+    oracle["source_ts"] = current.get("ts") if current else None
+    h011_url = "https://h011-web--senecio-h011--wbjggn89fnf8.code.run"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            state_response, operations_response = await client.get(f"{h011_url}/api/v3/state"), await client.get(f"{h011_url}/api/v3/operations")
+            state_response.raise_for_status()
+            operations_response.raise_for_status()
+            state = state_response.json()
+            operations = operations_response.json().get("operations") or []
+    except Exception as exc:
+        return {
+            "version": "arbiter-shadow-v3.0", "mode": "PAPER_ONLY",
+            "orders_enabled": False, "live_capital_locked": True,
+            "decision": "UNKNOWN", "action": "FLAT",
+            "reasons": ["H011_UNAVAILABLE"], "detail": str(exc)[:160],
+        }
+    return arbitrate(oracle, state, operations)
+
+
 @app.get("/api/oracle/predictions")
 async def oracle_predictions(limit: int = Query(default=20, le=200)):
     """Return last N predictions from predictions.jsonl (most recent first)."""

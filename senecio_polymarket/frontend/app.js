@@ -529,6 +529,8 @@
     const next = document.getElementById('score-next');
     const shadow = document.getElementById('score-btc-shadow');
     const shadowDetail = document.getElementById('score-btc-shadow-detail');
+    const arbiter = document.getElementById('score-arbiter');
+    const arbiterDetail = document.getElementById('score-arbiter-detail');
     if (total) total.textContent = s.total_predictions ?? h.oracle?.supabase_total ?? '—';
     if (verified) verified.textContent = s.verified ?? '—';
     if (winrate) {
@@ -552,6 +554,11 @@
           ? `recent n=${c.n} · posterior=${((c.posterior_accuracy || 0) * 100).toFixed(1)}% · lower95=${((c.wilson_lower_95 || 0) * 100).toFixed(1)}%`
           : (v2.reasons || ['no verified cohort']).join(' · ');
       }
+    }
+    if (arbiter) {
+      const v3 = oracle.arbiter || {};
+      arbiter.textContent = `${v3.action || 'FLAT'} · ${v3.decision || 'UNKNOWN'}`;
+      if (arbiterDetail) arbiterDetail.textContent = (v3.reasons || ['waiting for both engines']).join(' · ');
     }
   }
 
@@ -617,16 +624,18 @@
 
   async function fetchOracleData() {
     try {
-      const [predRes, scoreRes, healthRes, shadowRes] = await Promise.all([
+      const [predRes, scoreRes, healthRes, shadowRes, arbiterRes] = await Promise.all([
         fetch('/api/oracle/predictions/db?limit=50').then(r => r.json()),
         fetch('/api/oracle/score').then(r => r.json()).catch(() => null),
         fetch('/api/health').then(r => r.json()),
         fetch('/api/oracle/btc-v2-shadow').then(r => r.json()).catch(() => null),
+        fetch('/api/oracle/arbiter-v3').then(r => r.json()).catch(() => null),
       ]);
       oracle.predictions = predRes.predictions || [];
       oracle.score = scoreRes;
       oracle.health = healthRes;
       oracle.shadow = shadowRes;
+      oracle.arbiter = arbiterRes;
       renderOracleTable();
       renderOracleScore();
       drawOracleConfChart();
