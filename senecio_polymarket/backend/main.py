@@ -159,6 +159,21 @@ async def oracle_healthz():
     return JSONResponse(payload, status_code=200 if payload["ok"] else 503)
 
 
+@app.get("/api/oracle/btc-v2-shadow")
+async def oracle_btc_v2_shadow():
+    """Fail-closed BTC calibration overlay; informational and paper-only."""
+    from . import supabase_client
+    from .btc_shadow_v2 import evaluate_btc_shadow
+
+    rows = await supabase_client.fetch_predictions(limit=500, symbol="BTCUSDT")
+    current = next((row for row in rows if row.get("prediction") in ("LONG", "SHORT", "FLAT")), None)
+    history = [row for row in rows if row.get("outcome") in ("WIN", "LOSS") and row is not current]
+    payload = evaluate_btc_shadow(current, history)
+    payload["source_ts"] = current.get("ts") if current else None
+    payload["history_rows_received"] = len(rows)
+    return payload
+
+
 @app.get("/api/oracle/predictions")
 async def oracle_predictions(limit: int = Query(default=20, le=200)):
     """Return last N predictions from predictions.jsonl (most recent first)."""

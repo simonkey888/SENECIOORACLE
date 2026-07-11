@@ -527,6 +527,8 @@
     const verified = document.getElementById('score-verified');
     const winrate = document.getElementById('score-winrate');
     const next = document.getElementById('score-next');
+    const shadow = document.getElementById('score-btc-shadow');
+    const shadowDetail = document.getElementById('score-btc-shadow-detail');
     if (total) total.textContent = s.total_predictions ?? h.oracle?.supabase_total ?? '—';
     if (verified) verified.textContent = s.verified ?? '—';
     if (winrate) {
@@ -536,6 +538,21 @@
       if (card) card.classList.toggle('bad', wr != null && wr < 50);
     }
     if (next) next.textContent = fmtCountdown(h.oracle?.next_cycle_at);
+    if (shadow) {
+      const v2 = oracle.shadow || {};
+      shadow.textContent = `${v2.shadow_action || 'FLAT'} · ${v2.gate_status || 'UNKNOWN'}`;
+      const card = shadow.closest('.score-card');
+      if (card) {
+        card.classList.toggle('pass', v2.gate_status === 'PASS');
+        card.classList.toggle('reject', v2.gate_status === 'REJECT');
+      }
+      if (shadowDetail) {
+        const c = v2.cohort || {};
+        shadowDetail.textContent = c.n != null
+          ? `recent n=${c.n} · posterior=${((c.posterior_accuracy || 0) * 100).toFixed(1)}% · lower95=${((c.wilson_lower_95 || 0) * 100).toFixed(1)}%`
+          : (v2.reasons || ['no verified cohort']).join(' · ');
+      }
+    }
   }
 
   function drawOracleConfChart() {
@@ -600,14 +617,16 @@
 
   async function fetchOracleData() {
     try {
-      const [predRes, scoreRes, healthRes] = await Promise.all([
+      const [predRes, scoreRes, healthRes, shadowRes] = await Promise.all([
         fetch('/api/oracle/predictions/db?limit=50').then(r => r.json()),
         fetch('/api/oracle/score').then(r => r.json()).catch(() => null),
         fetch('/api/health').then(r => r.json()),
+        fetch('/api/oracle/btc-v2-shadow').then(r => r.json()).catch(() => null),
       ]);
       oracle.predictions = predRes.predictions || [];
       oracle.score = scoreRes;
       oracle.health = healthRes;
+      oracle.shadow = shadowRes;
       renderOracleTable();
       renderOracleScore();
       drawOracleConfChart();

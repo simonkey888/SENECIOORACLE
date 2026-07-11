@@ -547,6 +547,11 @@ footer {
 .score-card.score-win.bad .score-value {
   color: var(--danger);
 }
+.score-card.score-shadow { grid-column: 1 / -1; }
+.score-card.score-shadow .score-value { color: var(--hold); }
+.score-card.score-shadow.pass .score-value { color: var(--accent); }
+.score-card.score-shadow.reject .score-value { color: var(--danger); }
+.score-detail { color: var(--text-faint); font: 9px var(--mono); }
 
 /* Oracle table — direction color coding */
 #oracle-table tbody td.pred-long   { color: var(--long);   font-weight: 600; }
