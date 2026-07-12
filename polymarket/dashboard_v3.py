@@ -64,10 +64,7 @@ def api_integrity():
     replay_verified = bool(snap.get("replay", {}).get("verified") is True)
     bundles = sorted(V3_RAW_DIR.glob("bundle_*.json"))
     replay_result = replay_bundle(bundles[-1]) if bundles else None
-    replay_verified = bool(replay_result and replay_result["semantic_hash_matches"]
-                           and replay_result["config_sha_matches"]
-                           and replay_result["raw_complete"]
-                           and replay_result["artifact_hash_matches"])
+    replay_verified = bool(replay_result and replay_result["replay_verified"])
     return JSONResponse({
         "pipeline_version": snap.get("pipeline_version", "h011-integrity-v3"),
         "cohort_id": snap.get("cohort_id", "h011-v3-w300-vwap-structure-v2"),
@@ -79,7 +76,7 @@ def api_integrity():
         "config_sha": snap.get("config_sha", "unknown"),
         "snapshot_hash": snap.get("snapshot_hash"),
         "semantic_hash": snap.get("semantic_hash", snap.get("snapshot_hash")),
-        "artifact_hash": snap.get("artifact_hash"),
+        "canonical_content_hash": snap.get("canonical_content_hash"),
         "raw_store_available": raw_store_available,
         "replay_verified": replay_verified,
         "invariants": invariants.get("summary", {"pass": 0, "fail": 0, "unknown": 31}),
@@ -142,11 +139,6 @@ def api_replay():
     if not bundles:
         return JSONResponse({"replay_verified": False, "reason": "raw_bundle_unavailable"}, status_code=503)
     result = replay_bundle(bundles[-1])
-    result["replay_verified"] = bool(
-        result["semantic_hash_matches"] and result["config_sha_matches"]
-        and result["raw_complete"] and result["artifact_hash_present"]
-        and result["artifact_hash_matches"]
-    )
     result["bundle"] = bundles[-1].name
     return JSONResponse(result)
 

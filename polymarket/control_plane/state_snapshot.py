@@ -40,7 +40,7 @@ class ScanStateSnapshot:
     alerts: tuple[dict, ...]
     aggregate_metrics: dict
     semantic_hash: str
-    artifact_hash: str
+    canonical_content_hash: str
     snapshot_hash: str
 
     def to_dict(self) -> dict:
@@ -68,7 +68,7 @@ class ScanStateSnapshot:
             "alerts": list(self.alerts),
             "aggregate_metrics": self.aggregate_metrics,
             "semantic_hash": self.semantic_hash,
-            "artifact_hash": self.artifact_hash,
+            "canonical_content_hash": self.canonical_content_hash,
             "snapshot_hash": self.snapshot_hash,
         }
 
@@ -96,10 +96,16 @@ def build_snapshot(
     """Build a snapshot with a reproducible semantic hash."""
     generated_at = datetime.now(timezone.utc).isoformat()
 
+    semantic_records = []
+    for record in market_records:
+        normalized = json.loads(json.dumps(record))
+        normalized.pop("record_hash", None)
+        normalized.pop("scan_id", None)
+        normalized.pop("run_id", None)
+        semantic_records.append(normalized)
+
     semantic_material = {
         "schema_version": "h011-v3-snapshot-v1",
-        "scan_id": scan_id,
-        "run_id": run_id,
         "pipeline_version": pipeline_version,
         "cohort_id": cohort_id,
         "window_s": window_s,
@@ -112,7 +118,7 @@ def build_snapshot(
         "scan_status": scan_status,
         "source_health": source_health,
         "funnel": funnel,
-        "market_records": market_records,
+        "market_records": semantic_records,
         "lifecycle": lifecycle or {},
         "invariants": invariants or {},
         "drift": drift or {},
@@ -146,7 +152,7 @@ def build_snapshot(
         alerts=tuple(alerts or []),
         aggregate_metrics=aggregate_metrics or {},
         semantic_hash=semantic_hash,
-        artifact_hash="",
+        canonical_content_hash="",
         snapshot_hash=semantic_hash,
     )
 
@@ -159,22 +165,27 @@ def save_snapshot(snapshot: ScanStateSnapshot) -> Path:
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
     payload = snapshot.to_dict()
-    payload["artifact_hash"] = ""
     payload["snapshot_hash"] = snapshot.semantic_hash
-    artifact_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
-    payload["artifact_hash"] = artifact_hash
+    payload["canonical_content_hash"] = ""
+    canonical_content_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    payload["canonical_content_hash"] = canonical_content_hash
     payload["snapshot_hash"] = snapshot.semantic_hash
     output = json.dumps(payload, indent=2, ensure_ascii=False)
     # Historical: append-only
     hist_path = SNAPSHOT_DIR / f"state_{snapshot.generated_at.replace(':', '')}_{snapshot.scan_id[:8]}.json"
     hist_path.write_text(output, encoding="utf-8")
+    file_sha = hashlib.sha256(hist_path.read_bytes()).hexdigest()
+    hist_path.with_suffix(hist_path.suffix + ".sha256").write_text(file_sha + "\n", encoding="ascii")
 
     # Latest: atomic replace
     latest_path = SNAPSHOT_DIR / "latest.json"
     tmp_path = SNAPSHOT_DIR / "latest.json.tmp"
     tmp_path.write_text(output, encoding="utf-8")
     tmp_path.rename(latest_path)
+    latest_sha = hashlib.sha256(latest_path.read_bytes()).hexdigest()
+    (SNAPSHOT_DIR / "latest.json.sha256").write_text(latest_sha + "\n", encoding="ascii")
 
     return hist_path
 

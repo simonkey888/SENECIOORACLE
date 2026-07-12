@@ -405,6 +405,7 @@ def process_market_v3(
     scan_id: str,
     data_api_client: DataApiClient,
     clob_client: ClobClient,
+    persist_raw: bool = True,
 ) -> dict[str, Any]:
     """
     Process a single market through the full V3 pipeline.
@@ -466,10 +467,11 @@ def process_market_v3(
         request_params={"market": structure.condition_id},
         window_s=config.window_s,
     )
-    _ensure_v3_dirs()
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    raw_path = V3_RAW_DIR / f"{date_str}.events.jsonl.gz"
-    append_raw_event(raw_path, raw_event)
+    if persist_raw:
+        _ensure_v3_dirs()
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        raw_path = V3_RAW_DIR / f"{date_str}.events.jsonl.gz"
+        append_raw_event(raw_path, raw_event)
     record["evidence"]["raw_event_hashes"].append(raw_event["payload_sha256"])
 
     if not raw_trades:
@@ -763,6 +765,7 @@ def run_scan_v3(
         bundle_path, scan_id=scan_id, code_sha=code_sha,
         config=config.normalized(), gamma=raw_gamma, trades=raw_trades,
         books=raw_books, fees=raw_fees, records=public_records,
+        run_id=run_id, cohort_identity=H011_COHORT_ID, window_end_ts=now_ts,
     )
     summary["semantic_hash"] = bundle["semantic_hash"]
     summary["artifact_hash"] = bundle["artifact_hash"]
