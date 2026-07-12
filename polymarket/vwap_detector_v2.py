@@ -1034,6 +1034,7 @@ def main():
         from h011_v3_pipeline import (
             H011V3Config, run_scan_v3,
             HttpxDataApiClient, HttpxClobClient,
+            select_btc_cohort,
         )
         from polymarket_connector import fetch_all_active_markets
 
@@ -1047,6 +1048,11 @@ def main():
         # Fetch markets from Gamma
         import json as _json
         markets = fetch_all_active_markets(limit=args.gamma_limit)
+        # H-011 V3 is BTC-cohort-only.  A market enters only after structured
+        # event/rule/window/token validation; question text is insufficient.
+        btc_markets = select_btc_cohort(markets)
+        print(f"BTC cohort candidates: {len(btc_markets)} / {len(markets)}")
+        markets = btc_markets
 
         # Pre-filter resolved
         pre_filtered = []
@@ -1065,10 +1071,9 @@ def main():
         pre_filtered.sort(key=lambda m: float(m.get("volumeNum", 0) or 0), reverse=True)
         markets_to_scan = pre_filtered[:args.max_markets]
 
-        now_ts = int(time.time())
-
         if args.mode == "monitor":
             while True:
+                now_ts = int(time.time())
                 result = run_scan_v3(
                     markets=markets_to_scan,
                     now_ts=now_ts,
@@ -1079,6 +1084,7 @@ def main():
                 print(f"\n[V3] Scan complete. Sleeping 900s...")
                 time.sleep(900)
         else:
+            now_ts = int(time.time())
             result = run_scan_v3(
                 markets=markets_to_scan,
                 now_ts=now_ts,

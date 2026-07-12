@@ -39,6 +39,8 @@ class ScanStateSnapshot:
     drift: dict
     alerts: tuple[dict, ...]
     aggregate_metrics: dict
+    semantic_hash: str
+    artifact_hash: str
     snapshot_hash: str
 
     def to_dict(self) -> dict:
@@ -65,6 +67,8 @@ class ScanStateSnapshot:
             "drift": self.drift,
             "alerts": list(self.alerts),
             "aggregate_metrics": self.aggregate_metrics,
+            "semantic_hash": self.semantic_hash,
+            "artifact_hash": self.artifact_hash,
             "snapshot_hash": self.snapshot_hash,
         }
 
@@ -89,15 +93,13 @@ def build_snapshot(
     alerts: list[dict] | None = None,
     aggregate_metrics: dict | None = None,
 ) -> ScanStateSnapshot:
-    """Build a snapshot with auto-computed hash."""
+    """Build a snapshot with a reproducible semantic hash."""
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    # Build hash from everything except snapshot_hash
-    hash_input = json.dumps({
+    semantic_material = {
         "schema_version": "h011-v3-snapshot-v1",
         "scan_id": scan_id,
         "run_id": run_id,
-        "generated_at": generated_at,
         "pipeline_version": pipeline_version,
         "cohort_id": cohort_id,
         "window_s": window_s,
@@ -116,8 +118,9 @@ def build_snapshot(
         "drift": drift or {},
         "alerts": alerts or [],
         "aggregate_metrics": aggregate_metrics or {},
-    }, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    snapshot_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+    }
+    hash_input = json.dumps(semantic_material, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    semantic_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
 
     return ScanStateSnapshot(
         schema_version="h011-v3-snapshot-v1",
@@ -142,7 +145,9 @@ def build_snapshot(
         drift=drift or {},
         alerts=tuple(alerts or []),
         aggregate_metrics=aggregate_metrics or {},
-        snapshot_hash=snapshot_hash,
+        semantic_hash=semantic_hash,
+        artifact_hash="",
+        snapshot_hash=semantic_hash,
     )
 
 
@@ -153,14 +158,22 @@ def save_snapshot(snapshot: ScanStateSnapshot) -> Path:
     """Save snapshot as append-only historical + atomic latest.json."""
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
+    payload = snapshot.to_dict()
+    payload["artifact_hash"] = ""
+    payload["snapshot_hash"] = snapshot.semantic_hash
+    artifact_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
+    payload["artifact_hash"] = artifact_hash
+    payload["snapshot_hash"] = snapshot.semantic_hash
+    output = json.dumps(payload, indent=2, ensure_ascii=False)
     # Historical: append-only
     hist_path = SNAPSHOT_DIR / f"state_{snapshot.generated_at.replace(':', '')}_{snapshot.scan_id[:8]}.json"
-    hist_path.write_text(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    hist_path.write_text(output, encoding="utf-8")
 
     # Latest: atomic replace
     latest_path = SNAPSHOT_DIR / "latest.json"
     tmp_path = SNAPSHOT_DIR / "latest.json.tmp"
-    tmp_path.write_text(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.write_text(output, encoding="utf-8")
     tmp_path.rename(latest_path)
 
     return hist_path

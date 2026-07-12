@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -55,6 +56,7 @@ from validation_semantics import (
     new_scan_metadata,
     is_legacy_cohort,
 )
+from control_plane.replay import write_bundle
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -74,6 +76,27 @@ class H011V3Config:
     staleness_threshold_sec: int = 60
     paper_only: bool = True
     live_capital_locked: bool = True
+
+    def normalized(self) -> dict[str, Any]:
+        """Return the effective config in a stable, JSON-safe form."""
+        return {
+            "window_s": int(self.window_s),
+            "estimator": str(self.estimator),
+            "min_equal_quantity": float(self.min_equal_quantity),
+            "max_book_age_ms": int(self.max_book_age_ms),
+            "max_snapshot_delta_ms": int(self.max_snapshot_delta_ms),
+            "latency_buffer_bps": float(self.latency_buffer_bps),
+            "safety_buffer_bps": float(self.safety_buffer_bps),
+            "staleness_threshold_sec": int(self.staleness_threshold_sec),
+            "paper_only": bool(self.paper_only),
+            "live_capital_locked": bool(self.live_capital_locked),
+            "orders_enabled": False,
+        }
+
+    @property
+    def config_sha(self) -> str:
+        body = json.dumps(self.normalized(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
     def validate(self) -> None:
         """Reject startup if V3 invariants are violated."""
@@ -217,6 +240,60 @@ def _unevaluated_control_plane_state() -> tuple[dict[str, dict[str, object]], di
 def _ensure_v3_dirs():
     for d in [V3_RESULTS_DIR, V3_RAW_DIR, V3_SCANS_DIR, V3_REPLAY_DIR]:
         d.mkdir(parents=True, exist_ok=True)
+
+
+def validate_btc_market_identity(market: dict[str, Any], expected_window_s: int) -> tuple[bool, list[str]]:
+    """Validate BTC cohort identity from structured metadata, not question text."""
+    reasons: list[str] = []
+    condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
+    if not condition_id:
+        reasons.append("missing_condition_id")
+    event = market.get("event") if isinstance(market.get("event"), dict) else {}
+    slug = " ".join(str(market.get(k) or event.get(k) or "").lower() for k in ("slug", "eventSlug", "title"))
+    if not any(x in slug for x in ("bitcoin", "btc")):
+        reasons.append("btc_event_identity_unproven")
+    rule = " ".join(str(market.get(k) or event.get(k) or "").lower() for k in ("resolutionSource", "resolutionRules", "description", "rule"))
+    if not any(x in rule for x in ("bitcoin", "btc", "price", "oracle")):
+        reasons.append("resolution_rule_unproven")
+    start = market.get("startDate") or market.get("startDateIso") or market.get("start_time") or event.get("startDate")
+    end = market.get("endDate") or market.get("endDateIso") or market.get("end_time") or event.get("endDate")
+    def epoch(value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+        return None
+    start_epoch, end_epoch = epoch(start), epoch(end)
+    if start_epoch is None or end_epoch is None:
+        reasons.append("window_timestamps_unproven")
+    elif int(end_epoch - start_epoch) != int(expected_window_s):
+        reasons.append("window_duration_mismatch")
+    try:
+        outcomes = market.get("outcomes")
+        outcomes = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
+        tokens = market.get("clobTokenIds")
+        tokens = json.loads(tokens) if isinstance(tokens, str) else tokens
+        labels = {str(x).strip().upper() for x in (outcomes or [])}
+        if not {"UP", "DOWN"}.issubset(labels) or not isinstance(tokens, list) or len(tokens) != 2:
+            reasons.append("up_down_token_identity_unproven")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        reasons.append("up_down_token_identity_unproven")
+    return not reasons, reasons
+
+
+def select_btc_cohort(markets: list[dict[str, Any]], windows: tuple[int, ...] = (300, 900)) -> list[dict[str, Any]]:
+    """Return only markets whose structured BTC contract is proven."""
+    selected = []
+    for market in markets:
+        for window in windows:
+            ok, _ = validate_btc_market_identity(market, window)
+            if ok:
+                selected.append({**market, "_validated_window_s": window})
+                break
+    return selected
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -371,9 +448,16 @@ def process_market_v3(
         }
 
     record = _empty_v3_record(run_id, scan_id, structure.condition_id, structure, config)
+    record["_raw_bundle"] = {
+        "gamma": gamma_market,
+        "trades": raw_trades if False else [],
+        "books": {},
+        "fees": {"takerBaseFee": gamma_market.get("takerBaseFee"), "feesEnabled": structure.fees_enabled},
+    }
 
     # ── Step 3: Fetch Data API trades ──
     raw_trades = data_api_client.fetch_trades(structure.condition_id, window_start_ts, now_ts)
+    record["_raw_bundle"]["trades"] = raw_trades
 
     # Save raw Data API response BEFORE transforming
     raw_event = create_raw_event(
@@ -473,6 +557,7 @@ def process_market_v3(
 
         ts_before_1 = datetime.now(timezone.utc)
         book_1 = clob_client.fetch_book(token_1)
+        record["_raw_bundle"]["books"] = {"leg_0": book_0, "leg_1": book_1}
         ts_after_1 = datetime.now(timezone.utc)
         leg_1_received_ts = ts_after_1.isoformat()
 
@@ -666,6 +751,23 @@ def run_scan_v3(
     print(f"[V3] Historical only: {summary['historical_signal_only']}")
     print(f"[V3] Rejected: {summary['rejected']}")
 
+    # Persist one complete, replayable bundle before publishing the snapshot.
+    code_sha = os.environ.get("GIT_SHA") or os.environ.get("SENECIO_CODE_SHA") or "unknown"
+    bundle_path = V3_RAW_DIR / f"bundle_{scan_id.replace(':', '').replace('+', '_')}.json"
+    raw_gamma = [r.get("_raw_bundle", {}).get("gamma") for r in records if r.get("_raw_bundle", {}).get("gamma")]
+    raw_trades = {str(r.get("condition_id")): r.get("_raw_bundle", {}).get("trades", []) for r in records}
+    raw_books = {str(r.get("condition_id")): r.get("_raw_bundle", {}).get("books", {}) for r in records}
+    raw_fees = {str(r.get("condition_id")): r.get("_raw_bundle", {}).get("fees", {}) for r in records}
+    public_records = [{k: v for k, v in r.items() if k != "_raw_bundle"} for r in records]
+    bundle = write_bundle(
+        bundle_path, scan_id=scan_id, code_sha=code_sha,
+        config=config.normalized(), gamma=raw_gamma, trades=raw_trades,
+        books=raw_books, fees=raw_fees, records=public_records,
+    )
+    summary["semantic_hash"] = bundle["semantic_hash"]
+    summary["artifact_hash"] = bundle["artifact_hash"]
+    summary["raw_bundle"] = bundle_path.name
+
     # ── Generate snapshot ──
     try:
         from control_plane.state_snapshot import build_snapshot, save_snapshot
@@ -714,8 +816,8 @@ def run_scan_v3(
             cohort_id=H011_COHORT_ID,
             window_s=config.window_s,
             estimator=config.estimator,
-            code_sha="unknown",
-            config_sha="unknown",
+            code_sha=code_sha,
+            config_sha=config.config_sha,
             scan_status="COMPLETE_WITH_UNKNOWN_VALIDATION",
             source_health=source_health,
             funnel=funnel,
