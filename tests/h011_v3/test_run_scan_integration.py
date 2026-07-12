@@ -32,8 +32,10 @@ def test_run_scan_writes_replayable_bundle_and_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(snapshots, "SNAPSHOT_DIR", results / "state")
     monkeypatch.setattr(runtime_snapshots, "SNAPSHOT_DIR", results / "state")
     monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
-    monkeypatch.setenv("SENECIO_CODE_SHA", "tested-sha-123")
+    deployment_sha = "43fc9f02e60167ae83d6b01d7f0615a4ae5e71b6"
+    monkeypatch.setenv("NF_DEPLOYMENT_SHA", deployment_sha)
     monkeypatch.delenv("GIT_SHA", raising=False)
+    monkeypatch.delenv("SENECIO_CODE_SHA", raising=False)
 
     market = {
         "conditionId": "0xabc",
@@ -64,7 +66,7 @@ def test_run_scan_writes_replayable_bundle_and_snapshot(tmp_path, monkeypatch):
 
     latest = snapshots.SNAPSHOT_DIR / "latest.json"
     state = json.loads(latest.read_text())
-    assert state["code_sha"] == "tested-sha-123"
+    assert state["code_sha"] == deployment_sha
     assert state["config_sha"] != "unknown"
     assert state["config_sha"]
     exact_state_sha = hashlib.sha256(latest.read_bytes()).hexdigest()

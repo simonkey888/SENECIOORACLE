@@ -756,7 +756,12 @@ def run_scan_v3(
     print(f"[V3] Rejected: {summary['rejected']}")
 
     # Persist one complete, replayable bundle before publishing the snapshot.
-    code_sha = os.environ.get("GIT_SHA") or os.environ.get("SENECIO_CODE_SHA") or "unknown"
+    code_sha = (
+        os.environ.get("NF_DEPLOYMENT_SHA")
+        or os.environ.get("GIT_SHA")
+        or os.environ.get("SENECIO_CODE_SHA")
+        or "unknown"
+    )
     bundle_path = V3_RAW_DIR / f"bundle_{scan_id.replace(':', '').replace('+', '_')}.json"
     raw_gamma = [r.get("_raw_bundle", {}).get("gamma") for r in records if r.get("_raw_bundle", {}).get("gamma")]
     raw_trades = {str(r.get("condition_id")): r.get("_raw_bundle", {}).get("trades", []) for r in records}
