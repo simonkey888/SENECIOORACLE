@@ -675,6 +675,7 @@ def run_scan_v3(
     config: H011V3Config,
     data_api_client: DataApiClient,
     clob_client: ClobClient,
+    persist_raw: bool = True,
 ) -> dict[str, Any]:
     """
     Run a complete V3 scan over a list of markets.
@@ -714,6 +715,7 @@ def run_scan_v3(
             scan_id=scan_id,
             data_api_client=data_api_client,
             clob_client=clob_client,
+            persist_raw=persist_raw,
         )
         records.append(record)
 
@@ -768,7 +770,8 @@ def run_scan_v3(
         run_id=run_id, cohort_identity=H011_COHORT_ID, window_end_ts=now_ts,
     )
     summary["semantic_hash"] = bundle["semantic_hash"]
-    summary["artifact_hash"] = bundle["artifact_hash"]
+    summary["canonical_content_hash"] = bundle["canonical_content_hash"]
+    summary["file_sha256"] = bundle["file_sha256"]
     summary["raw_bundle"] = bundle_path.name
 
     # ── Generate snapshot ──

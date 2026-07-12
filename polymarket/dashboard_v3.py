@@ -60,10 +60,9 @@ def api_integrity():
             "invariants": {"pass": 0, "fail": 0, "unknown": 31},
         })
     invariants = snap.get("invariants", {})
-    raw_store_available = V3_RAW_DIR.exists() and any(V3_RAW_DIR.iterdir())
-    replay_verified = bool(snap.get("replay", {}).get("verified") is True)
     bundles = sorted(V3_RAW_DIR.glob("bundle_*.json"))
     replay_result = replay_bundle(bundles[-1]) if bundles else None
+    raw_store_available = bool(replay_result and replay_result["raw_complete"])
     replay_verified = bool(replay_result and replay_result["replay_verified"])
     return JSONResponse({
         "pipeline_version": snap.get("pipeline_version", "h011-integrity-v3"),
@@ -78,6 +77,7 @@ def api_integrity():
         "semantic_hash": snap.get("semantic_hash", snap.get("snapshot_hash")),
         "canonical_content_hash": snap.get("canonical_content_hash"),
         "raw_store_available": raw_store_available,
+        "file_sha256_matches": bool(replay_result and replay_result["file_sha256_matches"]),
         "replay_verified": replay_verified,
         "invariants": invariants.get("summary", {"pass": 0, "fail": 0, "unknown": 31}),
     })
