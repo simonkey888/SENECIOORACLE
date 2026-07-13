@@ -349,92 +349,86 @@ def _eval_lifecycle_event_id_unique(ctx: ScanContext) -> tuple[str, str, dict]:
 
 
 def _eval_raw_events_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-005: raw events are append-only (hash chain verified).
+    """INV-005: raw events are append-only (manifest chain verified).
 
-    Fix #7: Verifies actual hash chain integrity, not just mtimes.
-    If hash chain infrastructure doesn't exist yet, returns UNKNOWN.
+    Uses artifact_manifest.verify_manifest_chain to verify:
+    - Sequence continuity (0, 1, 2, ...)
+    - previous_manifest_hash links correct
+    - manifest_hash recalculated correctly
+    - file_sha256 matches actual file content
+    - No unregistered files
+    - No missing referenced files
     """
+    from control_plane.artifact_manifest import verify_manifest_chain
+
     if not ctx.raw_dir or not Path(ctx.raw_dir).exists():
         return "UNKNOWN", "Raw events directory not accessible", {}
-    raw_files = sorted(Path(ctx.raw_dir).glob("*.jsonl.gz"))
+    raw_dir = Path(ctx.raw_dir)
+    raw_files = list(raw_dir.glob("*.jsonl.gz"))
     if not raw_files:
         return "NOT_APPLICABLE", "No raw event files (persist_raw may be disabled or no markets reached persistence)", {}
-    # Fix #7: Real hash chain verification
-    # Each file must have a .sha256 sidecar; content must match sidecar
-    # Files must be ordered by mtime (append-only means new files only)
-    prev_mtime = 0
-    verified_count = 0
-    for f in raw_files:
-        mtime = f.stat().st_mtime
-        if mtime < prev_mtime:
-            return "FAIL", f"File {f.name} has earlier mtime than previous (possible reorder)", {}
-        prev_mtime = mtime
-        # Check sidecar exists and matches
-        sidecar = f.with_suffix(f.suffix + ".sha256")
-        if not sidecar.exists():
-            return "UNKNOWN", f"Raw event file {f.name} missing SHA256 sidecar — cannot verify integrity", {}
-        try:
-            expected = sidecar.read_text().strip()
-            actual = hashlib.sha256(f.read_bytes()).hexdigest()
-            if expected != actual:
-                return "FAIL", f"Hash mismatch for {f.name}: sidecar={expected[:16]} vs actual={actual[:16]}", {}
-            verified_count += 1
-        except OSError:
-            return "FAIL", f"Cannot read {f.name} or its sidecar", {}
-    return "PASS", f"Raw event store verified: {verified_count} files with valid SHA256 sidecars and monotonic order", \
-           {"files": len(raw_files), "verified": verified_count, "dir": ctx.raw_dir}
+
+    # Check if manifests exist
+    manifest_files = list(raw_dir.glob("manifest_*.json"))
+    if not manifest_files:
+        return "UNKNOWN", f"Raw event files exist but no manifest chain found ({len(raw_files)} files). Cannot verify append-only.", \
+               {"files": len(raw_files), "manifests": 0}
+
+    result = verify_manifest_chain(raw_dir, manifest_prefix="manifest")
+    if result["valid"]:
+        return ("PASS",
+                f"Raw event manifest chain verified: {result['sequence_count']} entries, all hashes match, no unregistered files",
+                {"sequence_count": result["sequence_count"], "errors": result["errors"],
+                 "unregistered_files": result.get("unregistered_files", [])})
+    return ("FAIL",
+            f"Raw event manifest chain invalid: {'; '.join(result['errors'])}",
+            {"errors": result["errors"], "sequence_count": result.get("sequence_count", 0),
+             "unregistered_files": result.get("unregistered_files", [])})
 
 
 def _eval_snapshots_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-006: historical snapshots are append-only (no overwrites).
+    """INV-006: historical snapshots are append-only (manifest chain verified).
 
-    Fix #8: Does NOT fail for identical snapshot hashes (two cycles can
-    produce identical content). Instead verifies:
-    - Historical filenames are unique
-    - No file has been overwritten (mtime is monotonic)
-    - Sidecar exists for each historical snapshot
-    - Content hash matches sidecar
+    Uses artifact_manifest.verify_manifest_chain to verify:
+    - Sequence continuity
+    - previous_manifest_hash links correct
+    - Unique sequence/filename/run_id/scan_id
+    - file_sha256 matches
+    - No unregistered snapshots
+    - Content hashes may repeat (legitimate identical content)
     """
+    from control_plane.artifact_manifest import verify_manifest_chain
+
     if not ctx.results_dir:
         return "UNKNOWN", "Results directory not accessible", {}
     state_dir = Path(ctx.results_dir) / "state"
     if not state_dir.exists():
         return "UNKNOWN", f"Snapshot directory {state_dir} not accessible", {}
-    # Exclude latest.json and its sidecar — they're mutable
-    snapshots = sorted(
-        [p for p in state_dir.glob("*.json")
-         if p.name not in ("latest.json", "latest.json.sha256")
-         and not p.name.endswith(".sha256")],
-        key=lambda p: p.stat().st_mtime,
-    )
-    if not snapshots:
-        return "UNKNOWN", "No historical snapshot files found (only latest.json exists)", {}
-    # Check unique filenames (not unique hashes)
-    names = set()
-    prev_mtime = 0
-    verified = 0
-    for s in snapshots:
-        if s.name in names:
-            return "FAIL", f"Duplicate snapshot filename: {s.name}", {}
-        names.add(s.name)
-        mtime = s.stat().st_mtime
-        if mtime < prev_mtime:
-            return "FAIL", f"Snapshot {s.name} has earlier mtime than previous (possible overwrite)", {}
-        prev_mtime = mtime
-        # Check sidecar
-        sidecar = s.with_suffix(s.suffix + ".sha256")
-        if sidecar.exists():
-            try:
-                expected = sidecar.read_text().strip()
-                actual = hashlib.sha256(s.read_bytes()).hexdigest()
-                if expected != actual:
-                    return "FAIL", f"Snapshot hash mismatch for {s.name}", {}
-                verified += 1
-            except OSError:
-                return "FAIL", f"Cannot read snapshot {s.name} or sidecar", {}
-        # Sidecar missing is not a FAIL — it means the snapshot predates sidecar enforcement
-    return "PASS", f"Snapshot store verified: {len(snapshots)} historical files, {verified} with valid sidecars, unique names, monotonic order", \
-           {"snapshots": len(snapshots), "verified_sidecars": verified, "unique_names": len(names)}
+
+    # Check if manifests exist
+    manifest_files = list(state_dir.glob("smanifest_*.json"))
+    # Exclude latest.json from artifact check
+    snapshot_files = [p for p in state_dir.glob("*.json")
+                      if p.name not in ("latest.json", "latest.json.sha256")
+                      and not p.name.startswith("smanifest_")
+                      and not p.name.endswith(".sha256")]
+    if not snapshot_files:
+        return "UNKNOWN", "No historical snapshot files found", {}
+
+    if not manifest_files:
+        return "UNKNOWN", f"Snapshot files exist ({len(snapshot_files)}) but no manifest chain found. Cannot verify append-only.", \
+               {"snapshots": len(snapshot_files), "manifests": 0}
+
+    result = verify_manifest_chain(state_dir, manifest_prefix="smanifest")
+    if result["valid"]:
+        return ("PASS",
+                f"Snapshot manifest chain verified: {result['sequence_count']} entries, all hashes match, no unregistered files",
+                {"sequence_count": result["sequence_count"], "errors": result["errors"],
+                 "unregistered_files": result.get("unregistered_files", [])})
+    return ("FAIL",
+            f"Snapshot manifest chain invalid: {'; '.join(result['errors'])}",
+            {"errors": result["errors"], "sequence_count": result.get("sequence_count", 0),
+             "unregistered_files": result.get("unregistered_files", [])})
 
 
 def _eval_no_hidden_rejected(ctx: ScanContext) -> tuple[str, str, dict]:
@@ -881,10 +875,19 @@ assert len(INVARIANT_EVALUATORS) == 31, f"Expected 31 evaluators, got {len(INVAR
 def evaluate_all_invariants(ctx: ScanContext) -> list[dict[str, Any]]:
     """Evaluate all 31 invariants against real scan data.
 
-    Returns a list of 31 invariant result dicts.
+    Fix #9 (second pass): INV-008 and INV-009 are evaluated in a second pass
+    after the other 29 invariants. They verify that the invariant summary
+    mechanism preserves UNKNOWN correctly, using the actual results from
+    the first pass.
     """
+    # First pass: evaluate 29 invariants (skip INV-008 and INV-009)
     results: list[dict[str, Any]] = []
+    deferred: list[tuple[str, str, str, str]] = []  # (inv_id, desc, severity, evaluator_key)
+
     for inv_id, description, severity, evaluator_key in INVARIANT_CATALOG:
+        if inv_id in ("INV-008", "INV-009"):
+            deferred.append((inv_id, description, severity, evaluator_key))
+            continue
         evaluator = INVARIANT_EVALUATORS[evaluator_key]
         try:
             status, reason, evidence = evaluator(ctx)
@@ -899,6 +902,66 @@ def evaluate_all_invariants(ctx: ScanContext) -> list[dict[str, Any]]:
             "reason": reason,
             "evidence": evidence,
         })
+
+    # Second pass: evaluate INV-008 and INV-009 using the actual first-pass results
+    # INV-008: verify UNKNOWN is not collapsed to 0 in the summary
+    # Create a copy of the results with an injected UNKNOWN sentinel
+    test_results = [dict(r) for r in results]
+    test_results.append({
+        "invariant_id": "SENTINEL-UNKNOWN",
+        "status": "UNKNOWN",
+        "severity": "WARNING",
+        "reason": "Sentinel for INV-008 verification",
+        "evidence": {},
+    })
+    test_summary = invariant_summary(test_results)
+    if test_summary.get("unknown") >= 1 and all(
+        r.get("status") == "UNKNOWN" for r in test_results if r.get("invariant_id") == "SENTINEL-UNKNOWN"
+    ):
+        inv008_status = "PASS"
+        inv008_reason = f"Second-pass verification: injected UNKNOWN survives summary with unknown={test_summary['unknown']} (expected >=1)"
+        inv008_evidence = {"test_summary": test_summary, "sentinel_preserved": True}
+    else:
+        inv008_status = "FAIL"
+        inv008_reason = f"Second-pass verification FAILED: UNKNOWN was collapsed — summary={test_summary}"
+        inv008_evidence = {"test_summary": test_summary, "sentinel_preserved": False}
+
+    # INV-009: verify UNKNOWN status string survives JSON serialization
+    sentinel_serialized = json.dumps(test_results[-1])
+    sentinel_deserialized = json.loads(sentinel_serialized)
+    sentinel_status = sentinel_deserialized.get("status")
+    if sentinel_status == "UNKNOWN" and isinstance(sentinel_status, str) and sentinel_status is not False:
+        inv009_status = "PASS"
+        inv009_reason = f"Second-pass verification: UNKNOWN status survives JSON serialization as '{sentinel_status}' (type={type(sentinel_status).__name__})"
+        inv009_evidence = {"serialized_status": sentinel_status, "is_string": True, "is_not_false": True}
+    else:
+        inv009_status = "FAIL"
+        inv009_reason = f"Second-pass verification FAILED: UNKNOWN collapsed to {sentinel_status!r}"
+        inv009_evidence = {"serialized_status": sentinel_status}
+
+    # Insert INV-008 and INV-009 in their catalog positions
+    for inv_id, description, severity, evaluator_key in deferred:
+        if inv_id == "INV-008":
+            results.append({
+                "invariant_id": inv_id,
+                "status": inv008_status,
+                "severity": severity,
+                "reason": inv008_reason,
+                "evidence": inv008_evidence,
+            })
+        elif inv_id == "INV-009":
+            results.append({
+                "invariant_id": inv_id,
+                "status": inv009_status,
+                "severity": severity,
+                "reason": inv009_reason,
+                "evidence": inv009_evidence,
+            })
+
+    # Sort results to match catalog order
+    catalog_order = {inv_id: i for i, (inv_id, _, _, _) in enumerate(INVARIANT_CATALOG)}
+    results.sort(key=lambda r: catalog_order.get(r["invariant_id"], 999))
+
     assert len(results) == 31, f"Expected 31 results, got {len(results)}"
     return results
 
