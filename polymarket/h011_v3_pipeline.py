@@ -58,6 +58,17 @@ from validation_semantics import (
     is_legacy_cohort,
 )
 from control_plane.replay import write_bundle
+from control_plane.coverage import (
+    compute_control_plane_state,
+    make_source_health,
+    not_used_source_health,
+    evaluate_all_invariants,
+    invariant_summary as coverage_invariant_summary,
+    determine_scan_status,
+    compute_health_ok,
+    CATALOG_VERSION,
+    invariant_catalog_hash,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1211,7 +1222,46 @@ def run_scan_v3(
             }
             for r in records
         ]
-        source_health, invariants, alerts = _unevaluated_control_plane_state()
+        source_health, invariants, alerts, scan_status = compute_control_plane_state(
+            scan_data={
+                "run_id": run_id,
+                "scan_id": scan_id,
+                "pipeline_version": "h011-integrity-v3",
+                "window_s": config.window_s,
+                "paper_only": config.paper_only,
+                "live_capital_locked": config.live_capital_locked,
+                "orders_enabled": False,
+                "funnel": funnel,
+                "market_records": market_records_compact,
+                "snapshot_hash": summary.get("snapshot_hash"),
+                "_results_dir": str(V3_RESULTS_DIR),
+                "_raw_dir": str(V3_RAW_DIR),
+                "_snapshot_dir": str(V3_RESULTS_DIR / "state"),
+            },
+            source_health=source_health_telemetry if 'source_health_telemetry' in dir() else {
+                "gamma_metadata": make_source_health(
+                    status="HEALTHY" if scan_meta.get("discovery_status") not in ("DISCOVERY_SOURCE_FAILED",) else "FAILED",
+                    objects_received=scan_meta.get("discovery_markets_received", 0),
+                    attempts=1,
+                    failures=1 if scan_meta.get("discovery_status") == "DISCOVERY_SOURCE_FAILED" else 0,
+                ),
+                "data_api_trades": make_source_health(
+                    status="HEALTHY" if records else "NOT_USED",
+                    objects_received=sum(len(r.get("_raw_bundle", {}).get("trades", [])) for r in records),
+                    attempts=len(records),
+                ) if records else not_used_source_health("No markets reached Data API stage"),
+                "clob_orderbook": not_used_source_health(
+                    "CLOB not consulted — no shadow-executable markets in paper-only mode"
+                ),
+            },
+            config_data=config.normalized(),
+            records=records,
+            discovery_meta={
+                "status": scan_meta.get("discovery_status", "UNKNOWN"),
+                "discovery_complete": scan_meta.get("discovery_complete", False),
+                "markets_selected": len(markets),
+            },
+        )
         snapshot = build_snapshot(
             scan_id=scan_id,
             run_id=run_id,
@@ -1221,7 +1271,7 @@ def run_scan_v3(
             estimator=config.estimator,
             code_sha=code_sha,
             config_sha=config.config_sha,
-            scan_status="COMPLETE_WITH_UNKNOWN_VALIDATION",
+            scan_status=scan_status,
             source_health=source_health,
             funnel=funnel,
             market_records=market_records_compact,
