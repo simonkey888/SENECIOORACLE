@@ -351,54 +351,43 @@ def _eval_lifecycle_event_id_unique(ctx: ScanContext) -> tuple[str, str, dict]:
 def _eval_raw_events_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
     """INV-005: raw events are append-only (manifest chain verified).
 
-    Uses artifact_manifest.verify_manifest_chain with:
-    - artifact_glob="*.events.jsonl.gz"
-    - exclude_names for non-artifact files
-    - identity_fields for run_id/scan_id uniqueness
+    Uses ManifestPolicy with artifact_glob, identity_fields, and excludes.
     """
-    from control_plane.artifact_manifest import verify_manifest_chain
+    from control_plane.artifact_manifest import verify_manifest_chain, RAW_MANIFEST_POLICY
 
     if not ctx.raw_dir or not Path(ctx.raw_dir).exists():
         return "UNKNOWN", "Raw events directory not accessible", {}
     raw_dir = Path(ctx.raw_dir)
-    raw_files = list(raw_dir.glob("*.events.jsonl.gz"))
+    raw_files = list(raw_dir.glob(RAW_MANIFEST_POLICY.artifact_glob))
     if not raw_files:
         return "NOT_APPLICABLE", "No raw event files (persist_raw may be disabled or no markets reached persistence)", {}
 
-    manifest_files = list(raw_dir.glob("manifest_*.json"))
-    if not manifest_files:
-        return "UNKNOWN", f"Raw event files exist but no manifest chain found ({len(raw_files)} files). Cannot verify append-only.", \
-               {"files": len(raw_files), "manifests": 0}
-
-    result = verify_manifest_chain(
-        raw_dir,
-        manifest_prefix="manifest",
-        artifact_glob="*.events.jsonl.gz",
-        exclude_names={"latest.json", "latest.json.sha256"},
-        identity_fields=("run_id", "scan_id"),
-    )
-    if result["valid"]:
+    result = verify_manifest_chain(raw_dir, RAW_MANIFEST_POLICY)
+    status = result["chain_status"]
+    if status == "VALID_CHAIN":
         return ("PASS",
-                f"Raw event manifest chain verified: {result['sequence_count']} entries, all hashes match, no unregistered files, run_id/scan_id unique",
+                f"Raw event manifest chain verified: {result['sequence_count']} entries, all hashes match, run_id/scan_id unique",
                 {"sequence_count": result["sequence_count"], "errors": result["errors"],
                  "unregistered_files": result.get("unregistered_files", [])})
-    return ("FAIL",
-            f"Raw event manifest chain invalid: {'; '.join(result['errors'])}",
-            {"errors": result["errors"], "sequence_count": result.get("sequence_count", 0),
-             "unregistered_files": result.get("unregistered_files", [])})
+    elif status == "EMPTY_CHAIN":
+        return ("UNKNOWN", "Raw event files exist but no manifest chain found. Cannot verify append-only.",
+                {"files": len(raw_files), "manifests": 0, "chain_status": status})
+    elif status == "BOOTSTRAP_REQUIRED":
+        return ("UNKNOWN", f"Bootstrap required: {len(result.get('unregistered_files', []))} legacy artifacts without manifests",
+                {"unregistered_files": result.get("unregistered_files", []), "chain_status": status})
+    else:  # INVALID_CHAIN
+        return ("FAIL",
+                f"Raw event manifest chain invalid: {'; '.join(result['errors'])}",
+                {"errors": result["errors"], "chain_status": status})
 
 
 def _eval_snapshots_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
     """INV-006: historical snapshots are append-only (manifest chain verified).
 
-    Uses artifact_manifest.verify_manifest_chain with:
-    - artifact_glob="snapshot_*.json" (only timestamped snapshots, not latest.json)
-    - exclude_names for latest.json and sidecars
-    - identity_fields=("run_id", "scan_id") for uniqueness verification
-
-    Content hashes may repeat legitimately (two cycles with identical content).
+    Uses ManifestPolicy with artifact_glob='snapshot_*.json', identity_fields.
+    Content hashes may repeat legitimately.
     """
-    from control_plane.artifact_manifest import verify_manifest_chain
+    from control_plane.artifact_manifest import verify_manifest_chain, SNAPSHOT_MANIFEST_POLICY
 
     if not ctx.results_dir:
         return "UNKNOWN", "Results directory not accessible", {}
@@ -406,31 +395,27 @@ def _eval_snapshots_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
     if not state_dir.exists():
         return "UNKNOWN", f"Snapshot directory {state_dir} not accessible", {}
 
-    snapshot_files = [p for p in state_dir.glob("snapshot_*.json")]
+    snapshot_files = list(state_dir.glob(SNAPSHOT_MANIFEST_POLICY.artifact_glob))
     if not snapshot_files:
         return "UNKNOWN", "No historical snapshot files found", {}
 
-    manifest_files = list(state_dir.glob("smanifest_*.json"))
-    if not manifest_files:
-        return "UNKNOWN", f"Snapshot files exist ({len(snapshot_files)}) but no manifest chain found. Cannot verify append-only.", \
-               {"snapshots": len(snapshot_files), "manifests": 0}
-
-    result = verify_manifest_chain(
-        state_dir,
-        manifest_prefix="smanifest",
-        artifact_glob="snapshot_*.json",
-        exclude_names={"latest.json", "latest.json.sha256"},
-        identity_fields=("run_id", "scan_id"),
-    )
-    if result["valid"]:
+    result = verify_manifest_chain(state_dir, SNAPSHOT_MANIFEST_POLICY)
+    status = result["chain_status"]
+    if status == "VALID_CHAIN":
         return ("PASS",
-                f"Snapshot manifest chain verified: {result['sequence_count']} entries, all hashes match, run_id/scan_id unique, no unregistered files",
+                f"Snapshot manifest chain verified: {result['sequence_count']} entries, all hashes match, run_id/scan_id unique",
                 {"sequence_count": result["sequence_count"], "errors": result["errors"],
                  "unregistered_files": result.get("unregistered_files", [])})
-    return ("FAIL",
-            f"Snapshot manifest chain invalid: {'; '.join(result['errors'])}",
-            {"errors": result["errors"], "sequence_count": result.get("sequence_count", 0),
-             "unregistered_files": result.get("unregistered_files", [])})
+    elif status == "EMPTY_CHAIN":
+        return ("UNKNOWN", "Snapshot files exist but no manifest chain found. Cannot verify append-only.",
+                {"files": len(snapshot_files), "manifests": 0, "chain_status": status})
+    elif status == "BOOTSTRAP_REQUIRED":
+        return ("UNKNOWN", f"Bootstrap required: {len(result.get('unregistered_files', []))} legacy snapshots without manifests",
+                {"unregistered_files": result.get("unregistered_files", []), "chain_status": status})
+    else:  # INVALID_CHAIN
+        return ("FAIL",
+                f"Snapshot manifest chain invalid: {'; '.join(result['errors'])}",
+                {"errors": result["errors"], "chain_status": status})
 
 
 def _eval_no_hidden_rejected(ctx: ScanContext) -> tuple[str, str, dict]:

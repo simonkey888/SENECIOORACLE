@@ -1,141 +1,155 @@
 """
-SENECIO H-011 V3 — Artifact Manifest System.
+SENECIO H-011 V3 — Artifact Manifest System (FASE A.4 revised).
 
 Provides append-only verification through chained manifests for raw events
 and snapshots. Each manifest entry links to the previous via
 `previous_manifest_hash`, creating a tamper-evident chain.
 
-FASE A.4: Atomic/immutable writing, artifact filtering, run_id/scan_id
-verification in snapshot manifests, fail-closed on corrupt chains.
+Addresses A.4.1–A.4.8:
+  - ManifestPolicy dataclass for unified configuration
+  - allowed_unregistered for pending artifact during write
+  - EMPTY_CHAIN / BOOTSTRAP_REQUIRED / VALID_CHAIN / INVALID_CHAIN
+  - Reserved field protection in extra_fields
+  - Full durability (fdopen, fsync, dirfsync)
+  - fcntl.flock for concurrency
+  - Atomic verify → reserve → publish → reverify
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# ManifestPolicy — single configuration object (A.4.2)
+# ═══════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class ManifestPolicy:
+    """Policy for manifest chain verification and writing."""
+    manifest_prefix: str
+    artifact_glob: str
+    exclude_names: frozenset[str] = field(default_factory=frozenset)
+    identity_fields: tuple[str, ...] = ()
+
+    def lock_filename(self) -> str:
+        return f"{self.manifest_prefix}.lock"
+
+
+RAW_MANIFEST_POLICY = ManifestPolicy(
+    manifest_prefix="manifest",
+    artifact_glob="*.events.jsonl.gz",
+    exclude_names=frozenset(),
+    identity_fields=("run_id", "scan_id"),
+)
+
+SNAPSHOT_MANIFEST_POLICY = ManifestPolicy(
+    manifest_prefix="smanifest",
+    artifact_glob="snapshot_*.json",
+    exclude_names=frozenset({"latest.json", "latest.json.sha256"}),
+    identity_fields=("run_id", "scan_id"),
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Chain status (A.4.4)
+# ═══════════════════════════════════════════════════════════════════════
+
+CHAIN_EMPTY = "EMPTY_CHAIN"
+CHAIN_VALID = "VALID_CHAIN"
+CHAIN_BOOTSTRAP_REQUIRED = "BOOTSTRAP_REQUIRED"
+CHAIN_INVALID = "INVALID_CHAIN"
+
+RESERVED_FIELDS = frozenset({
+    "sequence", "filename", "file_sha256",
+    "previous_manifest_hash", "created_at", "manifest_hash",
+})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Hash helpers
+# ═══════════════════════════════════════════════════════════════════════
+
 def _compute_manifest_hash(entry: dict[str, Any]) -> str:
-    """Compute the hash of a manifest entry (excluding manifest_hash itself)."""
     copy = {k: v for k, v in entry.items() if k != "manifest_hash"}
     raw = json.dumps(copy, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
 
 
-def create_manifest_entry(
-    *,
-    sequence: int,
-    filename: str,
-    file_sha256: str,
-    previous_manifest_hash: str | None,
-    extra_fields: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Create a manifest entry with computed manifest_hash."""
-    entry: dict[str, Any] = {
-        "sequence": sequence,
-        "filename": filename,
-        "file_sha256": file_sha256,
-        "previous_manifest_hash": previous_manifest_hash,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if extra_fields:
-        entry.update(extra_fields)
-    entry["manifest_hash"] = _compute_manifest_hash(entry)
-    return entry
-
-
-def write_manifest_atomic(
-    directory: Path,
-    artifact_path: Path,
-    *,
-    manifest_prefix: str = "manifest",
-    extra_fields: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Write a manifest entry atomically with exclusive creation.
-
-    FASE A.4: Uses O_CREAT | O_EXCL to prevent overwriting existing manifests.
-    Verifies the existing chain before getting the next sequence.
-    Fails closed if the chain is corrupt.
-
-    Returns the manifest entry dict.
-    Raises FileExistsError if manifest already exists.
-    Raises RuntimeError if existing chain is corrupt.
-    """
-    # Verify existing chain before proceeding
-    verification = verify_manifest_chain(directory, manifest_prefix=manifest_prefix)
-    if not verification["valid"]:
-        raise RuntimeError(
-            f"Cannot write manifest: existing chain is corrupt: {'; '.join(verification['errors'])}"
-        )
-
-    # Get next sequence from verified chain
-    sequence = len(verification["entries"])
-    previous_hash = verification["entries"][-1]["manifest_hash"] if verification["entries"] else None
-
-    # Compute file SHA256 from the artifact
-    file_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-
-    entry = create_manifest_entry(
-        sequence=sequence,
-        filename=artifact_path.name,
-        file_sha256=file_sha256,
-        previous_manifest_hash=previous_hash,
-        extra_fields=extra_fields,
-    )
-
-    manifest_path = directory / f"{manifest_prefix}_{sequence:06d}.json"
-    manifest_content = json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
-
-    # Atomic exclusive creation: O_CREAT | O_EXCL
-    fd = os.open(str(manifest_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+def _validate_sha256_hex(value: str) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
     try:
-        os.write(fd, manifest_content)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        int(value, 16)
+        return True
+    except ValueError:
+        return False
 
-    # Re-read and verify the full chain
-    recheck = verify_manifest_chain(directory, manifest_prefix=manifest_prefix)
-    if not recheck["valid"]:
-        raise RuntimeError(
-            f"Manifest chain corrupt after write: {'; '.join(recheck['errors'])}"
-        )
 
-    return entry
+# ═══════════════════════════════════════════════════════════════════════
+# Extra fields validation (A.4.5)
+# ═══════════════════════════════════════════════════════════════════════
 
+def _validate_extra_fields(extra_fields: dict[str, Any] | None, policy: ManifestPolicy) -> None:
+    if extra_fields is None:
+        return
+    for key, value in extra_fields.items():
+        if key in RESERVED_FIELDS:
+            raise ValueError(f"Reserved field '{key}' cannot be set via extra_fields")
+        # Validate identity fields
+        if key in policy.identity_fields:
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"Identity field '{key}' must be non-empty string")
+            if key in ("run_id", "scan_id") and not value.strip():
+                raise ValueError(f"Identity field '{key}' must be non-empty")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Artifact glob matching (A.4.5)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _matches_glob(filename: str, pattern: str) -> bool:
+    """Check if filename matches a glob pattern using Path.match."""
+    return Path(filename).match(pattern)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Verify manifest chain (A.4.2, A.4.3, A.4.4)
+# ═══════════════════════════════════════════════════════════════════════
 
 def verify_manifest_chain(
     directory: Path,
-    manifest_prefix: str = "manifest",
-    artifact_glob: str = "*.jsonl.gz",
-    exclude_names: set[str] | None = None,
-    identity_fields: tuple[str, ...] = (),
+    policy: ManifestPolicy,
+    allowed_unregistered: set[str] | None = None,
 ) -> dict[str, Any]:
     """Verify a manifest chain in a directory.
 
     Args:
         directory: Directory containing artifacts and manifests
-        manifest_prefix: Prefix for manifest files (e.g. "manifest" or "smanifest")
-        artifact_glob: Glob pattern for artifact files (e.g. "*.jsonl.gz" or "snapshot_*.json")
-        exclude_names: Set of filenames to exclude from unregistered check
-                       (e.g. {"latest.json", "latest.json.sha256"})
-        identity_fields: Fields that must be present and unique across manifest entries
-                         (e.g. ("run_id", "scan_id") for snapshot manifests)
+        policy: ManifestPolicy with prefix, glob, excludes, identity fields
+        allowed_unregistered: Files temporarily allowed to be unregistered
+                              (used during atomic write of a new artifact)
 
-    Returns a dict with:
-      - valid: bool — entire chain is valid
+    Returns dict with:
+      - chain_status: EMPTY_CHAIN | VALID_CHAIN | BOOTSTRAP_REQUIRED | INVALID_CHAIN
+      - valid: bool (True only for EMPTY_CHAIN or VALID_CHAIN)
       - entries: list of manifest entries in sequence order
       - errors: list of error strings
       - unregistered_files: list of artifact files not in any manifest
       - sequence_count: int
     """
-    if exclude_names is None:
-        exclude_names = set()
+    if allowed_unregistered is None:
+        allowed_unregistered = set()
 
-    manifest_files = sorted(directory.glob(f"{manifest_prefix}_*.json"))
+    manifest_files = sorted(directory.glob(f"{policy.manifest_prefix}_*.json"))
+    # Exclude lock file from manifest list
+    manifest_files = [f for f in manifest_files if not f.name.endswith(".lock")]
     entries: list[dict[str, Any]] = []
     errors: list[str] = []
 
@@ -146,12 +160,29 @@ def verify_manifest_chain(
             entries.append(entry)
         except (json.JSONDecodeError, OSError) as e:
             errors.append(f"Cannot read manifest {mf.name}: {e}")
-            return {"valid": False, "entries": [], "errors": errors,
-                    "unregistered_files": [], "sequence_count": 0}
+            return {"chain_status": CHAIN_INVALID, "valid": False, "entries": [],
+                    "errors": errors, "unregistered_files": [], "sequence_count": 0}
+
+    # Get all artifact files matching the glob
+    all_artifacts = set()
+    for f in directory.glob(policy.artifact_glob):
+        if f.is_file() and f.name not in policy.exclude_names:
+            all_artifacts.add(f.name)
 
     if not entries:
-        return {"valid": True, "entries": [], "errors": [], "unregistered_files": [],
-                "sequence_count": 0, "note": "No manifests found — empty chain is valid"}
+        if not all_artifacts:
+            return {"chain_status": CHAIN_EMPTY, "valid": True, "entries": [],
+                    "errors": [], "unregistered_files": [], "sequence_count": 0}
+        else:
+            # Artifacts exist but no manifests
+            unregistered = all_artifacts - allowed_unregistered
+            if unregistered:
+                return {"chain_status": CHAIN_BOOTSTRAP_REQUIRED, "valid": False,
+                        "entries": [], "errors": [f"Bootstrap required: {len(unregistered)} unregistered artifacts"],
+                        "unregistered_files": sorted(unregistered), "sequence_count": 0}
+            # All artifacts are allowed (pending write)
+            return {"chain_status": CHAIN_EMPTY, "valid": True, "entries": [],
+                    "errors": [], "unregistered_files": [], "sequence_count": 0}
 
     # Sort by sequence
     entries.sort(key=lambda e: e.get("sequence", -1))
@@ -161,13 +192,13 @@ def verify_manifest_chain(
         seq = entry.get("sequence")
         if seq != i:
             errors.append(f"Sequence gap or duplicate: expected {i}, got {seq}")
-            return {"valid": False, "entries": entries, "errors": errors,
-                    "unregistered_files": [], "sequence_count": len(entries)}
+            return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                    "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
 
     # Verify chain links
     prev_hash = None
     seen_filenames: set[str] = set()
-    seen_identities: dict[str, set[str]] = {f: set() for f in identity_fields}
+    seen_identities: dict[str, set[str]] = {f: set() for f in policy.identity_fields}
 
     for entry in entries:
         seq = entry["sequence"]
@@ -176,73 +207,68 @@ def verify_manifest_chain(
         entry_prev = entry.get("previous_manifest_hash")
         if seq == 0:
             if entry_prev is not None:
-                errors.append(f"First entry (seq=0) has non-null previous_manifest_hash: {entry_prev}")
-                return {"valid": False, "entries": entries, "errors": errors,
-                        "unregistered_files": [], "sequence_count": len(entries)}
+                errors.append(f"First entry (seq=0) has non-null previous_manifest_hash")
+                return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                        "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
         else:
             if entry_prev != prev_hash:
-                errors.append(f"Chain broken at seq={seq}: expected prev={prev_hash[:16] if prev_hash else 'None'}, "
-                              f"got={entry_prev[:16] if entry_prev else 'None'}")
-                return {"valid": False, "entries": entries, "errors": errors,
-                        "unregistered_files": [], "sequence_count": len(entries)}
+                errors.append(f"Chain broken at seq={seq}")
+                return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                        "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
 
         # Verify manifest_hash
         recomputed = _compute_manifest_hash(entry)
         if entry.get("manifest_hash") != recomputed:
             errors.append(f"Manifest hash mismatch at seq={seq}")
-            return {"valid": False, "entries": entries, "errors": errors,
-                    "unregistered_files": [], "sequence_count": len(entries)}
+            return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                    "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
 
         # Check filename uniqueness
         fname = entry.get("filename", "")
         if fname in seen_filenames:
             errors.append(f"Duplicate filename in manifest: {fname}")
-            return {"valid": False, "entries": entries, "errors": errors,
-                    "unregistered_files": [], "sequence_count": len(entries)}
+            return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                    "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
         seen_filenames.add(fname)
 
-        # Check identity field uniqueness (run_id, scan_id, etc.)
-        for field in identity_fields:
+        # Check identity field uniqueness
+        for field in policy.identity_fields:
             val = entry.get(field)
             if val is None:
                 errors.append(f"Manifest seq={seq} missing required field '{field}'")
-                return {"valid": False, "entries": entries, "errors": errors,
-                        "unregistered_files": [], "sequence_count": len(entries)}
+                return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                        "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
             if val in seen_identities[field]:
                 errors.append(f"Duplicate {field} in manifest: {val}")
-                return {"valid": False, "entries": entries, "errors": errors,
-                        "unregistered_files": [], "sequence_count": len(entries)}
+                return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                        "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
             seen_identities[field].add(val)
 
-        # Verify the artifact file exists and matches file_sha256
+        # Verify artifact file exists and matches hash
         artifact_path = directory / fname
         if not artifact_path.exists():
-            errors.append(f"Artifact file missing: {fname} (referenced by manifest seq={seq})")
-            return {"valid": False, "entries": entries, "errors": errors,
-                    "unregistered_files": [], "sequence_count": len(entries)}
+            errors.append(f"Artifact file missing: {fname} (seq={seq})")
+            return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                    "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
 
         actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
         if actual_sha != entry.get("file_sha256"):
-            errors.append(f"File hash mismatch for {fname}: manifest={entry.get('file_sha256', '?')[:16]}, "
-                          f"actual={actual_sha[:16]}")
-            return {"valid": False, "entries": entries, "errors": errors,
-                    "unregistered_files": [], "sequence_count": len(entries)}
+            errors.append(f"File hash mismatch for {fname}")
+            return {"chain_status": CHAIN_INVALID, "valid": False, "entries": entries,
+                    "errors": errors, "unregistered_files": [], "sequence_count": len(entries)}
 
         prev_hash = entry.get("manifest_hash")
 
-    # Check for unregistered artifact files using the glob pattern
+    # Check for unregistered artifacts
     registered = {e["filename"] for e in entries}
-    all_artifacts = set()
-    for f in directory.glob(artifact_glob):
-        if f.is_file() and f.name not in exclude_names:
-            all_artifacts.add(f.name)
-
-    unregistered = all_artifacts - registered
+    unregistered = all_artifacts - registered - allowed_unregistered
     if unregistered:
         errors.append(f"Unregistered artifact files: {sorted(unregistered)}")
 
+    chain_status = CHAIN_VALID if not errors else CHAIN_INVALID
     return {
-        "valid": len(errors) == 0,
+        "chain_status": chain_status,
+        "valid": chain_status in (CHAIN_EMPTY, CHAIN_VALID),
         "entries": entries,
         "errors": errors,
         "unregistered_files": sorted(unregistered),
@@ -250,27 +276,141 @@ def verify_manifest_chain(
     }
 
 
-def get_last_manifest_hash(directory: Path, manifest_prefix: str = "manifest") -> str | None:
-    """Get the manifest_hash of the last entry in the chain, or None if empty.
+# ═══════════════════════════════════════════════════════════════════════
+# Atomic manifest writing (A.4.1, A.4.3, A.4.5, A.4.6, A.4.7)
+# ═══════════════════════════════════════════════════════════════════════
 
-    Fails closed: returns None if chain is corrupt (does NOT return a potentially
-    invalid hash).
+def write_manifest_atomic(
+    directory: Path,
+    artifact_path: Path,
+    policy: ManifestPolicy,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write a manifest entry atomically with exclusive creation and locking.
+
+    A.4.1: Uses allowed_unregistered to permit the pending artifact during prevalidation.
+    A.4.3: The artifact being registered is temporarily allowed as unregistered.
+    A.4.5: Validates extra_fields don't contain reserved keys.
+    A.4.6: Uses fdopen + flush + fsync + dirfsync for full durability.
+    A.4.7: Uses fcntl.flock for concurrency control.
+
+    Returns the manifest entry dict.
+    Raises:
+      ValueError: if extra_fields contains reserved keys or invalid values.
+      RuntimeError: if existing chain is corrupt or bootstrap required.
+      FileExistsError: if manifest file already exists.
     """
-    verification = verify_manifest_chain(directory, manifest_prefix=manifest_prefix)
-    if not verification["valid"]:
-        return None  # Fail closed — don't return a hash from a corrupt chain
-    entries = verification["entries"]
+    # A.4.5: Validate extra fields
+    _validate_extra_fields(extra_fields, policy)
+
+    # A.4.5: Validate artifact_path is in directory and matches glob
+    if artifact_path.parent != directory:
+        raise ValueError(f"Artifact {artifact_path} is not in directory {directory}")
+    if not _matches_glob(artifact_path.name, policy.artifact_glob):
+        raise ValueError(f"Artifact {artifact_path.name} does not match glob {policy.artifact_glob}")
+
+    # A.4.7: Acquire lock
+    lock_path = directory / policy.lock_filename()
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        # A.4.1/A.4.3: Prevalidate with pending artifact allowed
+        precheck = verify_manifest_chain(
+            directory, policy,
+            allowed_unregistered={artifact_path.name},
+        )
+
+        if precheck["chain_status"] == CHAIN_INVALID:
+            raise RuntimeError(f"Cannot write manifest: chain is corrupt: {'; '.join(precheck['errors'])}")
+        if precheck["chain_status"] == CHAIN_BOOTSTRAP_REQUIRED:
+            raise RuntimeError(
+                f"Cannot write manifest: bootstrap required — "
+                f"legacy artifacts exist without manifests: {precheck['unregistered_files']}"
+            )
+
+        # Get next sequence from verified chain
+        sequence = len(precheck["entries"])
+        previous_hash = precheck["entries"][-1]["manifest_hash"] if precheck["entries"] else None
+
+        # Compute file SHA256 from the artifact
+        file_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+
+        # Build manifest entry
+        entry: dict[str, Any] = {
+            "sequence": sequence,
+            "filename": artifact_path.name,
+            "file_sha256": file_sha256,
+            "previous_manifest_hash": previous_hash,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if extra_fields:
+            entry.update(extra_fields)
+        entry["manifest_hash"] = _compute_manifest_hash(entry)
+
+        manifest_path = directory / f"{policy.manifest_prefix}_{sequence:06d}.json"
+        manifest_content = json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
+
+        # A.4.6: Atomic exclusive creation with full durability
+        fd = os.open(str(manifest_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(manifest_content)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            # If write fails, try to clean up the partially written file
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                manifest_path.unlink()
+            except OSError:
+                pass
+            raise
+
+        # A.4.6: Sync the directory
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+        # Post-write verification: full chain check with NO allowed unregistered
+        recheck = verify_manifest_chain(directory, policy, allowed_unregistered=set())
+        if not recheck["valid"]:
+            # The manifest was published but chain is invalid — this is a blocking error
+            raise RuntimeError(
+                f"Manifest chain corrupt after write: {'; '.join(recheck['errors'])}. "
+                f"Published manifest: {manifest_path.name}"
+            )
+
+        return entry
+
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Helpers (fail-closed)
+# ═══════════════════════════════════════════════════════════════════════
+
+def get_last_manifest_hash(directory: Path, policy: ManifestPolicy) -> str | None:
+    """Get the manifest_hash of the last entry, or None if empty/corrupt."""
+    result = verify_manifest_chain(directory, policy)
+    if not result["valid"]:
+        return None
+    entries = result["entries"]
     if not entries:
         return None
     return entries[-1].get("manifest_hash")
 
 
-def get_next_sequence(directory: Path, manifest_prefix: str = "manifest") -> int | None:
-    """Get the next sequence number for a new manifest entry.
-
-    FASE A.4: Returns None if chain is corrupt (fail closed).
-    """
-    verification = verify_manifest_chain(directory, manifest_prefix=manifest_prefix)
-    if not verification["valid"]:
-        return None  # Fail closed
-    return len(verification["entries"])
+def get_next_sequence(directory: Path, policy: ManifestPolicy) -> int | None:
+    """Get the next sequence number, or None if chain is corrupt."""
+    result = verify_manifest_chain(directory, policy)
+    if not result["valid"]:
+        return None
+    return len(result["entries"])
