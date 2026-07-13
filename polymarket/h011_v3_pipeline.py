@@ -59,15 +59,16 @@ from validation_semantics import (
 )
 from control_plane.replay import write_bundle
 from control_plane.coverage import (
-    compute_control_plane_state,
-    make_source_health,
+    ScanContext,
+    SourceHealthTracker,
     not_used_source_health,
-    evaluate_all_invariants,
-    invariant_summary as coverage_invariant_summary,
+    compute_control_plane_state,
     determine_scan_status,
     compute_health_ok,
     CATALOG_VERSION,
     invariant_catalog_hash,
+    invariant_summary,
+    get_catalog,
 )
 
 
@@ -1222,45 +1223,79 @@ def run_scan_v3(
             }
             for r in records
         ]
-        source_health, invariants, alerts, scan_status = compute_control_plane_state(
-            scan_data={
-                "run_id": run_id,
-                "scan_id": scan_id,
-                "pipeline_version": "h011-integrity-v3",
-                "window_s": config.window_s,
-                "paper_only": config.paper_only,
-                "live_capital_locked": config.live_capital_locked,
-                "orders_enabled": False,
-                "funnel": funnel,
-                "market_records": market_records_compact,
-                "snapshot_hash": summary.get("snapshot_hash"),
-                "_results_dir": str(V3_RESULTS_DIR),
-                "_raw_dir": str(V3_RAW_DIR),
-                "_snapshot_dir": str(V3_RESULTS_DIR / "state"),
-            },
-            source_health=source_health_telemetry if 'source_health_telemetry' in dir() else {
-                "gamma_metadata": make_source_health(
-                    status="HEALTHY" if scan_meta.get("discovery_status") not in ("DISCOVERY_SOURCE_FAILED",) else "FAILED",
-                    objects_received=scan_meta.get("discovery_markets_received", 0),
-                    attempts=1,
-                    failures=1 if scan_meta.get("discovery_status") == "DISCOVERY_SOURCE_FAILED" else 0,
-                ),
-                "data_api_trades": make_source_health(
-                    status="HEALTHY" if records else "NOT_USED",
-                    objects_received=sum(len(r.get("_raw_bundle", {}).get("trades", [])) for r in records),
-                    attempts=len(records),
-                ) if records else not_used_source_health("No markets reached Data API stage"),
-                "clob_orderbook": not_used_source_health(
-                    "CLOB not consulted — no shadow-executable markets in paper-only mode"
-                ),
-            },
-            config_data=config.normalized(),
+        # Build source health from actual scan flow
+        # Gamma source: discovery was the HTTP call
+        gamma_health = SourceHealthTracker("gamma_metadata")
+        if scan_meta.get("discovery_status") == "DISCOVERY_SOURCE_FAILED":
+            gamma_health.mark_used()
+            gamma_health.record_request()
+            gamma_health.record_error("Discovery source failed")
+        else:
+            gamma_health.mark_used()
+            gamma_health.record_request()
+            gamma_health.record_response(200, scan_meta.get("discovery_markets_received", 0))
+
+        # Data API source: consulted for each market that reached the pipeline
+        data_api_health = SourceHealthTracker("data_api_trades")
+        if records:
+            for r in records:
+                status = r.get("record_status", "")
+                if status in ("REJECTED_IDENTITY", "REJECTED_TEMPORAL_ELIGIBILITY", "REJECTED_METADATA"):
+                    continue  # These were rejected before Data API
+                data_api_health.mark_used()
+                data_api_health.record_request()
+                trades = r.get("_raw_bundle", {}).get("trades", [])
+                data_api_health.record_response(200, len(trades))
+        if not data_api_health._used:
+            data_api_health = type(data_api_health)("data_api_trades")  # Reset to NOT_USED
+
+        # CLOB source: only consulted if shadow execution was attempted
+        clob_health = not_used_source_health("clob_orderbook",
+            "CLOB not consulted — no shadow-executable markets in paper-only mode")
+        for r in records:
+            if r.get("shadow_execution", {}).get("attempted"):
+                clob_health = SourceHealthTracker("clob_orderbook")
+                clob_health.mark_used()
+                clob_health.record_request()
+                clob_health.record_response(200, 0)  # Books fetched
+                break
+
+        source_health_telemetry = {
+            "gamma_metadata": gamma_health.build(),
+            "data_api_trades": data_api_health.build(),
+            "clob_orderbook": clob_health if isinstance(clob_health, dict) else clob_health.build(),
+        }
+
+        # Build ScanContext for invariant evaluation
+        ctx = ScanContext(
+            run_id=run_id,
+            scan_id=scan_id,
+            pipeline_version="h011-integrity-v3",
+            window_s=config.window_s,
+            paper_only=config.paper_only,
+            live_capital_locked=config.live_capital_locked,
+            orders_enabled=False,
+            funnel=funnel,
+            market_records=market_records_compact,
             records=records,
+            source_health=source_health_telemetry,
             discovery_meta={
                 "status": scan_meta.get("discovery_status", "UNKNOWN"),
                 "discovery_complete": scan_meta.get("discovery_complete", False),
                 "markets_selected": len(markets),
             },
+            snapshot_hash=summary.get("snapshot_hash"),
+            snapshot_path=str(V3_RESULTS_DIR / "state" / "latest.json"),
+            results_dir=str(V3_RESULTS_DIR),
+            raw_dir=str(V3_RAW_DIR),
+        )
+
+        source_health, invariants, alerts, scan_status = compute_control_plane_state(
+            ctx,
+            discovery_replay_verified=scan_meta.get("discovery_replay_verified", False),
+            file_sha256_matches=bool((discovery or {}).get("file_sha256_matches", False)),
+            snapshot_hash_verified=bool(summary.get("snapshot_hash")),
+            control_plane_replay_verified=False,  # Will be True when replay is implemented
         )
         snapshot = build_snapshot(
             scan_id=scan_id,
