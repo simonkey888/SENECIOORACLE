@@ -414,3 +414,152 @@ def get_next_sequence(directory: Path, policy: ManifestPolicy) -> int | None:
     if not result["valid"]:
         return None
     return len(result["entries"])
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# publish_artifact_with_manifest — Full transaction (A.4 runtime)
+# ═══════════════════════════════════════════════════════════════════════
+
+def publish_artifact_with_manifest(
+    directory: Path,
+    artifact_path: Path,
+    policy: ManifestPolicy,
+    identity_fields: dict[str, str],
+    extra_manifest_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Full transaction: validate candidate → publish artifact → sidecar → manifest → reverify.
+
+    The artifact must already exist at artifact_path (staged by the caller).
+    This function:
+      1. Acquires lock
+      2. Verifies existing chain
+      3. Validates candidate (identity fields present, not duplicate, glob match)
+      4. Computes file SHA256
+      5. Writes sidecar SHA256
+      6. Writes manifest (atomic, exclusive)
+      7. Re-verifies full chain
+      8. Releases lock
+
+    Returns the manifest entry dict.
+    Raises ValueError for invalid candidate.
+    Raises RuntimeError for chain corruption or write failure.
+    """
+    # Validate identity fields are present and non-empty
+    combined_fields = {**identity_fields, **(extra_manifest_fields or {})}
+    _validate_extra_fields(extra_manifest_fields, policy)
+    for field in policy.identity_fields:
+        val = combined_fields.get(field)
+        if not isinstance(val, str) or not val.strip():
+            raise ValueError(f"Required identity field '{field}' missing or empty")
+
+    # Acquire lock
+    lock_path = directory / policy.lock_filename()
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        # Now that we hold the lock, verify the artifact exists and is valid
+        if artifact_path.parent != directory:
+            raise ValueError(f"Artifact {artifact_path} is not in directory {directory}")
+        if not _matches_glob(artifact_path.name, policy.artifact_glob):
+            raise ValueError(f"Artifact {artifact_path.name} does not match glob {policy.artifact_glob}")
+        if not artifact_path.exists():
+            raise ValueError(f"Artifact file does not exist: {artifact_path}")
+
+        # Verify existing chain (with pending artifact allowed)
+        precheck = verify_manifest_chain(
+            directory, policy,
+            allowed_unregistered={artifact_path.name},
+        )
+
+        # If BOOTSTRAP_REQUIRED but all unregistered files are just our pending artifact,
+        # treat as EMPTY_CHAIN (first write)
+        if precheck["chain_status"] == CHAIN_BOOTSTRAP_REQUIRED:
+            unreg = set(precheck.get("unregistered_files", []))
+            if unreg == {artifact_path.name}:
+                precheck["chain_status"] = CHAIN_EMPTY
+                precheck["valid"] = True
+                precheck["entries"] = []
+                precheck["errors"] = []
+                precheck["unregistered_files"] = []
+
+        if precheck["chain_status"] == CHAIN_INVALID:
+            raise RuntimeError(f"Chain corrupt: {'; '.join(precheck['errors'])}")
+        if precheck["chain_status"] == CHAIN_BOOTSTRAP_REQUIRED:
+            raise RuntimeError(
+                f"Bootstrap required — legacy artifacts exist: {precheck['unregistered_files']}"
+            )
+
+        # Validate candidate against existing entries
+        existing_entries = precheck["entries"]
+        for field in policy.identity_fields:
+            val = combined_fields[field]
+            existing_values = {e.get(field) for e in existing_entries}
+            if val in existing_values:
+                raise ValueError(f"Duplicate {field}: {val}")
+
+        # Reserve sequence
+        sequence = len(existing_entries)
+        previous_hash = existing_entries[-1]["manifest_hash"] if existing_entries else None
+
+        # Compute file SHA256
+        file_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+
+        # Write sidecar SHA256 (mandatory)
+        sidecar_path = artifact_path.with_suffix(artifact_path.suffix + ".sha256")
+        sidecar_content = file_sha256 + "\n"
+        sidecar_tmp = sidecar_path.with_suffix(".tmp")
+        sidecar_tmp.write_text(sidecar_content)
+        os.rename(str(sidecar_tmp), str(sidecar_path))
+
+        # Build manifest entry
+        entry: dict[str, Any] = {
+            "sequence": sequence,
+            "filename": artifact_path.name,
+            "file_sha256": file_sha256,
+            "previous_manifest_hash": previous_hash,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        entry.update(combined_fields)
+        entry["manifest_hash"] = _compute_manifest_hash(entry)
+
+        # Write manifest (atomic, exclusive)
+        manifest_path = directory / f"{policy.manifest_prefix}_{sequence:06d}.json"
+        manifest_content = json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
+        fd = os.open(str(manifest_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(manifest_content)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                manifest_path.unlink()
+            except OSError:
+                pass
+            raise
+
+        # Sync directory
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+        # Post-write verification (strict — no allowed unregistered)
+        recheck = verify_manifest_chain(directory, policy, allowed_unregistered=set())
+        if not recheck["valid"]:
+            raise RuntimeError(
+                f"Chain corrupt after publish: {'; '.join(recheck['errors'])}. "
+                f"Published: {manifest_path.name}"
+            )
+
+        return entry
+
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)

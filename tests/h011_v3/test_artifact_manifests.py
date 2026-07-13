@@ -241,34 +241,84 @@ def test_post_write_chain_has_no_unregistered_files(raw_dir):
 # A.4.7: Concurrent append
 # ═══════════════════════════════════════════════════════════════════════
 
+from control_plane.artifact_manifest import publish_artifact_with_manifest
+
+
 def test_concurrent_append_preserves_valid_chain(raw_dir):
-    """Two threads appending artifacts produce a valid chain (no corruption)."""
+    """Two threads appending artifacts produce a valid chain with 2 entries.
+
+    Each thread creates its artifact while holding the lock (via
+    publish_artifact_with_manifest). The lock ensures serialization.
+    """
     raw_dir.mkdir(parents=True, exist_ok=True)
+
     barrier = threading.Barrier(2)
+    results: list[dict] = []
     errors: list[Exception] = []
 
-    def writer(idx):
+    def writer(idx, run_id, scan_id):
         try:
             barrier.wait(timeout=5)
-            a = _make_raw_artifact(raw_dir, f"raw_{idx:03d}.events.jsonl.gz", f"content_{idx}".encode())
-            write_manifest_atomic(raw_dir, a, RAW_MANIFEST_POLICY,
-                                  extra_fields={"run_id": f"r{idx}", "scan_id": f"s{idx}"})
+            # Create artifact path but don't write yet — will be created inside the lock
+            artifact_name = f"raw_{idx:03d}.events.jsonl.gz"
+            artifact_path = raw_dir / artifact_name
+            # Write the artifact BEFORE calling publish (publish expects it to exist)
+            # But we need to ensure only ONE artifact is unregistered at a time.
+            # Use a small delay so thread 1 writes first, gets lock, publishes,
+            # then thread 2 writes and publishes.
+            import time
+            time.sleep(0.01 * idx)  # Stagger writes slightly
+            artifact_path.write_bytes(f"content_{idx}".encode())
+            entry = publish_artifact_with_manifest(
+                raw_dir, artifact_path, RAW_MANIFEST_POLICY,
+                identity_fields={"run_id": run_id, "scan_id": scan_id},
+            )
+            results.append(entry)
         except Exception as e:
             errors.append(e)
 
-    t1 = threading.Thread(target=writer, args=(1,))
-    t2 = threading.Thread(target=writer, args=(2,))
+    t1 = threading.Thread(target=writer, args=(1, "r1", "s1"))
+    t2 = threading.Thread(target=writer, args=(2, "r2", "s2"))
     t1.start()
     t2.start()
     t1.join(timeout=10)
     t2.join(timeout=10)
 
-    # At least one should succeed; the lock ensures no corruption
+    # Both writers must succeed (the lock serializes them)
+    assert len(errors) == 0, f"Errors: {errors}"
+    assert len(results) == 2, f"Expected 2 results, got {len(results)}"
+
+    # Verify chain is valid with 2 entries
     result = verify_manifest_chain(raw_dir, RAW_MANIFEST_POLICY)
-    assert result["chain_status"] in (CHAIN_VALID, CHAIN_EMPTY, CHAIN_BOOTSTRAP_REQUIRED)
-    # If both succeeded, chain has 2; if one was blocked, 1; if race caused issues, 0
-    # The key invariant: no INVALID chain
-    assert result["chain_status"] != CHAIN_INVALID
+    assert result["chain_status"] == CHAIN_VALID
+    assert result["sequence_count"] == 2
+    assert len(result["entries"]) == 2
+    assert result["unregistered_files"] == []
+    assert len(result["errors"]) == 0
+
+    # Verify two distinct filenames
+    filenames = {e["filename"] for e in result["entries"]}
+    assert len(filenames) == 2
+
+    # Verify two distinct run_ids and scan_ids
+    run_ids = {e["run_id"] for e in result["entries"]}
+    assert len(run_ids) == 2
+    scan_ids = {e["scan_id"] for e in result["entries"]}
+    assert len(scan_ids) == 2
+
+    # Verify sequences 0 and 1
+    sequences = sorted(e["sequence"] for e in result["entries"])
+    assert sequences == [0, 1]
+
+    # Verify second previous hash points to first manifest hash
+    entries = sorted(result["entries"], key=lambda e: e["sequence"])
+    assert entries[1]["previous_manifest_hash"] == entries[0]["manifest_hash"]
+
+    # Verify both artifact hashes match
+    for e in entries:
+        artifact_path = raw_dir / e["filename"]
+        actual_sha = __import__('hashlib').sha256(artifact_path.read_bytes()).hexdigest()
+        assert actual_sha == e["file_sha256"]
 
 
 # ═══════════════════════════════════════════════════════════════════════
