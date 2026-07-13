@@ -563,3 +563,187 @@ def publish_artifact_with_manifest(
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# publish_staged_artifact_with_manifest — Full transaction from staging (B4-B6, B8)
+# ═══════════════════════════════════════════════════════════════════════
+
+def publish_staged_artifact_with_manifest(
+    directory: Path,
+    sealed,  # SealedRawArtifact or similar
+    policy: ManifestPolicy,
+    identity_fields: dict[str, str],
+    extra_manifest_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """B4: Full transaction from a sealed staging descriptor.
+
+    Everything happens under the manifest lock:
+      1. acquire lock
+      2. verify current chain
+      3. validate candidate (identity, duplicate, glob)
+      4. reserve sequence
+      5. create transaction marker
+      6. publish final artifact (no overwrite — B5, os.link)
+      7. fsync
+      8. publish sidecar
+      9. fsync
+      10. publish manifest
+      11. fsync
+      12. strict reverify
+      13. mark committed, remove marker + staging
+      14. unlock
+    """
+    staging_path = sealed.staging_path
+    final_name = sealed.final_name
+    final_path = directory / final_name
+
+    # B8: Validate identity fields and extra fields
+    combined_fields = {**identity_fields, **(extra_manifest_fields or {})}
+    _validate_extra_fields(extra_manifest_fields, policy)
+    for field in policy.identity_fields:
+        val = combined_fields.get(field)
+        if not isinstance(val, str) or not val.strip():
+            raise ValueError(f"Required identity field '{field}' missing or empty")
+
+    # B5: Pre-checks before lock
+    if final_path.exists():
+        raise FileExistsError(f"Final artifact already exists: {final_name}")
+
+    # Acquire lock
+    lock_path = directory / policy.lock_filename()
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        # B5: Check again under lock
+        if final_path.exists():
+            raise FileExistsError(f"Final artifact already exists (under lock): {final_name}")
+
+        # Verify existing chain
+        precheck = verify_manifest_chain(directory, policy, allowed_unregistered=set())
+        if precheck["chain_status"] == CHAIN_INVALID:
+            raise RuntimeError(f"Chain corrupt: {'; '.join(precheck['errors'])}")
+        if precheck["chain_status"] == CHAIN_BOOTSTRAP_REQUIRED:
+            raise RuntimeError(f"Bootstrap required: {precheck['unregistered_files']}")
+
+        # Validate candidate against existing entries
+        existing_entries = precheck["entries"]
+        for field in policy.identity_fields:
+            val = combined_fields[field]
+            existing_values = {e.get(field) for e in existing_entries}
+            if val in existing_values:
+                raise ValueError(f"Duplicate {field}: {val}")
+
+        # Reserve sequence
+        sequence = len(existing_entries)
+        previous_hash = existing_entries[-1]["manifest_hash"] if existing_entries else None
+
+        # B6: Create transaction marker
+        marker_name = f"{policy.manifest_prefix}_txn_{sequence:06d}.marker"
+        marker_path = directory / marker_name
+        marker = {
+            "transaction_id": f"txn_{sequence:06d}_{datetime.now(timezone.utc).isoformat()}",
+            "status": "STAGED",
+            "staging_path": str(staging_path),
+            "final_path": str(final_path),
+            "sequence": sequence,
+            "run_id": identity_fields.get("run_id", ""),
+            "scan_id": identity_fields.get("scan_id", ""),
+        }
+        marker_fd = os.open(str(marker_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        with os.fdopen(marker_fd, "wb") as f:
+            f.write(json.dumps(marker, sort_keys=True).encode())
+            f.flush()
+            os.fsync(f.fileno())
+
+        try:
+            # B5: Publish final artifact (os.link fails if target exists)
+            os.link(str(staging_path), str(final_path))
+            _dir_fsync(directory)
+
+            marker["status"] = "ARTIFACT_PUBLISHED"
+
+            # Publish sidecar
+            sidecar_path = final_path.with_suffix(final_path.suffix + ".sha256")
+            if sidecar_path.exists():
+                raise FileExistsError(f"Sidecar already exists: {sidecar_path.name}")
+            sidecar_tmp = sidecar_path.with_suffix(".tmp")
+            sidecar_tmp.write_text(sealed.file_sha256 + "\n")
+            os.rename(str(sidecar_tmp), str(sidecar_path))
+            _dir_fsync(directory)
+            marker["status"] = "SIDECAR_PUBLISHED"
+
+            # Build manifest entry
+            entry: dict[str, Any] = {
+                "sequence": sequence,
+                "filename": final_name,
+                "file_sha256": sealed.file_sha256,
+                "previous_manifest_hash": previous_hash,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            entry.update(combined_fields)
+            entry["manifest_hash"] = _compute_manifest_hash(entry)
+
+            # Publish manifest
+            manifest_path = directory / f"{policy.manifest_prefix}_{sequence:06d}.json"
+            manifest_content = json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
+            mfd = os.open(str(manifest_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            with os.fdopen(mfd, "wb") as f:
+                f.write(manifest_content)
+                f.flush()
+                os.fsync(f.fileno())
+            _dir_fsync(directory)
+            marker["status"] = "MANIFEST_PUBLISHED"
+
+            # Strict reverify
+            recheck = verify_manifest_chain(directory, policy, allowed_unregistered=set())
+            if not recheck["valid"]:
+                raise RuntimeError(
+                    f"Chain corrupt after publish: {'; '.join(recheck['errors'])}"
+                )
+
+            # B6: Mark committed, clean up
+            marker["status"] = "COMMITTED"
+            try:
+                staging_path.unlink()
+            except OSError:
+                pass
+            marker_path.unlink()
+
+            return entry
+
+        except Exception as publish_error:
+            # B6: Recovery — quarantine partial artifacts
+            marker["status"] = "QUARANTINED"
+            try:
+                quarantine_dir = directory / ".quarantine"
+                quarantine_dir.mkdir(exist_ok=True)
+                if final_path.exists():
+                    qpath = quarantine_dir / f"{final_name}.quarantined"
+                    os.rename(str(final_path), str(qpath))
+                sidecar = final_path.with_suffix(final_path.suffix + ".sha256")
+                if sidecar.exists():
+                    os.rename(str(sidecar), str(quarantine_dir / f"{sidecar.name}.quarantined"))
+            except OSError:
+                pass
+            try:
+                marker_path.write_text(json.dumps(marker, sort_keys=True))
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"Publish failed, quarantined: {publish_error}"
+            ) from publish_error
+
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _dir_fsync(directory: Path) -> None:
+    """Sync directory metadata to disk."""
+    dir_fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)

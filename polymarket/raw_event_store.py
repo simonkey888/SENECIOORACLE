@@ -115,47 +115,91 @@ def save_raw_events(
 # V3: Immutable per-scan raw storage
 # ═══════════════════════════════════════════════════════════════════════
 
+import uuid as _uuid
+from dataclasses import dataclass
+
+
 def _safe_scan_id(scan_id: str) -> str:
     """Convert scan_id to a filesystem-safe string."""
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in scan_id)
     return safe[:100]  # cap length
 
 
+@dataclass(frozen=True)
+class SealedRawArtifact:
+    """B2: Sealed descriptor returned by RawScanStager.seal().
+
+    The stager does NOT publish anything. This descriptor contains
+    all metadata needed for the publisher to create the final artifact
+    + sidecar + manifest in a single transaction.
+    """
+    staging_path: Path
+    final_name: str
+    run_id: str
+    scan_id: str
+    event_count: int
+    condition_ids: tuple[str, ...]
+    file_sha256: str
+    canonical_events_sha256: str
+
+    def to_manifest_fields(self) -> dict[str, Any]:
+        """Return fields to include in the manifest entry."""
+        return {
+            "run_id": self.run_id,
+            "scan_id": self.scan_id,
+            "event_count": self.event_count,
+            "condition_ids": list(self.condition_ids),
+            "canonical_events_sha256": self.canonical_events_sha256,
+        }
+
+
 class RawScanStager:
-    """Stages raw events for a single scan in a temporary file.
+    """B2/B3: Stages raw events for a single scan in an exclusive temporary file.
 
-    Events are written to a staging file (outside the artifact glob).
-    When finalize() is called, the staging file is atomically renamed
-    to its final immutable name and a sidecar SHA256 is written.
+    Events are written to a staging file in .pending/ (outside artifact glob).
+    The staging file is created with O_CREAT | O_EXCL and a UUID to ensure
+    uniqueness. seal() returns a SealedRawArtifact descriptor — it does NOT
+    publish the final artifact.
 
-    The final artifact is never opened for append after finalization.
+    The final artifact is published by publish_staged_artifact_with_manifest()
+    under the manifest lock, ensuring atomicity.
     """
 
-    def __init__(self, scan_id: str, raw_dir: Path):
+    def __init__(self, run_id: str, scan_id: str, raw_dir: Path):
+        self.run_id = run_id
         self.scan_id = scan_id
         self.raw_dir = raw_dir
         self._staging_path: Path | None = None
         self._events: list[dict[str, Any]] = []
         self._condition_ids: set[str] = set()
-        self._finalized = False
+        self._sealed = False
+        self._staging_fd: int | None = None
 
     def __enter__(self):
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         staging_dir = self.raw_dir / ".pending"
         staging_dir.mkdir(exist_ok=True)
-        # Staging file name uses .tmp extension so it doesn't match artifact glob
+
+        # B3: Unique staging file with UUID + O_CREAT | O_EXCL
         safe_id = _safe_scan_id(self.scan_id)
-        self._staging_path = staging_dir / f"raw_scan_{safe_id}.jsonl.gz.tmp"
+        unique_suffix = _uuid.uuid4().hex[:12]
+        staging_name = f"raw_scan_{safe_id}_{unique_suffix}.jsonl.gz.tmp"
+        self._staging_path = staging_dir / staging_name
+
+        # Create with O_CREAT | O_EXCL to prevent collision
+        fd = os.open(str(self._staging_path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+        os.close(fd)  # We'll reopen with gzip
+
         return self
 
     def append_event(self, event: dict[str, Any]) -> None:
         """Append a raw event to the staging file.
 
-        Writes immediately to disk (flush + fsync) to preserve
+        B1: Writes immediately to disk (flush + fsync) to preserve
         INV-025: raw persisted before transform.
         """
-        if self._finalized:
-            raise RuntimeError("Cannot append to finalized stager")
+        if self._sealed:
+            raise RuntimeError("Cannot append to sealed stager")
         if self._staging_path is None:
             raise RuntimeError("Stager not initialized — use 'with' statement")
 
@@ -189,31 +233,69 @@ class RawScanStager:
         ).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
-    def finalize(self) -> Path:
-        """Atomically rename staging to final immutable artifact.
+    def seal(self) -> SealedRawArtifact:
+        """B2: Seal the stager and return a descriptor.
 
-        Returns the final artifact path.
-        The artifact is never opened for append after this call.
+        Does NOT publish the final artifact. The caller must use
+        publish_staged_artifact_with_manifest() to atomically publish
+        the artifact + sidecar + manifest.
+
+        B9: Re-reads the staging file from disk and recalculates all
+        metadata from the actual file content, not from in-memory state.
         """
-        if self._finalized:
-            raise RuntimeError("Already finalized")
+        if self._sealed:
+            raise RuntimeError("Already sealed")
         if self._staging_path is None or not self._staging_path.exists():
             raise RuntimeError("Staging file does not exist")
 
+        # B9: Re-read the gzip from disk and verify content
+        disk_events = load_raw_events(self._staging_path)
+        if len(disk_events) != len(self._events):
+            raise RuntimeError(
+                f"Disk event count ({len(disk_events)}) != memory event count ({len(self._events)})"
+            )
+
+        # Recalculate metadata from disk content
+        disk_condition_ids = set()
+        for ev in disk_events:
+            cid = ev.get("requested_condition_id", "")
+            if cid:
+                disk_condition_ids.add(cid)
+
+        # Canonical hash from disk events
+        canonical = json.dumps(
+            disk_events,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        disk_canonical_sha = hashlib.sha256(canonical).hexdigest()
+
+        # File SHA256 from disk
+        file_sha = hashlib.sha256(self._staging_path.read_bytes()).hexdigest()
+
+        # Build final name with scan_id hash for collision resistance
         safe_id = _safe_scan_id(self.scan_id)
-        final_name = f"raw_scan_{safe_id}.events.jsonl.gz"
-        final_path = self.raw_dir / final_name
+        scan_id_hash = hashlib.sha256(self.scan_id.encode()).hexdigest()[:12]
+        final_name = f"raw_scan_{safe_id}_{scan_id_hash}.events.jsonl.gz"
 
-        # Atomic rename
-        os.rename(str(self._staging_path), str(final_path))
-        os.sync()  # Ensure rename is persisted
+        descriptor = SealedRawArtifact(
+            staging_path=self._staging_path,
+            final_name=final_name,
+            run_id=self.run_id,
+            scan_id=self.scan_id,
+            event_count=len(disk_events),
+            condition_ids=tuple(sorted(disk_condition_ids)),
+            file_sha256=file_sha,
+            canonical_events_sha256=disk_canonical_sha,
+        )
 
-        self._finalized = True
-        return final_path
+        self._sealed = True
+        return descriptor
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is not None and self._staging_path and self._staging_path.exists():
-            # Clean up staging on error
+        if exc_type is not None and self._staging_path and self._staging_path.exists() and not self._sealed:
+            # Clean up staging on error (only if not sealed)
             try:
                 self._staging_path.unlink()
             except OSError:
