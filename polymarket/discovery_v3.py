@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import os
 from collections import Counter
 from datetime import datetime, timezone
@@ -14,12 +15,14 @@ import httpx
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 DISCOVERY_VERSION = "h011-v3-discovery-v2"
+RESOLVED_PRICE_THRESHOLD = 0.95
+PRICE_SUM_TOLERANCE = 0.02
 REJECTION_REASONS = (
     "missing_condition_id", "btc_event_identity_unproven", "resolution_rule_unproven",
     "window_timestamps_unproven", "window_duration_mismatch",
     "up_down_token_identity_unproven",
 )
-ALL_REJECTION_REASONS = (*REJECTION_REASONS, "resolved_or_invalid_prices")
+ALL_REJECTION_REASONS = (*REJECTION_REASONS, "invalid_outcome_prices", "resolved_extreme_prices")
 
 
 class GammaDiscoveryClient(Protocol):
@@ -75,16 +78,40 @@ def _preliminary_btc(market: dict[str, Any]) -> bool:
     return "bitcoin" in haystack or "btc" in haystack
 
 
-def _resolved_extreme(market: dict[str, Any]) -> bool:
+def _outcome_price_reason(market: dict[str, Any], *, threshold: float) -> str | None:
+    """Accept only an ordinary, finite two-outcome probability vector."""
     try:
-        prices = market.get("outcomePrices", [])
+        prices = market["outcomePrices"]
         prices = json.loads(prices) if isinstance(prices, str) else prices
-        return isinstance(prices, list) and len(prices) == 2 and any(float(p) > 0.95 for p in prices)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return True
+        if not isinstance(prices, list) or len(prices) != 2:
+            return "invalid_outcome_prices"
+        values = [float(price) for price in prices]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "invalid_outcome_prices"
+    if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in values):
+        return "invalid_outcome_prices"
+    if abs(sum(values) - 1.0) > PRICE_SUM_TOLERANCE:
+        return "invalid_outcome_prices"
+    if any(value > threshold for value in values):
+        return "resolved_extreme_prices"
+    return None
 
 
-def _select(raw_gamma: list[dict], window_s: int, max_markets: int) -> dict[str, Any]:
+def _selection_config(*, window_s: int, max_markets: int, gamma_limit: int,
+                      resolved_price_threshold: float = RESOLVED_PRICE_THRESHOLD) -> dict[str, Any]:
+    return {
+        "window_s": window_s, "max_markets": max_markets, "gamma_limit": gamma_limit,
+        "discovery_version": DISCOVERY_VERSION,
+        "resolved_price_threshold": resolved_price_threshold,
+        "price_sum_tolerance": PRICE_SUM_TOLERANCE,
+    }
+
+
+def _config_hash(selection_config: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(selection_config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *, price_threshold: float) -> dict[str, Any]:
     from h011_v3_pipeline import validate_btc_market_identity
     histogram = Counter()
     selected: list[dict] = []
@@ -95,8 +122,9 @@ def _select(raw_gamma: list[dict], window_s: int, max_markets: int) -> dict[str,
         if not ok:
             histogram.update(reasons)
             continue
-        if _resolved_extreme(market):
-            histogram["resolved_or_invalid_prices"] += 1
+        price_reason = _outcome_price_reason(market, threshold=price_threshold)
+        if price_reason:
+            histogram[price_reason] += 1
             continue
         selected.append({**market, "_validated_window_s": window_s})
     selected.sort(key=lambda item: float(item.get("volumeNum", 0) or 0), reverse=True)
@@ -145,14 +173,50 @@ def _write_evidence(directory: Path, evidence: dict[str, Any], *,
     return path, digest
 
 
-def replay_discovery(path: str | Path) -> dict[str, Any]:
+def _pagination_matches(evidence: dict[str, Any]) -> dict[str, bool]:
+    pages = evidence.get("pages", [])
+    total_received = evidence.get("total_received")
+    gamma_limit = evidence.get("gamma_limit")
+    page_counts_match = isinstance(pages, list) and sum(page.get("count", -1) for page in pages) == total_received
+    offsets_continuous = bool(pages) or total_received == 0
+    expected_offset = 0
+    for page in pages:
+        if (page.get("offset") != expected_offset or not isinstance(page.get("limit"), int)
+                or page["limit"] <= 0 or not isinstance(page.get("count"), int)
+                or page["count"] < 0 or page["count"] > page["limit"]):
+            offsets_continuous = False
+            break
+        expected_offset += page["limit"]
+    terminal_short = bool(pages) and pages[-1]["count"] < pages[-1]["limit"]
+    inferred_exhausted = terminal_short
+    inferred_limit = bool(pages) and not terminal_short and total_received == gamma_limit
+    flags_match = (evidence.get("source_exhausted") == inferred_exhausted
+                   and evidence.get("limit_reached") == inferred_limit
+                   and evidence.get("next_offset") == (gamma_limit if inferred_limit else None))
+    return {
+        "total_received_matches": total_received == len(evidence.get("raw_gamma", [])),
+        "page_counts_match": page_counts_match,
+        "offsets_continuous": offsets_continuous,
+        "pagination_flags_match": flags_match,
+        "source_exhausted_inferred": inferred_exhausted,
+        "limit_reached_inferred": inferred_limit,
+    }
+
+
+def replay_discovery(path: str | Path, *, expected_selection_config: dict[str, Any] | None = None) -> dict[str, Any]:
     path = Path(path)
     evidence = json.loads(gzip.decompress(path.read_bytes()))
-    recalculated = _select(evidence["raw_gamma"], evidence["window_s"], evidence["max_markets"])
+    stored_config = evidence.get("selection_config", {})
+    expected = expected_selection_config or {}
+    pagination = _pagination_matches(evidence)
+    recalculated = _select(
+        evidence["raw_gamma"], expected.get("window_s", -1), expected.get("max_markets", -1),
+        price_threshold=expected.get("resolved_price_threshold", RESOLVED_PRICE_THRESHOLD),
+    )
     expected_status = evidence["status"]
     if evidence.get("source_error"):
         replay_status = "DISCOVERY_SOURCE_FAILED"
-    elif evidence.get("limit_reached"):
+    elif pagination["limit_reached_inferred"]:
         replay_status = "DISCOVERY_TRUNCATED"
     elif not evidence["raw_gamma"]:
         replay_status = "DISCOVERY_SOURCE_EMPTY"
@@ -165,9 +229,21 @@ def replay_discovery(path: str | Path) -> dict[str, Any]:
         "histogram_matches": recalculated["rejection_histogram"] == evidence["rejection_histogram"],
         "selected_ids_match": recalculated["selected_condition_ids"] == evidence["selected_condition_ids"],
         "selected_count_matches": len(recalculated["markets"]) == evidence["selected_count"],
-        "version_matches": evidence.get("discovery_version") == DISCOVERY_VERSION,
+        "window_matches": stored_config.get("window_s") == expected.get("window_s"),
+        "max_markets_matches": stored_config.get("max_markets") == expected.get("max_markets"),
+        "gamma_limit_matches": stored_config.get("gamma_limit") == expected.get("gamma_limit"),
+        "price_threshold_matches": stored_config.get("resolved_price_threshold") == expected.get("resolved_price_threshold"),
+        "config_hash_matches": (evidence.get("selection_config_hash") == _config_hash(stored_config)
+                                and evidence.get("selection_config_hash") == _config_hash(expected)),
+        "version_matches": (evidence.get("discovery_version") == DISCOVERY_VERSION
+                            and stored_config.get("discovery_version") == DISCOVERY_VERSION
+                            and expected.get("discovery_version") == DISCOVERY_VERSION),
     }
-    return {**matches, "discovery_replay_verified": all(matches.values())}
+    pagination_checks = (
+        pagination["total_received_matches"], pagination["page_counts_match"],
+        pagination["offsets_continuous"], pagination["pagination_flags_match"],
+    )
+    return {**pagination, **matches, "discovery_replay_verified": all((*pagination_checks, *matches.values()))}
 
 
 def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryClient,
@@ -185,7 +261,9 @@ def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryCl
     except Exception as exc:
         markets, pages, source_exhausted, limit_reached, next_offset = [], [], False, False, None
         source_error = f"{type(exc).__name__}: {str(exc)[:200]}"
-    selected_data = _select(markets, config.window_s, max_markets) if source_error is None else {
+    selection_config = _selection_config(window_s=config.window_s, max_markets=max_markets, gamma_limit=gamma_limit)
+    selected_data = _select(markets, config.window_s, max_markets,
+                            price_threshold=selection_config["resolved_price_threshold"]) if source_error is None else {
         "markets": [], "preliminary_btc_candidates": 0,
         "rejection_histogram": {reason: 0 for reason in ALL_REJECTION_REASONS},
         "selected_condition_ids": [],
@@ -207,6 +285,7 @@ def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryCl
         "started_at": started_at, "finished_at": finished_at, "status": status,
         "source_health": "FAILED" if source_error else "HEALTHY", "source_error": source_error,
         "gamma_limit": gamma_limit, "window_s": config.window_s, "max_markets": max_markets,
+        "selection_config": selection_config, "selection_config_hash": _config_hash(selection_config),
         "pages": pages, "source_exhausted": source_exhausted, "limit_reached": limit_reached,
         "next_offset": next_offset, "total_received": len(markets),
         "preliminary_btc_candidates": selected_data["preliminary_btc_candidates"],
@@ -221,7 +300,7 @@ def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryCl
     if evidence_dir is not None:
         artifact_path, file_sha256 = _write_evidence(
             evidence_dir, evidence, max_artifacts=retention_count, max_bytes=retention_bytes)
-        replay = replay_discovery(artifact_path)
+        replay = replay_discovery(artifact_path, expected_selection_config=selection_config)
     return {
         "status": status, "markets": selected_data["markets"], "evidence": evidence,
         "artifact_path": str(artifact_path) if artifact_path else None, "file_sha256": file_sha256,

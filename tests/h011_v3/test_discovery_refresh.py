@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from polymarket.discovery_v3 import (
     discover_markets_v3,
@@ -193,7 +194,7 @@ def test_evidence_is_compressed_atomic_and_replay_verified(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
     evidence = json.loads(gzip.decompress(artifact.read_bytes()))
     assert evidence["raw_gamma"][0]["conditionId"] == "0xbtc"
-    replay = replay_discovery(artifact)
+    replay = replay_discovery(artifact, expected_selection_config=result["evidence"]["selection_config"])
     assert replay["discovery_replay_verified"] is True
     assert result["discovery_replay_verified"] is True
 
@@ -204,7 +205,7 @@ def test_discovery_replay_detects_tampered_selection(tmp_path):
     evidence = json.loads(gzip.decompress(artifact.read_bytes()))
     evidence["selected_condition_ids"] = ["tampered"]
     artifact.write_bytes(gzip.compress(json.dumps(evidence).encode(), mtime=0))
-    replay = replay_discovery(artifact)
+    replay = replay_discovery(artifact, expected_selection_config=result["evidence"]["selection_config"])
     assert replay["selected_ids_match"] is False
     assert replay["discovery_replay_verified"] is False
 
@@ -224,3 +225,63 @@ def test_retention_count_and_bytes_keep_newest(tmp_path):
 def test_v3_dockerfile_packages_discovery_module():
     dockerfile = (__import__("pathlib").Path(__file__).parents[2] / "polymarket" / "Dockerfile.h011-v3").read_text()
     assert "polymarket/discovery_v3.py" in dockerfile
+
+
+@pytest.mark.parametrize("prices", [
+    None, [], ["0.4"], ["0.2", "0.3", "0.5"], ["NaN", "0.5"],
+    ["Infinity", "0.5"], ["-0.1", "1.1"], ["1.1", "-0.1"], ["nope", "1.0"],
+])
+def test_invalid_outcome_prices_are_rejected(tmp_path, prices):
+    candidate = market()
+    if prices is None:
+        candidate.pop("outcomePrices")
+    else:
+        candidate["outcomePrices"] = prices
+    result = discover_markets_v3(config(), 500, SequenceGamma([[candidate]]), evidence_dir=tmp_path)
+    assert result["status"] == "EMPTY_SELECTED_COHORT"
+    assert result["evidence"]["rejection_histogram"]["invalid_outcome_prices"] == 1
+
+
+def test_valid_and_resolved_outcome_prices_are_distinct(tmp_path):
+    valid = discover_markets_v3(config(), 500, SequenceGamma([[market()]]), evidence_dir=tmp_path)
+    assert valid["status"] == "SELECTED_NONEMPTY"
+    resolved_market = market()
+    resolved_market["outcomePrices"] = ["0.96", "0.04"]
+    resolved = discover_markets_v3(config(), 500, SequenceGamma([[resolved_market]]), evidence_dir=tmp_path)
+    assert resolved["status"] == "EMPTY_SELECTED_COHORT"
+    assert resolved["evidence"]["rejection_histogram"]["resolved_extreme_prices"] == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("window_s", 900), ("max_markets", 3), ("gamma_limit", 999),
+    ("resolved_price_threshold", 0.90),
+])
+def test_replay_rejects_tampered_selection_configuration(tmp_path, field, value):
+    result = discover_markets_v3(config(), 500, SequenceGamma([[market()]]), evidence_dir=tmp_path)
+    artifact = tmp_path / result["artifact_path"]
+    evidence = json.loads(gzip.decompress(artifact.read_bytes()))
+    original = dict(evidence["selection_config"])
+    evidence["selection_config"][field] = value
+    artifact.write_bytes(gzip.compress(json.dumps(evidence).encode(), mtime=0))
+    replay = replay_discovery(artifact, expected_selection_config=original)
+    assert replay["discovery_replay_verified"] is False
+    assert replay[{
+        "window_s": "window_matches", "max_markets": "max_markets_matches",
+        "gamma_limit": "gamma_limit_matches", "resolved_price_threshold": "price_threshold_matches",
+    }[field]] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda evidence: evidence["pages"][0].update(count=99),
+    lambda evidence: evidence["pages"][0].update(offset=7),
+    lambda evidence: evidence.update(limit_reached=True),
+    lambda evidence: evidence.update(source_exhausted=False),
+])
+def test_replay_rejects_tampered_pagination_metadata(tmp_path, mutation):
+    result = discover_markets_v3(config(), 500, SequenceGamma([[market()]]), evidence_dir=tmp_path)
+    artifact = tmp_path / result["artifact_path"]
+    evidence = json.loads(gzip.decompress(artifact.read_bytes()))
+    mutation(evidence)
+    artifact.write_bytes(gzip.compress(json.dumps(evidence).encode(), mtime=0))
+    replay = replay_discovery(artifact, expected_selection_config=result["evidence"]["selection_config"])
+    assert replay["discovery_replay_verified"] is False
