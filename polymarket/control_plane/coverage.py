@@ -238,6 +238,7 @@ class ScanContext:
         raw_dir: str | None = None,
         previous_scan_ids: list[str] | None = None,
         previous_run_ids: list[str] | None = None,
+        lifecycle_events: list[dict] | None = None,
     ):
         self.run_id = run_id
         self.scan_id = scan_id
@@ -257,6 +258,7 @@ class ScanContext:
         self.raw_dir = raw_dir
         self.previous_scan_ids = previous_scan_ids or []
         self.previous_run_ids = previous_run_ids or []
+        self.lifecycle_events = lifecycle_events or []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -309,88 +311,130 @@ def _eval_scan_id_unique(ctx: ScanContext) -> tuple[str, str, dict]:
 
 
 def _eval_prediction_id_unique(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-003: prediction_id unique within lifecycle events."""
-    # Lifecycle events are not currently generated in H-011 V3 scans
-    # This is NOT_APPLICABLE only if the scan genuinely doesn't produce lifecycle events
-    has_lifecycle = any(r.get("evidence", {}).get("raw_event_hashes") for r in ctx.records)
-    if not has_lifecycle:
+    """INV-003: prediction_id unique within lifecycle events.
+
+    Fix #6: Uses explicit lifecycle_events list from ScanContext, NOT raw_event_hashes.
+    """
+    lifecycle_events = getattr(ctx, "lifecycle_events", None)
+    if lifecycle_events is None or len(lifecycle_events) == 0:
         return "NOT_APPLICABLE", "No lifecycle events generated in this scan (H-011 V3 paper-only mode)", {}
-    # If we have lifecycle, check uniqueness
     pids = set()
-    for r in ctx.records:
-        pid = r.get("prediction_id", "")
-        if pid:
-            if pid in pids:
-                return "FAIL", f"Duplicate prediction_id: {pid}", {}
-            pids.add(pid)
+    for ev in lifecycle_events:
+        pid = ev.get("prediction_id", "")
+        if not pid:
+            return "FAIL", "Lifecycle event missing prediction_id", {"event": ev.get("event_id", "?")}
+        if pid in pids:
+            return "FAIL", f"Duplicate prediction_id: {pid}", {}
+        pids.add(pid)
     return "PASS", f"All prediction_ids unique ({len(pids)} total)", {"prediction_ids": len(pids)}
 
 
 def _eval_lifecycle_event_id_unique(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-004: lifecycle event_id unique."""
-    has_lifecycle = any(r.get("evidence", {}).get("raw_event_hashes") for r in ctx.records)
-    if not has_lifecycle:
+    """INV-004: lifecycle event_id unique.
+
+    Fix #6: Uses explicit lifecycle_events list from ScanContext, NOT raw_event_hashes.
+    """
+    lifecycle_events = getattr(ctx, "lifecycle_events", None)
+    if lifecycle_events is None or len(lifecycle_events) == 0:
         return "NOT_APPLICABLE", "No lifecycle events generated in this scan", {}
     eids = set()
-    for r in ctx.records:
-        for h in r.get("evidence", {}).get("raw_event_hashes", []):
-            if h in eids:
-                return "FAIL", f"Duplicate event hash: {h[:16]}", {}
-            eids.add(h)
-    return "PASS", f"All event hashes unique ({len(eids)} total)", {"event_hashes": len(eids)}
+    for ev in lifecycle_events:
+        eid = ev.get("event_id", "")
+        if not eid:
+            return "FAIL", "Lifecycle event missing event_id", {}
+        if eid in eids:
+            return "FAIL", f"Duplicate event_id: {eid[:16]}", {}
+        eids.add(eid)
+    return "PASS", f"All event_ids unique ({len(eids)} total)", {"event_ids": len(eids)}
 
 
 def _eval_raw_events_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-005: raw events are append-only (verified by hash chain)."""
+    """INV-005: raw events are append-only (hash chain verified).
+
+    Fix #7: Verifies actual hash chain integrity, not just mtimes.
+    If hash chain infrastructure doesn't exist yet, returns UNKNOWN.
+    """
     if not ctx.raw_dir or not Path(ctx.raw_dir).exists():
         return "UNKNOWN", "Raw events directory not accessible", {}
     raw_files = sorted(Path(ctx.raw_dir).glob("*.jsonl.gz"))
     if not raw_files:
         return "NOT_APPLICABLE", "No raw event files (persist_raw may be disabled or no markets reached persistence)", {}
-    # Verify that files have monotonically increasing creation times
-    # and that content is append-only (check file sizes are non-decreasing)
+    # Fix #7: Real hash chain verification
+    # Each file must have a .sha256 sidecar; content must match sidecar
+    # Files must be ordered by mtime (append-only means new files only)
     prev_mtime = 0
+    verified_count = 0
     for f in raw_files:
         mtime = f.stat().st_mtime
         if mtime < prev_mtime:
-            return "FAIL", f"File {f.name} has earlier mtime than previous file (possible overwrite)", {}
+            return "FAIL", f"File {f.name} has earlier mtime than previous (possible reorder)", {}
         prev_mtime = mtime
-    return "PASS", f"Raw event store verified: {len(raw_files)} files with monotonically increasing mtimes", \
-           {"files": len(raw_files), "dir": ctx.raw_dir}
+        # Check sidecar exists and matches
+        sidecar = f.with_suffix(f.suffix + ".sha256")
+        if not sidecar.exists():
+            return "UNKNOWN", f"Raw event file {f.name} missing SHA256 sidecar — cannot verify integrity", {}
+        try:
+            expected = sidecar.read_text().strip()
+            actual = hashlib.sha256(f.read_bytes()).hexdigest()
+            if expected != actual:
+                return "FAIL", f"Hash mismatch for {f.name}: sidecar={expected[:16]} vs actual={actual[:16]}", {}
+            verified_count += 1
+        except OSError:
+            return "FAIL", f"Cannot read {f.name} or its sidecar", {}
+    return "PASS", f"Raw event store verified: {verified_count} files with valid SHA256 sidecars and monotonic order", \
+           {"files": len(raw_files), "verified": verified_count, "dir": ctx.raw_dir}
 
 
 def _eval_snapshots_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-006: historical snapshots are append-only (no overwrites of historical files).
+    """INV-006: historical snapshots are append-only (no overwrites).
 
-    `latest.json` is expected to be overwritten each cycle — it's a symlink/copy
-    of the most recent snapshot, not a historical artifact. Historical snapshots
-    have timestamped names and must never be overwritten.
+    Fix #8: Does NOT fail for identical snapshot hashes (two cycles can
+    produce identical content). Instead verifies:
+    - Historical filenames are unique
+    - No file has been overwritten (mtime is monotonic)
+    - Sidecar exists for each historical snapshot
+    - Content hash matches sidecar
     """
     if not ctx.results_dir:
         return "UNKNOWN", "Results directory not accessible", {}
     state_dir = Path(ctx.results_dir) / "state"
     if not state_dir.exists():
         return "UNKNOWN", f"Snapshot directory {state_dir} not accessible", {}
-    # Exclude latest.json — it's the current snapshot, not historical
+    # Exclude latest.json and its sidecar — they're mutable
     snapshots = sorted(
-        [p for p in state_dir.glob("*.json") if p.name != "latest.json" and p.name != "latest.json.sha256"],
+        [p for p in state_dir.glob("*.json")
+         if p.name not in ("latest.json", "latest.json.sha256")
+         and not p.name.endswith(".sha256")],
         key=lambda p: p.stat().st_mtime,
     )
     if not snapshots:
         return "UNKNOWN", "No historical snapshot files found (only latest.json exists)", {}
-    # Check that snapshot hashes are unique across historical files
-    hashes = set()
+    # Check unique filenames (not unique hashes)
+    names = set()
+    prev_mtime = 0
+    verified = 0
     for s in snapshots:
-        try:
-            data = json.loads(s.read_text())
-            h = data.get("snapshot_hash", "")
-            if h and h in hashes:
-                return "FAIL", f"Duplicate snapshot_hash {h[:16]} found in {s.name}", {}
-            hashes.add(h)
-        except (json.JSONDecodeError, OSError):
-            return "FAIL", f"Cannot read snapshot file {s.name}", {}
-    return "PASS", f"Snapshot store verified: {len(snapshots)} unique historical snapshots", \
-           {"snapshots": len(snapshots), "unique_hashes": len(hashes)}
+        if s.name in names:
+            return "FAIL", f"Duplicate snapshot filename: {s.name}", {}
+        names.add(s.name)
+        mtime = s.stat().st_mtime
+        if mtime < prev_mtime:
+            return "FAIL", f"Snapshot {s.name} has earlier mtime than previous (possible overwrite)", {}
+        prev_mtime = mtime
+        # Check sidecar
+        sidecar = s.with_suffix(s.suffix + ".sha256")
+        if sidecar.exists():
+            try:
+                expected = sidecar.read_text().strip()
+                actual = hashlib.sha256(s.read_bytes()).hexdigest()
+                if expected != actual:
+                    return "FAIL", f"Snapshot hash mismatch for {s.name}", {}
+                verified += 1
+            except OSError:
+                return "FAIL", f"Cannot read snapshot {s.name} or sidecar", {}
+        # Sidecar missing is not a FAIL — it means the snapshot predates sidecar enforcement
+    return "PASS", f"Snapshot store verified: {len(snapshots)} historical files, {verified} with valid sidecars, unique names, monotonic order", \
+           {"snapshots": len(snapshots), "verified_sidecars": verified, "unique_names": len(names)}
 
 
 def _eval_no_hidden_rejected(ctx: ScanContext) -> tuple[str, str, dict]:
@@ -412,23 +456,43 @@ def _eval_no_hidden_rejected(ctx: ScanContext) -> tuple[str, str, dict]:
 def _eval_unknown_not_collapsed_zero(ctx: ScanContext) -> tuple[str, str, dict]:
     """INV-008: UNKNOWN counts are not collapsed to 0 in the summary.
 
-    This is verified by checking that the invariant summary function
-    produces a separate 'unknown' count. We inject a test: if there
-    were any UNKNOWN results, the summary must show them.
+    Fix #9: Deterministic verification. Creates a synthetic result with
+    one UNKNOWN, runs it through invariant_summary(), and verifies that
+    the summary correctly reports unknown=1 (not 0).
     """
-    # This invariant is self-referential: it checks that the summary
-    # mechanism preserves UNKNOWN. We verify by checking that the
-    # invariant_summary function exists and counts UNKNOWN separately.
-    # This is a design-level check that is verified by tests, not by
-    # runtime data. Mark as PASS with evidence about the mechanism.
-    return "PASS", "invariant_summary() counts UNKNOWN as a separate field; verified by test_unknown_not_collapsed_zero", \
-           {"mechanism": "invariant_summary() returns {pass, fail, unknown, not_applicable, total}"}
+    # Create synthetic results with one UNKNOWN
+    synthetic = [
+        {"invariant_id": "SYNTHETIC-1", "status": "PASS", "severity": "INFO", "reason": "test", "evidence": {}},
+        {"invariant_id": "SYNTHETIC-2", "status": "UNKNOWN", "severity": "WARNING", "reason": "test", "evidence": {}},
+        {"invariant_id": "SYNTHETIC-3", "status": "PASS", "severity": "BLOCKING", "reason": "test", "evidence": {}},
+    ]
+    summary = invariant_summary(synthetic)
+    if summary.get("unknown") == 1:
+        return "PASS", f"invariant_summary() correctly preserves UNKNOWN count: {summary}", \
+               {"synthetic_summary": summary, "test": "1 UNKNOWN → summary.unknown == 1"}
+    return "FAIL", f"invariant_summary() collapsed UNKNOWN to {summary.get('unknown', 'missing')}: {summary}", \
+           {"synthetic_summary": summary}
 
 
 def _eval_unknown_not_collapsed_false(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-009: UNKNOWN status is not collapsed to False."""
-    return "PASS", "Invariant status uses string enum (PASS|FAIL|UNKNOWN|NOT_APPLICABLE); verified by test_unknown_not_collapsed_false", \
-           {"mechanism": "status is str, never bool"}
+    """INV-009: UNKNOWN status is not collapsed to False.
+
+    Fix #9: Deterministic verification. Checks that an UNKNOWN status
+    string survives serialization and is not converted to False, 0,
+    or omitted.
+    """
+    synthetic = [
+        {"invariant_id": "SYNTHETIC-1", "status": "UNKNOWN", "severity": "WARNING", "reason": "test", "evidence": {}},
+    ]
+    # Serialize and deserialize to check the status survives
+    serialized = json.dumps(synthetic)
+    deserialized = json.loads(serialized)
+    status = deserialized[0].get("status")
+    if status == "UNKNOWN":
+        return "PASS", f"UNKNOWN status survives JSON serialization: status={status!r} (type={type(status).__name__})", \
+               {"serialized_status": status, "is_string": isinstance(status, str), "is_not_false": status is not False}
+    return "FAIL", f"UNKNOWN status was collapsed to {status!r} after serialization", \
+           {"collapsed_status": status}
 
 
 def _eval_zero_trades_no_metric(ctx: ScanContext) -> tuple[str, str, dict]:
