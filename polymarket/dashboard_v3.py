@@ -64,6 +64,7 @@ def api_integrity():
     replay_result = replay_bundle(bundles[-1]) if bundles else None
     raw_store_available = bool(replay_result and replay_result["raw_complete"])
     replay_verified = bool(replay_result and replay_result["replay_verified"])
+    discovery = (snap.get("aggregate_metrics") or {}).get("discovery") or {}
     return JSONResponse({
         "pipeline_version": snap.get("pipeline_version", "h011-integrity-v3"),
         "cohort_id": snap.get("cohort_id", "h011-v3-w300-vwap-structure-v2"),
@@ -79,6 +80,10 @@ def api_integrity():
         "raw_store_available": raw_store_available,
         "file_sha256_matches": bool(replay_result and replay_result["file_sha256_matches"]),
         "replay_verified": replay_verified,
+        "discovery_status": discovery.get("status", "UNKNOWN"),
+        "discovery_complete": bool(discovery.get("discovery_complete", False)),
+        "discovery_replay_verified": bool(discovery.get("discovery_replay_verified", False)),
+        "markets_selected": int(discovery.get("markets_selected", 0) or 0),
         "invariants": invariants.get("summary", {"pass": 0, "fail": 0, "unknown": 31}),
     })
 

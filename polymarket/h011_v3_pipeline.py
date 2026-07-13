@@ -676,6 +676,7 @@ def run_scan_v3(
     data_api_client: DataApiClient,
     clob_client: ClobClient,
     persist_raw: bool = True,
+    discovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Run a complete V3 scan over a list of markets.
@@ -699,6 +700,9 @@ def run_scan_v3(
         "scan_id": scan_id,
         "started_at": run_id,
         "markets_input": len(markets),
+        "discovery_status": (discovery or {}).get("status", "UNKNOWN"),
+        "discovery_complete": bool((discovery or {}).get("discovery_complete", False)),
+        "discovery_replay_verified": bool((discovery or {}).get("discovery_replay_verified", False)),
     }
 
     print(f"\n[V3 SCAN] {json.dumps(scan_meta, indent=2)}")
@@ -835,6 +839,17 @@ def run_scan_v3(
             market_records=market_records_compact,
             invariants=invariants,
             alerts=alerts,
+            aggregate_metrics={
+                "discovery": {
+                    "status": scan_meta["discovery_status"],
+                    "discovery_complete": scan_meta["discovery_complete"],
+                    "discovery_replay_verified": scan_meta["discovery_replay_verified"],
+                    "markets_selected": len(markets),
+                    "evidence_file": (discovery or {}).get("artifact_path"),
+                    "file_sha256_matches": bool((discovery or {}).get("file_sha256_matches", False)),
+                    "rejection_histogram": ((discovery or {}).get("evidence") or {}).get("rejection_histogram", {}),
+                }
+            },
         )
         save_snapshot(snapshot)
         print(f"[V3] Snapshot saved: {snapshot.snapshot_hash[:16]}...")

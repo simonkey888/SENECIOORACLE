@@ -1014,8 +1014,8 @@ def main():
                         help=f"VWAP window in seconds (default {DEFAULT_WINDOW_SEC})")
     parser.add_argument("--estimator", choices=["vwap", "ewma"], default="vwap",
                         help="Estimator: vwap (default) o ewma con half-life=window")
-    parser.add_argument("--gamma-limit", type=int, default=200,
-                        help="How many markets to fetch from Gamma (default 200)")
+    parser.add_argument("--gamma-limit", type=int, default=2000,
+                        help="How many active markets to paginate from Gamma (default 2000)")
     parser.add_argument("--pipeline", choices=["legacy-v2", "integrity-v3"], default=None,
                         help="Pipeline version: legacy-v2 (default) or integrity-v3")
     args = parser.parse_args()
@@ -1034,9 +1034,13 @@ def main():
         from h011_v3_pipeline import (
             H011V3Config, run_scan_v3,
             HttpxDataApiClient, HttpxClobClient,
-            select_btc_cohort,
+            V3_RESULTS_DIR,
         )
-        from polymarket_connector import fetch_all_active_markets
+        from discovery_v3 import (
+            discover_markets_v3,
+            HttpxGammaDiscoveryClient,
+            monitor_discovery_loop,
+        )
 
         config = H011V3Config(window_s=args.window)
         config.validate()  # Assert W=300, paper_only, live_capital_locked
@@ -1045,52 +1049,54 @@ def main():
         print(f"Cohort: h011-v3-w300-vwap-structure-v2")
         print()
 
-        # Fetch markets from Gamma
-        import json as _json
-        markets = fetch_all_active_markets(limit=args.gamma_limit)
-        # H-011 V3 is BTC-cohort-only.  A market enters only after structured
-        # event/rule/window/token validation; question text is insufficient.
-        btc_markets = select_btc_cohort(markets)
-        print(f"BTC cohort candidates: {len(btc_markets)} / {len(markets)}")
-        markets = btc_markets
+        gamma_client = HttpxGammaDiscoveryClient()
 
-        # Pre-filter resolved
-        pre_filtered = []
-        for m in markets:
-            try:
-                prices_raw = m.get("outcomePrices", "[]")
-                prices = _json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
-                if isinstance(prices, list) and len(prices) == 2:
-                    p_yes, p_no = float(prices[0]), float(prices[1])
-                    if p_yes > 0.95 or p_no > 0.95:
-                        continue
-            except Exception:
-                continue
-            pre_filtered.append(m)
-
-        pre_filtered.sort(key=lambda m: float(m.get("volumeNum", 0) or 0), reverse=True)
-        markets_to_scan = pre_filtered[:args.max_markets]
+        def discover_cycle():
+            discovery = discover_markets_v3(
+                config, args.gamma_limit, gamma_client,
+                max_markets=args.max_markets,
+                evidence_dir=V3_RESULTS_DIR / "discovery",
+            )
+            evidence = discovery["evidence"]
+            print(
+                f"Discovery {discovery['status']}: "
+                f"received={evidence['total_received']} "
+                f"preliminary_btc={evidence['preliminary_btc_candidates']} "
+                f"selected={evidence['selected_count']}"
+            )
+            print(f"Discovery rejection histogram: {evidence['rejection_histogram']}")
+            return discovery
 
         if args.mode == "monitor":
-            while True:
+            def process_cycle(discovery):
                 now_ts = int(time.time())
                 result = run_scan_v3(
-                    markets=markets_to_scan,
+                    markets=discovery["markets"],
                     now_ts=now_ts,
                     config=config,
                     data_api_client=HttpxDataApiClient(),
                     clob_client=HttpxClobClient(),
+                    discovery=discovery,
                 )
-                print(f"\n[V3] Scan complete. Sleeping 900s...")
-                time.sleep(900)
+                print("\n[V3] Scan complete.")
+                return result
+
+            monitor_discovery_loop(
+                discover=discover_cycle,
+                process=process_cycle,
+                sleep=time.sleep,
+                interval_s=900,
+            )
         else:
+            discovery = discover_cycle()
             now_ts = int(time.time())
             result = run_scan_v3(
-                markets=markets_to_scan,
+                markets=discovery["markets"],
                 now_ts=now_ts,
                 config=config,
                 data_api_client=HttpxDataApiClient(),
                 clob_client=HttpxClobClient(),
+                discovery=discovery,
             )
             sys.exit(0 if result["scan"]["markets_processed"] > 0 else 1)
 
