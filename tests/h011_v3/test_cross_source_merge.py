@@ -432,8 +432,13 @@ def test_discovery_metrics_present_in_evidence(tmp_path):
 # /events endpoint as fallback when /markets is unavailable
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_events_endpoint_serves_as_fallback_when_markets_fails(tmp_path):
-    """If /markets fails, /events can still provide market data."""
+def test_events_endpoint_failure_makes_discovery_fail_closed(tmp_path):
+    """Fix #2: if any enabled endpoint fails (HTTP 500), discovery is fail-closed.
+
+    The previous behavior allowed /events to serve as fallback when /markets
+    failed. GPT-5.6 audit requires that a required endpoint failure produces
+    source_health=FAILED and no markets selected.
+    """
     valid = make_real_btc_updown_market(slug_epoch=1766162100)
 
     def handler(request):
@@ -451,6 +456,32 @@ def test_events_endpoint_serves_as_fallback_when_markets_fails(tmp_path):
 
     client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler))
     result = discover_markets_v3(_config(300), 500, client, evidence_dir=tmp_path)
-    # /events provided the market; discovery succeeds
+    # Fix #2: discovery is fail-closed when /markets fails
+    assert result["status"] == "DISCOVERY_SOURCE_FAILED"
+    assert result["evidence"]["source_health"] == "FAILED"
+    assert len(result["markets"]) == 0
+    assert result["evidence"]["endpoint_states"]["/markets"]["status"] == "error"
+
+
+def test_events_endpoint_serves_when_both_healthy(tmp_path):
+    """When BOTH endpoints are healthy, /events enriches /markets data.
+    This replaces the previous fallback test — fallback is no longer allowed."""
+    valid = make_real_btc_updown_market(slug_epoch=1766162100)
+
+    def handler(request):
+        if request.url.path == "/markets":
+            return httpx.Response(200, json=[valid])
+        elif request.url.path == "/events":
+            return httpx.Response(200, json=[{
+                "id": "109968",
+                "ticker": valid["slug"],
+                "slug": valid["slug"],
+                "markets": [valid],
+            }])
+        return httpx.Response(404)
+
+    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler))
+    result = discover_markets_v3(_config(300), 500, client, evidence_dir=tmp_path)
+    # Both endpoints healthy → discovery succeeds with merged data
     assert result["status"] == "SELECTED_NONEMPTY"
     assert len(result["markets"]) == 1

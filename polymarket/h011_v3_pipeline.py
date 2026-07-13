@@ -359,8 +359,13 @@ def _directional_market_identity_proven(market: dict[str, Any]) -> tuple[bool, s
 
     Proven by structural evidence (NOT text inference):
       (a) market.slug matches ^btc-updown-5m-(\\d{10})$
-      (b) market.events[0].ticker is coherent with market.slug
-          (Polymarket guarantees this for the btc-updown-5m family)
+      (b) Fix #5: at least ONE parent event must exist AND be coherent:
+          - events[0].id present (non-empty)
+          - events[0].ticker == market.slug OR events[0].slug == market.slug
+
+    If the market has a valid slug but no coherent parent event, this check
+    FAILS with directional_market_identity_unproven. This prevents markets
+    with valid-looking slugs from passing without event-level corroboration.
 
     Returns (ok, slug_epoch_str_or_None).
     """
@@ -370,21 +375,40 @@ def _directional_market_identity_proven(market: dict[str, Any]) -> tuple[bool, s
         return False, None
     slug_epoch_str = match.group(1)
 
-    # Cross-check with event ticker if available.
-    # Polymarket's btc-updown-5m markets have events[0].ticker == market.slug
-    # (verified across 13 markets on 2026-07-13).
+    # Fix #5: parent event is MANDATORY and must be coherent.
+    # The market must have an `events` list with at least one event that:
+    #   - has a non-empty id
+    #   - has ticker == market.slug (when ticker is present)
+    #   - has slug == market.slug (when slug is present)
+    # If ticker is present but DIFFERENT from market.slug, it's a conflict
+    # (fail-closed). If slug is present but DIFFERENT, also conflict.
     events_field = market.get("events")
-    if isinstance(events_field, list) and events_field:
-        # Take the first event
-        first_event = events_field[0] if isinstance(events_field[0], dict) else {}
-        event_ticker = str(first_event.get("ticker") or "").strip()
-        event_slug = str(first_event.get("slug") or "").strip()
-        # The event ticker or slug should match the market slug
-        if event_ticker and event_ticker != slug:
-            # Inconsistency — fail-closed
-            return False, None
-        if not event_ticker and event_slug and event_slug != slug:
-            return False, None
+    if not isinstance(events_field, list) or not events_field:
+        # No parent event → cannot prove directional identity
+        return False, None
+
+    # Find a coherent parent event
+    coherent_event_found = False
+    for ev in events_field:
+        if not isinstance(ev, dict):
+            continue
+        ev_id = str(ev.get("id") or "").strip()
+        if not ev_id:
+            continue
+        ev_ticker = str(ev.get("ticker") or "").strip()
+        ev_slug = str(ev.get("slug") or "").strip()
+        # Coherence checks: any non-empty field must match market slug
+        # If ticker is present, it must match; if slug is present, it must match.
+        # At least one of them must be present and match.
+        ticker_ok = (not ev_ticker) or (ev_ticker == slug)
+        slug_ok = (not ev_slug) or (ev_slug == slug)
+        at_least_one_matches = (ev_ticker == slug) or (ev_slug == slug)
+        if ticker_ok and slug_ok and at_least_one_matches:
+            coherent_event_found = True
+            break
+
+    if not coherent_event_found:
+        return False, None
 
     return True, slug_epoch_str
 
