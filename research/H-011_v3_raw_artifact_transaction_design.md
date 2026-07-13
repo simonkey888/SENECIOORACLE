@@ -1,6 +1,6 @@
 # H-011 V3 — Raw Artifact Transaction Design
 
-## Status: DESIGN DOCUMENT — Architecture Corrected (C1–C14)
+## Status: DESIGN DOCUMENT — Architecture Finalized (D1–D8)
 
 **Design base code SHA:** `18f8e6dea12c25a4dc338b0a0fdb2bccc417540b`
 **Date:** 2026-07-13
@@ -10,7 +10,7 @@
 
 ---
 
-## A1 — verify_candidate_logical vs verify_candidate_physical (C4 corrected)
+## A1 — Verification Functions (D1, D8 corrected)
 
 ### verify_candidate_logical(existing_entries, candidate_entry)
 
@@ -50,26 +50,79 @@ Checks:
 
 Returns `(True, [])` or `(False, [errors])`.
 
-### verify_raw_chain(directory, policy)
+### verify_committing_transaction(directory, marker, candidate_entry, policy)  (D1)
 
-Full chain verification after manifest publication. This function does NOT accept `allowed_candidate_filename` — it demands zero orphans, zero unregistered, zero unresolved markers.
+After manifest publication, before cleanup. The marker (`MANIFEST_PUBLISHED`) and staging file still exist.
 
-Checks (per entry + global):
-1. All `verify_candidate_physical` checks for every entry (no exceptions).
+Checks:
+1. `verify_candidate_logical(existing_entries_excluding_current, candidate_entry)` — logical checks against prior entries only.
+2. `verify_manifest_entry_physical(directory, candidate_entry, policy)` — physical checks on the now-manifested entry (see below).
+3. Marker exists and status == `MANIFEST_PUBLISHED`.
+4. Marker's `candidate_manifest_bytes_sha256` == SHA-256 of manifest file on disk.
+5. Staging file still exists (hasn't been cleaned up yet).
+6. No OTHER markers exist (only the current transaction's marker).
+7. No OTHER staging files in `.pending/` (only the current transaction's staging).
+
+Returns `(True, [])` or `(False, [errors])`.
+
+### verify_manifest_entry_physical(directory, entry, policy)  (D8)
+
+For entries that are already manifested (part of the chain). No `allowed_candidate_filename` parameter — strict.
+
+Checks:
+1. Artifact `directory / entry["filename"]` exists, is a regular file, not symlink.
+2. Sidecar `directory / (filename + ".sha256")` exists, is a regular file.
+3. Sidecar content matches `^[0-9a-f]{64}\n$`.
+4. Sidecar content (stripped) == `entry["file_sha256"]`.
+5. Recompute SHA-256 of artifact file bytes == sidecar content == `entry["file_sha256"]`.
+6. `load_raw_events_strict(artifact_path)` succeeds.
+7. `len(disk_events) == entry["event_count"]`.
+8. `sorted({e["requested_condition_id"] for e in disk_events if e.get("requested_condition_id")})` == `entry["condition_ids"]`.
+9. Recompute `canonical_events_sha256` from disk events and compare.
+10. For each event: recompute `payload_sha256` and compare.
+11. `filename` matches `policy.artifact_glob`.
+
+Returns `(True, [])` or `(False, [errors])`.
+
+### verify_raw_chain(directory, policy) — Steady State Only (D1)
+
+**Only for steady state** (no active transaction). Demands:
+1. All `verify_manifest_entry_physical` checks for every entry.
 2. `manifest_hash` recalculated correctly for every entry.
 3. `previous_manifest_hash` links correct for every entry.
 4. `sequence` continuous (0, 1, 2, ...).
-5. No unregistered artifacts matching `policy.artifact_glob`.
-6. No orphan sidecars (sidecar without matching artifact or manifest entry).
-7. No unresolved markers (`*_txn_*.marker` files in directory).
-8. No files in `.quarantine/` directory.
-9. No files in `.pending/` directory (staging files must be cleaned up).
+5. Zero unregistered artifacts matching `policy.artifact_glob`.
+6. Zero orphan sidecars.
+7. Zero unresolved markers (`*_txn_*.marker` files in directory).
+8. Zero files in `.quarantine/` directory.
+9. Zero files in `.pending/` directory (staging files must be cleaned up).
 
-Returns `{"chain_status": "VALID_CHAIN" | "EMPTY_CHAIN" | "BOOTSTRAP_REQUIRED" | "INVALID_CHAIN", "errors": [...], "unregistered_files": [...], "orphan_sidecars": [...], "unresolved_markers": [...], "sequence_count": N}`.
+Returns `{"chain_status": ..., "errors": [...], ...}`.
+
+### Publication Sequence (D1)
+
+```
+verify_candidate_logical          → in memory, before touching disk
+publish artifact                  → hardlink
+publish sidecar                   → hardlink
+verify_candidate_physical         → read artifact + sidecar from disk (allowed_candidate_filename set)
+publish manifest                  → O_CREAT|O_EXCL
+persist marker MANIFEST_PUBLISHED → atomic temp + rename + fsync
+verify_committing_transaction     → allows current marker + staging; no others
+persist marker COMMITTED          → atomic temp + rename + fsync
+cleanup marker + staging          → unlink + dir fsync
+verify_raw_chain                  → steady-state verification (zero markers, zero pending)
+```
+
+If steady-state verification fails after cleanup:
+- `BLOCKED_RAW_INTEGRITY`
+- Preserve diagnosis (log all errors)
+- Do not declare success
+- Do not proceed to snapshot
 
 ---
 
-## A2 — SealedRawArtifact (C5 corrected)
+## A2 — SealedRawArtifact (D2 corrected: seal order)
 
 ```python
 @dataclass(frozen=True)
@@ -85,26 +138,36 @@ class SealedRawArtifact:
     canonical_events_sha256: str          # SHA-256 of canonical events JSON (lowercase hex)
     size_bytes: int                       # File size in bytes at seal time
     sealed_at: str                        # ISO 8601 UTC timestamp when seal() was called
-    device_id: int                        # os.fstat(staging_fd).st_dev
-    inode: int                            # os.fstat(staging_fd).st_ino
+    device_id: int                        # os.fstat(fd).st_dev
+    inode: int                            # os.fstat(fd).st_ino
 ```
 
-### seal() Behavior (C5)
+### seal() Definitive Order (D2)
 
-1. Close gzip handle.
-2. `os.fstat(staging_fd)` → capture `st_dev`, `st_ino`, `st_size`.
-3. `os.chmod(staging_path, 0o444)` — set read-only.
-4. `os.fsync(staging_fd)`.
-5. Re-read gzip from disk with `load_raw_events_strict()`.
-6. Recalculate all metadata from disk content.
-7. Return `SealedRawArtifact` with all fields populated.
+```
+1. gzip_handle.flush()
+2. gzip_handle.close()                    # writes gzip footer + CRC
+3. fd = os.open(staging_path, O_RDONLY)
+4. os.fsync(fd)
+5. st = os.fstat(fd)                      # capture st_dev, st_ino, st_size
+6. os.close(fd)
+7. os.chmod(staging_path, 0o444)          # read-only
+8. fsync(.pending directory)              # dir_fd = os.open(.pending, O_RDONLY); os.fsync(dir_fd); close
+9. strict reread: load_raw_events_strict(staging_path)
+10. recalculate event_count, condition_ids, canonical_events_sha256 from disk
+11. recalculate file_sha256 from disk bytes
+12. build SealedRawArtifact with all fields
+13. return SealedRawArtifact
+```
 
-### Under-lock Validation (C5)
+If any step fails: state = `ABORTED_BEFORE_TRANSFER`. No transfer. No marker. Staging file is NOT cleaned up by seal() (the context manager will clean it up if not transferred).
+
+### Under-lock Validation (unchanged from C5)
 
 After acquiring lock, before hardlink:
 1. `stat(staging_path)` → compare `st_dev`, `st_ino`, `st_size` with sealed values.
-2. `stat(target_directory)` → compare `st_dev` with staging `st_dev` (must be same filesystem for hardlink).
-3. Verify staging is not a symlink (`os.path.islink` → False).
+2. `stat(target_directory)` → compare `st_dev` with staging `st_dev` (same filesystem for hardlink).
+3. Verify staging is not a symlink.
 4. Recompute `file_sha256` from staging bytes → compare with sealed.
 5. Re-read staging with `load_raw_events_strict()` → compare event_count, condition_ids, canonical_events_sha256.
 
@@ -113,7 +176,7 @@ After hardlink (staging → final):
 2. `stat(staging_path)` → must still have same `st_dev`, `st_ino` (hardlink = same inode).
 3. Recompute `file_sha256` from final → must match.
 
-Any difference: `BLOCK` before manifest publication. Do not publish manifest. Preserve all evidence.
+Any difference: `BLOCK` before manifest publication. Preserve all evidence.
 
 ---
 
@@ -128,7 +191,7 @@ def canonical_payload_sha256(payload: Any) -> str:
     return hashlib.sha256(canonical_bytes).hexdigest()
 ```
 
-Rules: `sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=False`, `allow_nan=False`, list order preserved, output is 64-char lowercase hex.
+Rules: `sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=False`, `allow_nan=False`, list order preserved, 64-char lowercase hex.
 
 ---
 
@@ -146,7 +209,7 @@ Format: exactly `<64 lowercase hex chars>\n` (65 bytes). Validated with `re.comp
 
 ---
 
-## A6 — Recovery Matrix (C2, C3, C7 corrected)
+## A6 — Recovery Matrix (unchanged from C7, confirmed)
 
 ### Rules (C2)
 
@@ -156,7 +219,7 @@ If a component is present but does not match exactly: `BLOCK`.
 
 The presence of the next component is NOT automatically a contradiction — it may indicate the marker wasn't updated before crash.
 
-### Complete Matrix (C3, C7)
+### Complete Matrix
 
 | Marker Status | Artifact | Sidecar | Manifest | Chain | Action |
 |---|---|---|---|---|---|
@@ -200,65 +263,33 @@ The presence of the next component is NOT automatically a contradiction — it m
 | no marker, orphan artifact | present | * | * | * | BLOCK (orphan) |
 | no marker, orphan sidecar | * | present | * | * | BLOCK (orphan) |
 | no marker, orphan manifest | * | * | present | * | BLOCK (orphan) |
-| stale marker temp (*.tmp in marker path) | * | * | * | * | QUARANTINE (move temp to .quarantine/) |
-| two markers, same sequence | * | * | * | * | BLOCK (cannot resolve which is canonical) |
-| two markers, same transaction_uuid | * | * | * | * | BLOCK (duplicate UUID) |
+| stale marker temp (*.tmp) | * | * | * | * | QUARANTINE |
+| two markers, same sequence | * | * | * | * | BLOCK |
+| two markers, same transaction_uuid | * | * | * | * | BLOCK |
 | manifest without marker | * | * | present | * | BLOCK (orphan manifest) |
 | sidecar without artifact | absent | present | * | * | BLOCK (orphan sidecar) |
 | sidecar without marker | * | present | * | * | BLOCK (orphan sidecar) |
 | candidate bytes hash incorrect (marker) | * | * | * | * | BLOCK |
 | candidate dict != candidate bytes (marker) | * | * | * | * | BLOCK |
-| unsafe path in marker (contains `..` or absolute) | * | * | * | * | QUARANTINE |
+| unsafe path in marker | * | * | * | * | QUARANTINE |
 | symlink in marker paths | * | * | * | * | QUARANTINE |
 | marker version unknown | * | * | * | * | QUARANTINE |
 | marker status unknown | * | * | * | * | QUARANTINE |
-| chain previa corrupta | * | * | * | invalid | BLOCK (cannot publish on corrupt chain) |
+| chain previa corrupta | * | * | * | invalid | BLOCK |
 
-Actions:
-- **CONTINUE**: Resume publication from the effective state (which may be ahead of marker).
-- **COMMIT**: Verify all components exact + chain valid + manifest matches marker candidate. Then remove marker + staging.
-- **BLOCK**: Preserve all evidence. Do not move or delete. Report as unresolved. New publications refused.
-- **QUARANTINE**: Marker is corrupt or evidence is contradictory. Move marker to `.quarantine/`. Report as unresolved. New publications refused.
-- **CLEAN**: Only after COMMITTED verification passes. Remove marker and staging file.
+Actions: CONTINUE, COMMIT, BLOCK, QUARANTINE, CLEAN (defined in previous version, unchanged).
 
 ---
 
-## A7 — Fault Injection (C8 corrected: five points)
+## A7 — Fault Injection (unchanged from C8, confirmed)
 
-### Fault Points
+Five fault points: `AFTER_STAGED_FSYNC`, `AFTER_ARTIFACT_FSYNC`, `AFTER_SIDECAR_FSYNC`, `AFTER_MANIFEST_FSYNC`, `AFTER_COMMITTED_FSYNC`.
 
-```
-AFTER_STAGED_FSYNC         — After marker STAGED is persisted + fsync'd
-AFTER_ARTIFACT_FSYNC       — After artifact hardlink + dir fsync
-AFTER_SIDECAR_FSYNC        — After sidecar hardlink + dir fsync
-AFTER_MANIFEST_FSYNC       — After manifest O_EXCL write + dir fsync
-AFTER_COMMITTED_FSYNC      — After marker COMMITTED + dir fsync
-```
-
-### Execution Model (C8)
-
-All execution is via subprocess. The parent test process never calls the publisher directly.
-
-```
-Parent test process:
-  1. Prepare filesystem (create staging, seal artifact)
-  2. Fork subprocess A: publisher with fault_after=<POINT>
-     → Subprocess A calls _publish_raw_scan_with_fault_hook()
-     → At the fault point: os._exit(99)
-     → Parent checks returncode == 99
-  3. Fork subprocess B: recovery
-     → Subprocess B calls recover_incomplete_transactions()
-     → Returns result as JSON on stdout
-     → os._exit(0)
-  4. Parent reads subprocess B stdout
-  5. Parent verifies final state (chain, markers, quarantine, staging)
-```
-
-No `SystemExit`. No `except` blocks in the fault path. `os._exit(99)` terminates immediately without cleanup.
+All via subprocess + `os._exit(99)`. Recovery in separate subprocess. Parent only prepares filesystem, runs publisher subprocess, checks returncode 99, runs recovery subprocess, inspects result.
 
 ---
 
-## A8 — API Without Identity Duplication (C6 corrected: transfer token)
+## A8 — API (D5 corrected: transfer lifecycle)
 
 ### Canonical API
 
@@ -271,14 +302,14 @@ with RawScanStager(run_id=run_id, scan_id=scan_id, raw_dir=V3_RAW_CHAIN_DIR) as 
     transfer = stager.transfer()
 
 # Publish
-publish_raw_scan(
+result = publish_raw_scan(
     directory=V3_RAW_CHAIN_DIR,
     transfer=transfer,
     policy=RAW_MANIFEST_POLICY,
 )
 ```
 
-### RawArtifactTransfer
+### RawArtifactTransfer (D5: immutable, no callbacks)
 
 ```python
 @dataclass(frozen=True)
@@ -286,27 +317,21 @@ class RawArtifactTransfer:
     sealed: SealedRawArtifact
     ownership_token: str       # UUID4
     staging_path: Path         # Resolved absolute path
-
-    # Lifecycle callback (not called by publisher directly;
-    # publisher calls these via the transfer object)
-    def mark_transferred(self) -> None: ...
-    def mark_published(self) -> None: ...
-    def mark_recoverable_error(self, failure_stage: str, failure_message: str) -> None: ...
-    def mark_blocked(self, failure_stage: str, failure_message: str) -> None: ...
 ```
 
-### stager.transfer()
+No callbacks. No mutable methods. The transfer is an immutable descriptor.
+
+### stager.transfer() (D5: single transition)
 
 ```python
 def transfer(self) -> RawArtifactTransfer:
-    """Transfer ownership of staging to publisher.
-
-    Must be called after seal(). Sets stager state to TRANSFERRED.
+    """Single transition: SEALED → TRANSFERRED.
     After this call, stager.__exit__ will NOT delete the staging file.
+    The marker durable is the sole authority for lifecycle after this point.
     """
     if not self._sealed:
         raise RuntimeError("Cannot transfer before seal()")
-    self._transferred = True
+    self._transferred = True  # Single transition
     return RawArtifactTransfer(
         sealed=self._sealed_descriptor,
         ownership_token=str(uuid.uuid4()),
@@ -314,59 +339,108 @@ def transfer(self) -> RawArtifactTransfer:
     )
 ```
 
-### publish_raw_scan
+### publish_raw_scan (D5: no mark_transferred callback)
 
 ```python
 def publish_raw_scan(
     directory: Path,
     transfer: RawArtifactTransfer,
     policy: ManifestPolicy,
-) -> dict[str, Any]:
+) -> PublishResult:
     sealed = transfer.sealed
-    # Identity comes exclusively from sealed.run_id and sealed.scan_id
-    # No identity_fields parameter
+    # Identity exclusively from sealed.run_id and sealed.scan_id
     ...
-    transfer.mark_transferred()
-    try:
-        ...
-        transfer.mark_published()
-    except RecoverableError as e:
-        transfer.mark_recoverable_error(e.stage, str(e))
-        raise
-    except UnrecoverableError as e:
-        transfer.mark_blocked(e.stage, str(e))
-        raise
+    # After success:
+    return PublishResult(status="PUBLISHED", manifest_entry=entry)
+    # After recoverable failure:
+    return PublishResult(status="RECOVERABLE_ERROR", failure_stage=..., failure_message=...)
+    # After blocked failure:
+    return PublishResult(status="BLOCKED", failure_stage=..., failure_message=...)
 ```
+
+```python
+@dataclass(frozen=True)
+class PublishResult:
+    status: str  # "PUBLISHED" | "RECOVERABLE_ERROR" | "BLOCKED"
+    manifest_entry: dict | None = None
+    failure_stage: str | None = None
+    failure_message: str | None = None
+```
+
+The marker durable is the sole authority. After crash, recovery reconstructs everything from marker + filesystem. In-memory state is observational only.
 
 ---
 
-## A9 — Runtime Edge Cases (C10 corrected: fail-closed)
+## A9 — Runtime Edge Cases (D6 corrected: exception classification)
 
-### Publication Failure (C10)
+### Exception Hierarchy (D6)
+
+```
+RecoverableMarketDataError
+  → Register source health (DEGRADED for that source)
+  → Continue with other markets
+  → Event NOT appended to staging
+
+MarketRejected (identity, temporal, metadata, no trades)
+  → Register rejection
+  → Continue with other markets
+  → Event IS appended to staging (for rejected markets that reached Data API)
+
+RawEventPersistenceError
+  → Stop scan immediately
+  → scan_status = BLOCKED_RAW_INTEGRITY
+  → Do NOT seal/publish partial artifact as valid
+  → Do NOT generate snapshot
+  → Preserve staging for diagnosis
+
+RawArtifactTransactionError
+  → Stop scan immediately
+  → scan_status = BLOCKED_RAW_INTEGRITY
+  → Do NOT generate snapshot
+  → Marker/staging/evidence preserved
+
+IdentityCollisionError
+  → Stop scan immediately
+  → scan_status = BLOCKED_RAW_INTEGRITY
+
+UnexpectedInternalError (after raw event persisted)
+  → Stop scan
+  → Preserve staging
+  → Do NOT present partial artifact as scan complete
+  → scan_status = BLOCKED_RAW_INTEGRITY
+```
+
+### Partial Artifact Policy (D6)
+
+A partial artifact (scan that collected some events but crashed before completing all markets) is NOT published as a valid scan. The staging file is preserved for diagnosis but `publish_raw_scan` is NOT called.
+
+Only a complete scan (all markets processed, even if some rejected) proceeds to seal + publish.
+
+### Publication Failure (C10, confirmed)
 
 If `publish_raw_scan()` fails:
-- `run_scan_v3` catches the error.
-- Does NOT continue to snapshot generation.
-- Does NOT persist snapshot final.
-- Does NOT declare scan complete.
 - `scan_status = "BLOCKED_RAW_INTEGRITY"`.
+- No snapshot generation.
+- No `COMPLETE_VALIDATED`.
 - INV-005 = `FAIL`.
-- Marker/staging/evidence preserved.
+- Evidence preserved.
 - Only recovery on next cycle can resolve.
 
-### All Edge Cases (from previous version, confirmed)
+### All Edge Cases
 
 | Case | Behavior |
 |---|---|
 | Zero markets | No stager created. No artifact. INV-005 = NOT_APPLICABLE for this scan. |
 | Zero Data API queries | Stager sealed with event_count=0. Empty artifact published. |
 | Empty Data API response | Valid event with empty payload. `payload_sha256` computed from `[]`. |
-| Partial failures | Events already in staging preserved. Remaining markets continue. Seal with collected events. |
-| Exception before first raw event | Stager sealed with event_count=0. Empty artifact. |
-| Exception after first raw event | Events preserved. Seal with collected events. |
-| Zero raw events total | Empty artifact published. |
-| Duplicate condition IDs | Both events stored. `condition_ids` deduplicated in manifest. |
-| Publication failure | `scan_status = BLOCKED_RAW_INTEGRITY`. No snapshot. No COMPLETE_VALIDATED. |
+| RecoverableMarketDataError | Skip that market. Continue. Event NOT appended. |
+| MarketRejected | Continue. Event IS appended (if reached Data API). |
+| RawEventPersistenceError | Stop. BLOCKED_RAW_INTEGRITY. No publish. |
+| RawArtifactTransactionError | Stop. BLOCKED_RAW_INTEGRITY. No snapshot. |
+| IdentityCollisionError | Stop. BLOCKED_RAW_INTEGRITY. |
+| UnexpectedInternalError after raw persist | Stop. Preserve staging. No partial publish. |
+| Partial scan (crash mid-market) | Staging preserved. NOT published as valid. |
+| Publication failure | BLOCKED_RAW_INTEGRITY. No snapshot. Evidence preserved. |
 
 ---
 
@@ -381,7 +455,7 @@ No automatic migration. New chain starts empty. INV-005 checks `raw_chain_v1/`.
 
 ---
 
-## A11 — Ownership and States (C6 corrected)
+## A11 — Ownership and States (D5 corrected)
 
 ### Stager States
 
@@ -403,13 +477,13 @@ BLOCKED_AFTER_TRANSFER             — Marker BLOCKED, evidence preserved, manua
 OPEN                               — Stager created
   ↓ exception before seal()
 ABORTED_BEFORE_TRANSFER            — Staging file deleted by context manager
-```
 
-```
 SEALED                             — Sealed but not transferred
   ↓ context manager exit without transfer
 ABORTED_BEFORE_TRANSFER            — Staging file deleted (orphan cleanup)
 ```
+
+Single transition from `SEALED` → `TRANSFERRED` via `stager.transfer()`. No `mark_transferred()` callback in publisher. The marker durable is the sole authority after TRANSFERRED.
 
 ### Context Manager Behavior
 
@@ -422,7 +496,7 @@ ABORTED_BEFORE_TRANSFER            — Staging file deleted (orphan cleanup)
 
 ---
 
-## A12 — Concurrency (C13 corrected: no flock contradiction)
+## A12 — Concurrency (D4 corrected: locking API)
 
 ### Lock
 
@@ -432,80 +506,110 @@ lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
 fcntl.flock(lock_fd, fcntl.LOCK_EX)
 ```
 
-### Properties
+### Recovery API (D4)
 
-- **Multi-process**: `fcntl.flock` advisory but works across processes on same host.
-- **Recovery under same lock**: `recover_incomplete_transactions()` called inside lock by `publish_raw_scan()`. No separate lock.
-- **No nested locking**: All operations under single lock. No function called from within re-acquires.
-- **No timeout**: `flock(LOCK_EX)` blocks indefinitely. Kernel releases on process death.
+**Public (acquires lock):**
+```python
+def recover_raw_transactions(directory: Path, policy: ManifestPolicy) -> list[dict]:
+    """Public recovery API. Acquires flock, calls internal, releases flock."""
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return _recover_raw_transactions_under_lock(directory, policy)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+```
 
-### Filesystem Without flock (C13)
+**Private (caller already holds lock):**
+```python
+def _recover_raw_transactions_under_lock(directory: Path, policy: ManifestPolicy) -> list[dict]:
+    """Internal recovery. Caller MUST already hold the lock.
+    Raises RuntimeError if called without lock (assertion check via thread-local or parameter).
+    """
+    ...
+```
 
-If `fcntl.flock` raises `OSError` (unsupported):
+`publish_raw_scan()` uses `_recover_raw_transactions_under_lock()` (it already holds the lock).
+Runtime startup uses `recover_raw_transactions()` (public, acquires lock).
+
+**Nested locking prohibited.** If `publish_raw_scan()` calls `recover_raw_transactions()`, it would deadlock (flock is not recursive in the same process for exclusive locks). The private function exists precisely to avoid this.
+
+### Filesystem Without flock (C13, confirmed)
+
+If `fcntl.flock` raises `OSError`:
 - Publication refused.
 - `scan_status = "BLOCKED_RAW_INTEGRITY"`.
-- INV-005 = `FAIL` if a chain exists or an eligible scan has been seen.
-- INV-005 = `UNKNOWN` only before any eligible scan (empty chain, no eligibility state).
+- INV-005 = `FAIL` if chain exists or eligible scan seen.
+- INV-005 = `UNKNOWN` only before first eligible scan.
 
-No contradiction. No fallback. No silent ignore.
+No timeout. No fallback.
 
 ---
 
-## A13 — INV-005 Semantics (C11, C12 corrected)
+## A13 — INV-005 Semantics (D3, D4, D11 corrected)
 
-### Separation of Read and Write (C11)
+### Separation of Read and Write (D4)
 
-**Write operation (mutating):**
+**Write (mutating, under lock):**
 ```python
-recover_raw_transactions(directory, policy)  # Under lock. Mutates filesystem.
+recover_raw_transactions(directory, policy)           # Public, acquires lock
+_recover_raw_transactions_under_lock(directory, policy)  # Private, caller holds lock
 ```
-Called by:
-- Runtime at startup
-- `publish_raw_scan()` before publishing
-- Never by INV-005
 
-**Read operations (non-mutating):**
+**Read (non-mutating):**
 ```python
-inspect_raw_transaction_state(directory, policy)  # Read-only. Returns state.
-verify_raw_chain(directory, policy)                # Read-only. Returns chain status.
+inspect_raw_transaction_state(directory, policy)     # Read-only
+verify_raw_chain(directory, policy)                  # Read-only (steady state)
 ```
-Called by:
-- INV-005 evaluator
-- Dashboard
-- Any read-only inspector
 
-INV-005 does NOT call `recover_raw_transactions()`. It only inspects.
+INV-005 calls only read functions. Never calls recovery.
 
-### Persisted Eligibility State (C12)
+### Persisted Eligibility State (D3 corrected: fail-closed)
 
-A small JSON file at `raw_chain_v1/.eligibility_state.json`:
+File: `raw_chain_v1/.eligibility_state.json`
 
 ```json
 {
   "schema_version": "h011-eligibility-v1",
   "first_eligible_scan_seen": true,
   "first_eligible_scan_id": "2026-07-13T10:00:00Z",
-  "first_persistible_data_api_request_at": "2026-07-13T10:00:01Z",
-  "state_sha256": "..."
+  "first_persistible_data_api_request_at": "2026-07-13T10:00:01Z"
 }
 ```
 
-**Who persists:** `run_scan_v3` after the first market reaches Data API (i.e., the first market that is not rejected before Data API).
+Integrity: `state_sha256` computed from canonical JSON of all fields except `state_sha256`. Stored as additional field.
 
-**When fsynced:** Immediately after write, with directory fsync.
+**Read rules (D3):**
+- File absent: `first_eligible_scan_seen = false`
+- File valid (hash matches): use persisted value
+- File present but corrupt (invalid JSON, hash mismatch, schema invalid): `BLOCKED_RAW_INTEGRITY`, INV-005 = `FAIL`
 
-**Integrity:** `state_sha256` is computed from the canonical JSON of all fields except `state_sha256` itself. Verified on read. If corrupt: treated as `first_eligible_scan_seen=false`.
+**Monotonicity:**
+- `false → true` permitted
+- `true → false` prohibited (runtime must refuse to overwrite `true` with `false`)
 
-### INV-005 Decision Table (C12, C13)
+**Write (D3):**
+```
+exclusive temp file (O_CREAT | O_EXCL)
+→ canonical bytes (sort_keys, separators, ensure_ascii=False, allow_nan=False)
+→ flush
+→ fsync
+→ atomic replace (os.rename)
+→ directory fsync
+```
+
+### INV-005 Decision Table
 
 ```
 EMPTY_CHAIN + first_eligible_scan_seen=false:
     UNKNOWN
-    (No manifests, no artifacts. No eligible scan has run yet.)
 
 EMPTY_CHAIN + first_eligible_scan_seen=true:
     FAIL
-    (An eligible scan ran but produced no artifact. Chain is broken.)
+
+EMPTY_CHAIN + eligibility file corrupt:
+    FAIL (BLOCKED_RAW_INTEGRITY)
 
 VALID_CHAIN + no unresolved markers + no quarantine + no orphans:
     PASS
@@ -531,65 +635,158 @@ Zero markets in current scan + EMPTY_CHAIN + first_eligible_scan_seen=false:
 
 ---
 
-## C9 — Retries of run_id and scan_id
+## C9 — Retries (unchanged, confirmed)
 
 ```
-same run_id + same scan_id + same artifact hash (file_sha256):
-    IDEMPOTENT_SUCCESS — return existing manifest entry, do not create new sequence.
+same run_id + same scan_id + same artifact hash:
+    IDEMPOTENT_SUCCESS — return existing manifest entry.
 
 same run_id + same scan_id + different artifact hash:
-    BLOCK — duplicate identity with different content.
+    BLOCK.
 
 run_id repeated + scan_id different:
-    BLOCK — run_id must be unique.
+    BLOCK.
 
 scan_id repeated + run_id different:
-    BLOCK — scan_id must be unique.
-```
-
-No new sequence is created in any of these cases. The existing chain is not modified.
-
----
-
-## C14 — PR Body
-
-After committing this design doc:
-
-```bash
-HEAD_SHA="$(git rev-parse HEAD)"
-```
-
-PR body will contain:
-
-```
-Current head: <HEAD_SHA EXACTO>
-Design base code SHA: 18f8e6dea12c25a4dc338b0a0fdb2bccc417540b
-Phase: transaction redesign — architecture correction
-Code implementation paused
-Tests: 247/247 existing
-Production: 2f850353 untouched
-PR: Draft
+    BLOCK.
 ```
 
 ---
 
-## Summary: C1–C14 Status
+## D7 — Transaction Marker Schema (definitive)
+
+### Complete Schema
+
+```json
+{
+  "transaction_version": "h011-artifact-txn-v2",
+  "transaction_uuid": "<uuid4>",
+  "ownership_token": "<uuid4 from RawArtifactTransfer>",
+  "status": "STAGED",
+  "resolution": "ACTIVE",
+  "sequence": 0,
+  "run_id": "...",
+  "scan_id": "...",
+  "staging_filename": "...",
+  "final_name": "...",
+  "sidecar_name": "...",
+  "manifest_name": "...",
+  "device_id": 0,
+  "inode": 0,
+  "size_bytes": 0,
+  "file_sha256": "...",
+  "canonical_events_sha256": "...",
+  "event_count": 0,
+  "condition_ids": [],
+  "previous_manifest_hash": null,
+  "candidate_manifest": {},
+  "candidate_manifest_bytes_base64": "...",
+  "candidate_manifest_bytes_sha256": "...",
+  "manifest_created_at": "2026-07-13T10:00:00Z",
+  "failure_stage": null,
+  "failure_type": null,
+  "failure_message": null,
+  "recoverable": true
+}
+```
+
+### Field Rules
+
+**Required fields** (all must be present):
+- `transaction_version`: must be `"h011-artifact-txn-v2"`
+- `transaction_uuid`: UUID4 string
+- `ownership_token`: UUID4 string
+- `status`: one of `STAGED`, `ARTIFACT_PUBLISHED`, `SIDECAR_PUBLISHED`, `MANIFEST_PUBLISHED`, `COMMITTED`
+- `resolution`: one of `ACTIVE`, `BLOCKED`, `QUARANTINED`
+- `sequence`: non-negative int
+- `run_id`: non-empty string
+- `scan_id`: non-empty string
+- `staging_filename`: filename only (no path), ends with `.tmp`
+- `final_name`: filename only, matches `policy.artifact_glob`
+- `sidecar_name`: filename only, ends with `.sha256`
+- `manifest_name`: filename only, matches `{prefix}_{sequence:06d}.json`
+- `device_id`: int
+- `inode`: int
+- `size_bytes`: int ≥ 0
+- `file_sha256`: 64-char lowercase hex
+- `canonical_events_sha256`: 64-char lowercase hex
+- `event_count`: int ≥ 0
+- `condition_ids`: list of strings
+- `previous_manifest_hash`: 64-char hex or null
+- `candidate_manifest`: dict (full manifest entry including `manifest_hash`)
+- `candidate_manifest_bytes_base64`: base64-encoded canonical JSON bytes of `candidate_manifest`
+- `candidate_manifest_bytes_sha256`: 64-char hex, SHA-256 of decoded `candidate_manifest_bytes_base64`
+- `manifest_created_at`: ISO 8601 UTC string, frozen at creation, never changed by recovery
+
+**Optional fields** (may be null):
+- `failure_stage`: string or null (set when failure occurs)
+- `failure_type`: string or null
+- `failure_message`: string or null
+- `recoverable`: bool (true if recovery can complete from this state)
+
+### Marker Integrity Hash
+
+`marker_integrity_sha256` = SHA-256 of canonical JSON of all fields except `marker_integrity_sha256` itself. Stored as additional field. Verified on every marker read.
+
+### `status` vs `resolution` (D7)
+
+- `status` = transaction progress: `STAGED` → `ARTIFACT_PUBLISHED` → `SIDECAR_PUBLISHED` → `MANIFEST_PUBLISHED` → `COMMITTED`
+- `resolution` = recovery outcome: `ACTIVE` (in progress or not yet recovered), `BLOCKED` (recovery attempted, unresolved), `QUARANTINED` (corrupt/ambiguous)
+
+Normal path: `resolution` stays `ACTIVE` until `COMMITTED`, then marker is removed.
+
+Recovery sets `resolution` to `BLOCKED` or `QUARANTINED` (not `status`). `status` reflects the last successful filesystem operation.
+
+### Marker Filename
+
+```
+{policy.manifest_prefix}_txn_{sequence:06d}_{transaction_uuid}.marker
+```
+
+Example: `manifest_txn_000003_550e8400-e29b-41d4-a716-446655440000.marker`
+
+### Marker Operations
+
+**Creation (O_EXCL):**
+```
+temp_name = f"{marker_name}.tmp.{uuid4()}"
+fd = os.open(temp_name, O_CREAT | O_EXCL | O_WRONLY, 0o644)
+with os.fdopen(fd, 'wb') as f:
+    f.write(canonical_bytes)
+    f.flush()
+    os.fsync(f.fileno())
+os.rename(temp_name, marker_name)
+dir_fsync(directory)
+```
+
+**Update (atomic replace):**
+```
+temp_name = f"{marker_name}.tmp.{uuid4()}"
+# Same as creation — O_EXCL on temp, then rename to marker_name
+```
+
+**Validation before any filesystem operation:**
+1. Parse JSON. If invalid → QUARANTINE.
+2. Verify `transaction_version` == `"h011-artifact-txn-v2"`. If not → QUARANTINE.
+3. Verify `marker_integrity_sha256`. If mismatch → QUARANTINE.
+4. Verify all required fields present and correct types. If any invalid → QUARANTINE.
+5. Validate paths: `staging_filename`, `final_name`, `sidecar_name`, `manifest_name` are bare filenames (no `/`, `\`, `..`). If invalid → QUARANTINE.
+6. Verify `candidate_manifest_bytes_sha256` == SHA-256 of decoded `candidate_manifest_bytes_base64`. If mismatch → QUARANTINE.
+7. Verify `candidate_manifest["manifest_hash"]` == recomputed from `candidate_manifest`. If mismatch → QUARANTINE.
+
+---
+
+## Summary: D1–D8 Status
 
 | ID | Topic | Status |
 |---|---|---|
-| C1 | PR body with real SHA (no invented) | ✅ Resolved |
-| C2 | Recovery: marker may be behind filesystem; "exacto" matching; presence of next component is not contradiction | ✅ Resolved |
-| C3 | COMMITTED: no wildcards; verify all components present + valid + manifest matches marker candidate | ✅ Resolved |
-| C4 | verify_candidate_logical (pre-publish), verify_candidate_physical (post artifact+sidecar, with allowed_candidate_filename), verify_raw_chain (post-manifest, strict, no exceptions) | ✅ Resolved |
-| C5 | SealedRawArtifact: device_id, inode, size_bytes mandatory; seal() chmod read-only + fsync; under-lock stat comparison; post-hardlink inode check | ✅ Resolved |
-| C6 | RawArtifactTransfer with ownership_token; stager.transfer() returns transfer; publish_raw_scan receives transfer, not sealed directly; no private attribute access | ✅ Resolved |
-| C7 | Recovery matrix: exhaustive rows for stale temp, duplicate sequence, duplicate UUID, orphan manifest, orphan sidecar, candidate bytes mismatch, unsafe path, symlink, unknown version, unknown status, corrupt chain, COMMITTED with missing components, QUARANTINED/BLOCKED residual | ✅ Resolved |
-| C8 | Fault injection: 5 points (AFTER_STAGED_FSYNC through AFTER_COMMITTED_FSYNC); subprocess + os._exit(99); recovery in separate subprocess | ✅ Resolved |
-| C9 | Retries: same identity + same hash = IDEMPOTENT_SUCCESS; same identity + different hash = BLOCK; repeated run_id or scan_id = BLOCK | ✅ Resolved |
-| C10 | Publication failure: fail-closed; no snapshot; no COMPLETE_VALIDATED; scan_status=BLOCKED_RAW_INTEGRITY; evidence preserved | ✅ Resolved |
-| C11 | INV-005 read-only: does not call recovery; separate recover_raw_transactions (write) from inspect/verify (read) | ✅ Resolved |
-| C12 | Persisted eligibility state: .eligibility_state.json with first_eligible_scan_seen; EMPTY_CHAIN + seen=true = FAIL; fsync + integrity hash | ✅ Resolved |
-| C13 | Filesystem without flock: publication refused; BLOCKED_RAW_INTEGRITY; FAIL if chain/eligibility exists; UNKNOWN only before first eligible scan | ✅ Resolved |
-| C14 | PR body with exact SHA from git rev-parse HEAD | ✅ Resolved |
+| D1 | verify_committing_transaction (post-manifest, pre-cleanup) vs verify_raw_chain (steady-state only); steady-state failure → BLOCKED_RAW_INTEGRITY | ✅ Resolved |
+| D2 | seal() definitive order: flush → close → fsync → fstat → chmod → dir fsync → strict reread → calculate → return | ✅ Resolved |
+| D3 | Eligibility corrupt → BLOCKED_RAW_INTEGRITY + FAIL (not false); monotonic false→true; atomic write with fsync | ✅ Resolved |
+| D4 | Recovery API: public (acquires lock) vs private (caller holds lock); no nested locking | ✅ Resolved |
+| D5 | RawArtifactTransfer immutable (no callbacks); stager.transfer() single transition; marker is sole authority after TRANSFERRED | ✅ Resolved |
+| D6 | Exception classification: RecoverableMarketDataError, MarketRejected, RawEventPersistenceError, RawArtifactTransactionError, IdentityCollisionError, UnexpectedInternalError; partial artifact NOT published | ✅ Resolved |
+| D7 | Marker schema v2 with status vs resolution, integrity hash, candidate_manifest_bytes_base64, ownership_token, device_id, inode, size_bytes; creation/update/validation rules | ✅ Resolved |
+| D8 | verify_manifest_entry_physical (strict, no exceptions) vs verify_candidate_physical (with allowed_candidate_filename); no ambiguous optional parameters | ✅ Resolved |
 
 **Zero open decisions.**
