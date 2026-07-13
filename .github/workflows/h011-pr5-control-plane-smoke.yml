@@ -1,0 +1,226 @@
+name: H011 PR5 Control-Plane Smoke
+
+on:
+  pull_request:
+    branches:
+      - feat/h011-v3-discovery-refresh
+    paths:
+      - "polymarket/control_plane/**"
+      - "polymarket/h011_v3_pipeline.py"
+      - "tests/h011_v3/test_control_plane_coverage.py"
+      - ".github/workflows/h011-pr5-control-plane-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: h011-pr5-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  control-plane-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+
+      - name: Run H011 tests (including control-plane coverage)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r polymarket/requirements-h011-v3.txt
+          python -m pytest tests/h011_v3/ -q
+
+      - name: Run control-plane coverage tests specifically
+        run: |
+          python -m pytest tests/h011_v3/test_control_plane_coverage.py -v
+
+      - name: Build H011 Docker image
+        run: |
+          docker build \
+            -f polymarket/Dockerfile.h011-v3 \
+            -t senecio-h011-pr5:${{ github.sha }} \
+            .
+
+      - name: Start container
+        run: |
+          mkdir -p "${RUNNER_TEMP}/h011-results"
+
+          docker run -d \
+            --name senecio-h011-pr5 \
+            -p 18080:8080 \
+            -v "${RUNNER_TEMP}/h011-results:/app/polymarket/results" \
+            -e SENECIO_CODE_SHA="${{ github.sha }}" \
+            -e H011_PIPELINE_VERSION="integrity-v3" \
+            -e PYTHONUNBUFFERED="1" \
+            senecio-h011-pr5:${{ github.sha }}
+
+      - name: Wait for health
+        run: |
+          healthy=0
+          for i in $(seq 1 90); do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:18080/healthz; then
+              healthy=1
+              break
+            fi
+            if ! docker inspect -f '{{.State.Running}}' senecio-h011-pr5 \
+              | grep -q true; then
+              echo "Container stopped unexpectedly"
+              docker logs senecio-h011-pr3
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "Health endpoint did not become ready"
+            docker logs senecio-h011-pr5
+            exit 1
+          fi
+
+      - name: Validate /api/v3/state safety flags
+        run: |
+          for i in $(seq 1 90); do
+            if curl --fail --silent \
+              http://127.0.0.1:18080/api/v3/state \
+              -o /tmp/h011-state.json; then
+              break
+            fi
+            sleep 2
+          done
+
+          cat /tmp/h011-state.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          state = json.loads(Path("/tmp/h011-state.json").read_text())
+
+          assert state.get("paper_only") is True, state
+          assert state.get("live_capital_locked") is True, state
+          assert state.get("orders_enabled") is False, state
+
+          print("Runtime safety flags verified")
+          PY
+
+      - name: Validate /api/v3/integrity
+        run: |
+          for i in $(seq 1 90); do
+            if curl --fail --silent \
+              http://127.0.0.1:18080/api/v3/integrity \
+              -o /tmp/h011-integrity.json; then
+              break
+            fi
+            sleep 2
+          done
+          cat /tmp/h011-integrity.json
+
+      - name: Validate invariants count = 31
+        run: |
+          for i in $(seq 1 90); do
+            if curl --fail --silent \
+              http://127.0.0.1:18080/api/v3/state \
+              -o /tmp/h011-state2.json; then
+              break
+            fi
+            sleep 2
+          done
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          state = json.loads(Path("/tmp/h011-state2.json").read_text())
+
+          invariants = state.get("invariants", {})
+          summary = invariants.get("summary", {})
+
+          # Must have exactly 31 invariants
+          assert summary.get("total") == 31, f"Expected 31 invariants, got {summary.get('total')}"
+
+          # Must NOT have 31 UNKNOWN (invariants must be actually evaluated)
+          assert summary.get("unknown", 0) < 31, "All 31 invariants are UNKNOWN — not evaluated"
+
+          # Must have some PASS
+          assert summary.get("pass", 0) > 0, "No PASS invariants — nothing evaluated"
+
+          # Each PASS must have evidence
+          for r in invariants.get("results", []):
+              if r["status"] == "PASS":
+                  assert r.get("reason"), f"PASS without reason: {r['invariant_id']}"
+                  assert r.get("evidence") is not None, f"PASS without evidence: {r['invariant_id']}"
+
+          print(f"Invariants: PASS={summary.get('pass')}, FAIL={summary.get('fail')}, "
+                f"UNKNOWN={summary.get('unknown')}, N/A={summary.get('not_applicable')}")
+
+          # Safety flags
+          assert state.get("paper_only") is True
+          assert state.get("orders_enabled") is False
+
+          # Cero operaciones
+          print("All invariant assertions passed")
+          PY
+
+      - name: Wait for discovery artifact
+        run: |
+          artifact=""
+          for i in $(seq 1 180); do
+            artifact="$(find "${RUNNER_TEMP}/h011-results" \
+              -type f \
+              \( -name 'discovery_*.json.gz' -o -name '*.events.jsonl.gz' \) \
+              | head -n 1)"
+            if [ -n "$artifact" ]; then
+              break
+            fi
+            if ! docker inspect -f '{{.State.Running}}' senecio-h011-pr5 \
+              | grep -q true; then
+              echo "Container stopped during discovery"
+              docker logs senecio-h011-pr5
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ -z "$artifact" ]; then
+            echo "No discovery/raw artifact generated"
+            docker logs senecio-h011-pr5
+            exit 1
+          fi
+          echo "Artifact generated: $artifact"
+
+          sha_file="${artifact}.sha256"
+          if [ -f "$sha_file" ]; then
+            expected="$(tr -d '[:space:]' < "$sha_file")"
+            actual="$(sha256sum "$artifact" | awk '{print $1}')"
+            test "$expected" = "$actual"
+            echo "Artifact SHA verified"
+          fi
+
+      - name: Check logs for safety violations
+        run: |
+          docker logs senecio-h011-pr5 | tee /tmp/h011-container.log
+
+          ! grep -Ei \
+            'orders_enabled[=: ]+true|live_capital_locked[=: ]+false|paper_only[=: ]+false' \
+            /tmp/h011-container.log
+
+          test "$(docker inspect -f '{{.State.Running}}' senecio-h011-pr5)" = "true"
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h011-pr5-smoke-${{ github.sha }}
+          path: |
+            /tmp/h011-container.log
+            /tmp/h011-state.json
+            /tmp/h011-integrity.json
+            ${{ runner.temp }}/h011-results
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop container
+        if: always()
+        run: |
+          docker rm -f senecio-h011-pr5 2>/dev/null || true

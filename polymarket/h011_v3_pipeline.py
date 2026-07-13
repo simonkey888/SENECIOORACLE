@@ -1077,6 +1077,9 @@ def run_scan_v3(
     clob_client: ClobClient,
     persist_raw: bool = True,
     discovery: dict[str, Any] | None = None,
+    gamma_tracker=None,
+    canonical_tracker=None,
+    data_api_tracker=None,
 ) -> dict[str, Any]:
     """
     Run a complete V3 scan over a list of markets.
@@ -1223,48 +1226,58 @@ def run_scan_v3(
             }
             for r in records
         ]
-        # Build source health from actual scan flow
-        # Gamma source: discovery was the HTTP call
-        gamma_health = SourceHealthTracker("gamma_metadata")
-        if scan_meta.get("discovery_status") == "DISCOVERY_SOURCE_FAILED":
-            gamma_health.mark_used()
-            gamma_health.record_request()
-            gamma_health.record_error("Discovery source failed")
+        # Fix #1: Use real source health trackers (instrumented at HTTP call sites)
+        # Gamma tracker covers /events/keyset; canonical tracker covers /markets/slug
+        if gamma_tracker is not None:
+            gamma_health = gamma_tracker.build()
         else:
-            gamma_health.mark_used()
-            gamma_health.record_request()
-            gamma_health.record_response(200, scan_meta.get("discovery_markets_received", 0))
+            gamma_health = not_used_source_health("gamma_metadata", "No gamma tracker provided")
+        if canonical_tracker is not None:
+            canonical_health = canonical_tracker.build()
+        else:
+            canonical_health = not_used_source_health("gamma_canonical", "No canonical tracker provided")
+        if data_api_tracker is not None:
+            data_api_health = data_api_tracker.build()
+        else:
+            data_api_health = not_used_source_health("data_api_trades", "No data API tracker provided")
 
-        # Data API source: consulted for each market that reached the pipeline
-        data_api_health = SourceHealthTracker("data_api_trades")
-        if records:
-            for r in records:
-                status = r.get("record_status", "")
-                if status in ("REJECTED_IDENTITY", "REJECTED_TEMPORAL_ELIGIBILITY", "REJECTED_METADATA"):
-                    continue  # These were rejected before Data API
-                data_api_health.mark_used()
-                data_api_health.record_request()
-                trades = r.get("_raw_bundle", {}).get("trades", [])
-                data_api_health.record_response(200, len(trades))
-        if not data_api_health._used:
-            data_api_health = type(data_api_health)("data_api_trades")  # Reset to NOT_USED
-
-        # CLOB source: only consulted if shadow execution was attempted
-        clob_health = not_used_source_health("clob_orderbook",
-            "CLOB not consulted — no shadow-executable markets in paper-only mode")
-        for r in records:
-            if r.get("shadow_execution", {}).get("attempted"):
-                clob_health = SourceHealthTracker("clob_orderbook")
-                clob_health.mark_used()
-                clob_health.record_request()
-                clob_health.record_response(200, 0)  # Books fetched
-                break
+        # CLOB: NOT_USED unless shadow execution was attempted
+        clob_attempted = any(r.get("shadow_execution", {}).get("attempted") for r in records)
+        if clob_attempted:
+            clob_health = SourceHealthTracker("clob_orderbook")
+            clob_health.mark_used()
+            clob_health.record_request()
+            clob_health.record_response(200, 0)
+            clob_health = clob_health.build()
+        else:
+            clob_health = not_used_source_health("clob_orderbook",
+                "CLOB not consulted — no shadow-executable markets in paper-only mode")
 
         source_health_telemetry = {
-            "gamma_metadata": gamma_health.build(),
-            "data_api_trades": data_api_health.build(),
-            "clob_orderbook": clob_health if isinstance(clob_health, dict) else clob_health.build(),
+            "gamma_metadata": gamma_health,
+            "gamma_canonical": canonical_health,
+            "data_api_trades": data_api_health,
+            "clob_orderbook": clob_health,
         }
+
+        # Fix #3: Read historical run_ids and scan_ids from previous snapshots
+        previous_run_ids: list[str] = []
+        previous_scan_ids: list[str] = []
+        state_dir = V3_RESULTS_DIR / "state"
+        if state_dir.exists():
+            for snap_file in state_dir.glob("*.json"):
+                if snap_file.name in ("latest.json", "latest.json.sha256"):
+                    continue
+                try:
+                    snap_data = json.loads(snap_file.read_text())
+                    rid = snap_data.get("run_id", "")
+                    sid = snap_data.get("scan_id", "")
+                    if rid:
+                        previous_run_ids.append(rid)
+                    if sid:
+                        previous_scan_ids.append(sid)
+                except (json.JSONDecodeError, OSError):
+                    pass  # Corrupt file — will not be counted; INV-001/002 may be UNKNOWN
 
         # Build ScanContext for invariant evaluation
         ctx = ScanContext(
@@ -1288,6 +1301,8 @@ def run_scan_v3(
             snapshot_path=str(V3_RESULTS_DIR / "state" / "latest.json"),
             results_dir=str(V3_RESULTS_DIR),
             raw_dir=str(V3_RAW_DIR),
+            previous_run_ids=previous_run_ids,
+            previous_scan_ids=previous_scan_ids,
         )
 
         source_health, invariants, alerts, scan_status = compute_control_plane_state(
