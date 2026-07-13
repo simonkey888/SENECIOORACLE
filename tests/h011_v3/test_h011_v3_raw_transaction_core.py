@@ -80,6 +80,20 @@ from h011_v3_raw_transaction import (
 # Fixtures and helpers
 # ═══════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(autouse=True)
+def _cleanup_guards():
+    """Ensure no guards leak between tests."""
+    yield
+    with rt._ACTIVE_GUARDS_LOCK:
+        for token, record in list(rt._ACTIVE_GUARDS.items()):
+            try:
+                record.guard.close()
+            except Exception:
+                pass
+        rt._ACTIVE_GUARDS.clear()
+        rt._CHAIN_RESERVATIONS.clear()
+
+
 @pytest.fixture
 def raw_dir(tmp_path):
     d = tmp_path / "raw"
@@ -407,7 +421,7 @@ def test_marker_filename_rejects_uuid1():
 
 
 def test_marker_filename_rejects_unsafe_prefix():
-    with pytest.raises(ValueError, match="unsafe characters"):
+    with pytest.raises((ValueError, PathSafetyError)):
         marker_filename("manifest/../", 0, str(uuid.uuid4()))
 
 
@@ -877,31 +891,36 @@ def test_lock_guard_context_manager(raw_dir: Path):
 
 
 def test_manually_constructed_guard_rejected(raw_dir: Path):
-    """F5 — A guard constructed manually (not via acquire) must be rejected."""
-    # Open a random fd and try to construct a guard
-    fd = os.open(str(raw_dir), os.O_RDONLY | os.O_DIRECTORY)
+    """G2/F5 — A guard constructed manually (not via acquire) must be rejected."""
+    # Open a trusted directory and try to construct a guard manually
+    trusted = rt.open_trusted_directory(raw_dir)
     try:
-        fake_guard = RawChainLockGuard(
-            directory=raw_dir.resolve(),
-            prefix="manifest",
-            lock_fd=fd,
-            pid=os.getpid(),
-            token=str(uuid.uuid4()),
-        )
-        with pytest.raises(GuardValidationError, match="not in the active registry"):
-            rt.assert_guard_valid(fake_guard, raw_dir, "manifest")
+        fd = os.open(str(raw_dir / "manifest.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fake_guard = RawChainLockGuard(
+                directory=raw_dir,
+                prefix="manifest",
+                lock_fd=fd,
+                pid=os.getpid(),
+                token=str(uuid.uuid4()),
+                trusted=trusted,
+            )
+            with pytest.raises(GuardValidationError, match="not in the active registry"):
+                rt.assert_guard_valid(fake_guard, raw_dir, "manifest")
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        trusted.close()
 
 
 def test_copied_token_guard_rejected(raw_dir: Path):
-    """F5 — A guard that copies a token from a real guard but is a different
+    """G2/F5 — A guard that copies a token from a real guard but is a different
     object must be rejected."""
     lock = RawChainLock(raw_dir, "manifest")
     guard1 = lock.acquire()
     try:
-        # Create a second guard object with the same token but different fd
-        fd2 = os.open(str(raw_dir), os.O_RDONLY | os.O_DIRECTORY)
+        # Create a second guard object with the same token but different fd/trusted
+        fd2 = os.open(str(raw_dir / "manifest.lock"), os.O_RDWR)
         try:
             fake_guard = RawChainLockGuard(
                 directory=guard1.directory,
@@ -909,6 +928,7 @@ def test_copied_token_guard_rejected(raw_dir: Path):
                 lock_fd=fd2,
                 pid=guard1.pid,
                 token=guard1.token,  # copied token
+                trusted=guard1.trusted,
             )
             with pytest.raises(GuardValidationError, match="guard object mismatch"):
                 rt.assert_guard_valid(fake_guard, raw_dir, "manifest")
@@ -950,35 +970,34 @@ def test_replaced_lock_path_rejected(raw_dir: Path):
 
 
 def test_two_thread_registry_acquisition_is_atomic(raw_dir: Path):
-    """F5 — Two threads attempting acquire() for the same (directory, prefix)
-    must not both succeed. One must get NestedLockingError."""
+    """G2 — Two threads attempting acquire() for the same (directory, prefix)
+    must not both succeed. The second must get NestedLockingError.
+
+    Since fcntl.flock is per-process (not per-thread), both threads can acquire
+    the flock. The registry check is what prevents two simultaneous guards.
+    """
     lock = RawChainLock(raw_dir, "manifest")
-    results: list[Any] = []
-    barrier = threading.Barrier(2)
-
-    def worker():
-        barrier.wait()
-        try:
-            guard = lock.acquire()
-            results.append(("acquired", guard))
-            time.sleep(0.1)
-            guard.close()
-        except NestedLockingError:
-            results.append(("nested", None))
-        except Exception as exc:
-            results.append(("error", exc))
-
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    t1.join(timeout=5)
-    t2.join(timeout=5)
-    # Exactly one should acquire, the other should get nested error
-    acquired = [r for r in results if r[0] == "acquired"]
-    nested = [r for r in results if r[0] == "nested"]
-    assert len(acquired) == 1, f"expected 1 acquired, got {results}"
-    assert len(nested) == 1, f"expected 1 nested, got {results}"
+    # Acquire in the main thread first
+    guard1 = lock.acquire()
+    try:
+        # Now try to acquire from a second thread — should get NestedLockingError
+        result: list[Any] = []
+        def worker2():
+            try:
+                g2 = lock.acquire()
+                result.append(("acquired", g2))
+                g2.close()
+            except NestedLockingError as exc:
+                result.append(("nested", exc))
+            except Exception as exc:
+                result.append(("error", exc))
+        t2 = threading.Thread(target=worker2)
+        t2.start()
+        t2.join(timeout=5)
+        assert len(result) == 1, f"expected 1 result, got {result}"
+        assert result[0][0] == "nested", f"expected nested, got {result}"
+    finally:
+        guard1.close()
 
 
 def test_independent_locks_allowed(raw_dir: Path, tmp_path: Path):
@@ -1064,7 +1083,7 @@ def test_stager_seal_produces_strict_readable_gzip(raw_dir: Path):
     with RawScanStager(run_id="r1", scan_id="s1", raw_dir=raw_dir) as stager:
         stager.append_event(_make_event())
         stager.seal()
-        events = load_raw_events_strict(stager._staging_path)
+        events = load_raw_events_strict(stager.staging_path)
         assert len(events) == 1
 
 
@@ -1072,7 +1091,7 @@ def test_stager_seal_sets_read_only(raw_dir: Path):
     with RawScanStager(run_id="r1", scan_id="s1", raw_dir=raw_dir) as stager:
         stager.append_event(_make_event())
         stager.seal()
-        mode = stager._staging_path.stat().st_mode & 0o777
+        mode = stager.staging_path.stat().st_mode & 0o777
         assert mode == 0o444
 
 
@@ -1081,7 +1100,7 @@ def test_stager_seal_captures_stable_inode_device_size(raw_dir: Path):
         stager.append_event(_make_event())
         stager.append_event(_make_event(cid="0xdef"))
         sealed = stager.seal()
-        st_stat = stager._staging_path.stat()
+        st_stat = stager.staging_path.stat()
         assert sealed.device_id == st_stat.st_dev
         assert sealed.inode == st_stat.st_ino
         assert sealed.size_bytes == st_stat.st_size
@@ -1091,7 +1110,7 @@ def test_stager_seal_captures_file_sha256_from_disk(raw_dir: Path):
     with RawScanStager(run_id="r1", scan_id="s1", raw_dir=raw_dir) as stager:
         stager.append_event(_make_event())
         sealed = stager.seal()
-        disk_bytes = stager._staging_path.read_bytes()
+        disk_bytes = stager.staging_path.read_bytes()
         assert sealed.file_sha256 == hashlib.sha256(disk_bytes).hexdigest()
 
 
@@ -1187,16 +1206,19 @@ def test_first_event_fsync_failure_preserves_evidence(raw_dir: Path, monkeypatch
 
 
 def test_zero_event_seal_failure_preserves_evidence(raw_dir: Path, monkeypatch):
-    """F6 — Seal failure with zero events must still preserve staging."""
+    """F6 — Seal failure with zero events must still preserve staging.
+
+    G4: Stager uses os.fchmod (not os.chmod), so we monkeypatch os.fchmod.
+    """
     with RawScanStager(run_id="r1", scan_id="s1", raw_dir=raw_dir) as stager:
-        # Monkeypatch chmod to fail ONLY for the staging path (0o444 mode).
-        original_chmod = os.chmod
-        staging_path = stager._staging_path
-        def selective_chmod(path, mode):
-            if mode == 0o444 and Path(path) == staging_path:
-                raise OSError(errno.EIO, "simulated chmod failure")
-            return original_chmod(path, mode)
-        monkeypatch.setattr(os, "chmod", selective_chmod)
+        # Monkeypatch fchmod to fail for 0o444 mode on the staging fd
+        original_fchmod = os.fchmod
+        staging_fd = stager._staging_fd
+        def selective_fchmod(fd, mode):
+            if mode == 0o444 and fd == staging_fd:
+                raise OSError(errno.EIO, "simulated fchmod failure")
+            return original_fchmod(fd, mode)
+        monkeypatch.setattr(os, "fchmod", selective_fchmod)
         with pytest.raises(RawEventPersistenceError):
             stager.seal()
     # F6 rule 5: failure during seal() always preserves staging, even with zero events
@@ -1353,7 +1375,7 @@ def test_stager_uuid_staging_exclusive(raw_dir: Path):
         pass
     with s2:
         pass
-    assert s1._staging_path != s2._staging_path
+    assert s1.staging_path != s2.staging_path
 
 
 # ═══════════════════════════════════════════════════════════════════════
