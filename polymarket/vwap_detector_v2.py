@@ -1059,6 +1059,7 @@ def main():
                 config, args.gamma_limit, gamma_client,
                 max_markets=args.max_markets,
                 evidence_dir=V3_RESULTS_DIR / "discovery",
+                as_of_ts=datetime.now(timezone.utc).isoformat(),
             )
             evidence = discovery["evidence"]
             print(

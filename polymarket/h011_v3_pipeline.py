@@ -737,22 +737,86 @@ def process_market_v3(
     """
     window_start_ts = now_ts - config.window_s
 
-    # ── Step 1: Reject stubs ──
-    if is_market_stub(gamma_market):
-        record = _empty_v3_record(run_id, scan_id, "", MarketStructure(
-            condition_id="", market_id=None, question="",
-            legs=(MarketStructure.__dataclass_fields__["legs"].default if hasattr(MarketStructure.__dataclass_fields__["legs"], "default") else None),
-            active=False, closed=True, accepting_orders=None, fees_enabled=None, metadata_hash="",
-        ) if False else None, config) if False else None
+    # ── Step 0 (Fix #3, fourth audit): Defense in depth ──
+    # Re-validate directional identity BEFORE stub check or structure parsing.
+    # This prevents a caller from bypassing discovery validation by invoking
+    # process_market_v3 directly with invalid metadata.
+    identity_ok, identity_reasons = validate_btc_market_identity(gamma_market, config.window_s)
+    if not identity_ok:
         return {
             "schema_version": "h011-v3-record-v1",
             "run_id": run_id, "scan_id": scan_id,
-            "condition_id": gamma_market.get("conditionId", ""),
+            "condition_id": str(gamma_market.get("conditionId") or ""),
+            "record_status": "REJECTED_IDENTITY",
+            "stage": "defense_in_depth_identity",
+            "reason_code": "directional_identity_failed",
+            "reason_detail": "; ".join(identity_reasons),
+            "rejection_reasons": identity_reasons,
+            "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
+        }
+
+    # ── Step 0b (Fix #3): Re-validate temporal eligibility using now_ts ──
+    # A market may have expired between discovery and processing, or a caller
+    # may pass a market with a window that doesn't contain now_ts.
+    def _epoch(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    es_epoch = _epoch(gamma_market.get("eventStartTime"))
+    ed_epoch = _epoch(gamma_market.get("endDate"))
+    active = gamma_market.get("active")
+    closed = gamma_market.get("closed")
+    accepting = gamma_market.get("acceptingOrders")
+    temporal_reasons = []
+    if es_epoch is not None and es_epoch > now_ts:
+        temporal_reasons.append("market_window_not_open")
+    if ed_epoch is not None and now_ts >= ed_epoch:
+        temporal_reasons.append("market_window_expired")
+    if active is not True:
+        temporal_reasons.append("market_inactive_or_closed")
+    elif closed is not False:
+        temporal_reasons.append("market_inactive_or_closed")
+    if accepting is not True:
+        temporal_reasons.append("orders_not_accepting")
+    if temporal_reasons:
+        return {
+            "schema_version": "h011-v3-record-v1",
+            "run_id": run_id, "scan_id": scan_id,
+            "condition_id": str(gamma_market.get("conditionId") or ""),
+            "record_status": "REJECTED_TEMPORAL_ELIGIBILITY",
+            "stage": "defense_in_depth_temporal",
+            "reason_code": temporal_reasons[0],
+            "reason_detail": "; ".join(temporal_reasons),
+            "rejection_reasons": temporal_reasons,
+            "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
+        }
+
+    # ── Step 1: Reject stubs ──
+    # Fix #2 (third audit): stub check no longer requires outcomePrices.
+    if is_market_stub(gamma_market):
+        return {
+            "schema_version": "h011-v3-record-v1",
+            "run_id": run_id, "scan_id": scan_id,
+            "condition_id": str(gamma_market.get("conditionId") or ""),
             "record_status": "REJECTED_METADATA",
             "stage": "stub_check",
             "reason_code": "active_market_metadata_unresolved",
-            "reason_detail": "Market is a stub — missing clobTokenIds, outcomes, or outcomePrices",
+            "reason_detail": "Market is a stub — missing conditionId, clobTokenIds, or outcomes",
             "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
         }
 
     # ── Step 2: Parse structure from Gamma ──
@@ -762,12 +826,14 @@ def process_market_v3(
         return {
             "schema_version": "h011-v3-record-v1",
             "run_id": run_id, "scan_id": scan_id,
-            "condition_id": gamma_market.get("conditionId", ""),
+            "condition_id": str(gamma_market.get("conditionId") or ""),
             "record_status": "REJECTED_METADATA",
             "stage": "structure_from_gamma",
             "reason_code": "structure_error",
             "reason_detail": str(e),
             "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
         }
 
     record = _empty_v3_record(run_id, scan_id, structure.condition_id, structure, config)

@@ -21,19 +21,44 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "polymarket"))
 
 @pytest.fixture
 def valid_gamma_market():
-    """A valid Gamma market with full metadata (not a stub)."""
+    """A canonical btc-updown-5m market that passes identity + temporal checks.
+
+    Fix #3 (fourth audit): the fixture must match the btc-updown-5m contract
+    (slug pattern, eventStartTime, endDate, events with ticker) so that
+    process_market_v3's defense-in-depth checks pass and the pipeline
+    proceeds to structure_from_gamma and beyond.
+    """
+    from datetime import datetime, timezone, timedelta
+    # Use a window centered on a fixed now_ts for deterministic testing
+    # now_ts = 1766162200 (midpoint of the 5-min window)
+    slug_epoch = 1766162100  # 2025-12-19T16:35:00Z
+    es = datetime.fromtimestamp(slug_epoch, tz=timezone.utc)
+    ed = datetime.fromtimestamp(slug_epoch + 300, tz=timezone.utc)
     return {
         "id": "test-market-001",
-        "conditionId": "0xabc123def456",
-        "question": "Will BTC go up in the next 5 minutes?",
+        "conditionId": "0xabc123def4560000000000000000000000000000000000000000000000000000000000",  # 64-char hex
+        "slug": f"btc-updown-5m-{slug_epoch}",
+        "question": "Bitcoin Up or Down - 5 minute window",
+        "description": 'This market will resolve to "Up" if the Bitcoin price at the end '
+                       'of the time range is greater than at the beginning.',
+        "resolutionSource": "https://data.chain.link/streams/btc-usd",
         "outcomes": '["Up", "Down"]',
-        "clobTokenIds": '["token_yes_abc", "token_no_xyz"]',
+        "clobTokenIds": '["token_up_abc", "token_down_xyz"]',
         "outcomePrices": '["0.55", "0.45"]',
+        "startDate": (es - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "endDate": ed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "eventStartTime": es.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "active": True,
         "closed": False,
         "acceptingOrders": True,
         "feesEnabled": False,
         "volumeNum": 50000,
+        "events": [{
+            "id": "109968",
+            "ticker": f"btc-updown-5m-{slug_epoch}",
+            "slug": f"btc-updown-5m-{slug_epoch}",
+            "title": "Bitcoin Up or Down",
+        }],
     }
 
 
@@ -52,12 +77,12 @@ def stub_market():
 def sample_trades():
     """Trades with valid token binding."""
     return [
-        {"transactionHash": "0xtx001", "asset": "token_yes_abc", "conditionId": "0xabc123def456",
+        {"transactionHash": "0xtx001", "asset": "token_up_abc", "conditionId": "0xabc123def4560000000000000000000000000000000000000000000000000000000000",
          "outcomeIndex": 0, "price": 0.55, "size": 100, "timestamp": int(time.time()) - 60, "side": "BUY"},
-        {"transactionHash": "0xtx001", "asset": "token_no_xyz", "conditionId": "0xabc123def456",
+        {"transactionHash": "0xtx001", "asset": "token_down_xyz", "conditionId": "0xabc123def4560000000000000000000000000000000000000000000000000000000000",
          "outcomeIndex": 1, "price": 0.45, "size": 100, "timestamp": int(time.time()) - 55, "side": "BUY"},
         # Same tx, different fill — must be preserved
-        {"transactionHash": "0xtx002", "asset": "token_yes_abc", "conditionId": "0xabc123def456",
+        {"transactionHash": "0xtx002", "asset": "token_up_abc", "conditionId": "0xabc123def4560000000000000000000000000000000000000000000000000000000000",
          "outcomeIndex": 0, "price": 0.56, "size": 50, "timestamp": int(time.time()) - 50, "side": "BUY"},
     ]
 
@@ -66,7 +91,7 @@ def sample_trades():
 def trades_wrong_asset():
     """Trades with wrong asset (token mismatch)."""
     return [
-        {"transactionHash": "0xtx003", "asset": "wrong_token", "conditionId": "0xabc123def456",
+        {"transactionHash": "0xtx003", "asset": "wrong_token", "conditionId": "0xabc123def4560000000000000000000000000000000000000000000000000000000000",
          "outcomeIndex": 0, "price": 0.55, "size": 100, "timestamp": int(time.time()) - 60, "side": "BUY"},
     ]
 
@@ -75,7 +100,7 @@ def trades_wrong_asset():
 def mock_clob_book():
     """A mock CLOB orderbook with asks."""
     return {
-        "asset_id": "token_yes_abc",
+        "asset_id": "token_up_abc",
         "asks": [{"price": "0.55", "size": "500"}, {"price": "0.56", "size": "1000"}],
         "bids": [{"price": "0.54", "size": "300"}],
     }
@@ -95,7 +120,13 @@ class TestStubsRejected:
         assert is_market_stub(valid_gamma_market) is False
 
     def test_v3_pipeline_never_creates_active_stub(self, stub_market):
-        """V3 pipeline must reject stubs at the entry point."""
+        """V3 pipeline must reject stubs at the entry point.
+
+        Fix #3 (fourth audit): defense-in-depth now runs BEFORE stub check.
+        A stub market (which lacks btc-updown-5m structure) fails identity
+        check first, returning REJECTED_IDENTITY. This is correct — the
+        market never reaches Data API or CLOB.
+        """
         from h011_v3_pipeline import process_market_v3, H011V3Config
         config = H011V3Config()
         mock_data = MagicMock()
@@ -103,25 +134,30 @@ class TestStubsRejected:
 
         record = process_market_v3(
             gamma_market=stub_market,
-            now_ts=int(time.time()),
+            now_ts=1766162200,
             config=config,
             run_id="test",
             scan_id="test",
             data_api_client=mock_data,
             clob_client=mock_clob,
         )
-        assert record["record_status"] == "REJECTED_METADATA"
-        assert "stub" in record.get("reason_code", "").lower() or "metadata" in record.get("reason_code", "").lower()
+        # Stub markets fail identity check first (defense in depth)
+        assert record["record_status"] in ("REJECTED_IDENTITY", "REJECTED_METADATA", "REJECTED_TEMPORAL_ELIGIBILITY")
+        # Key invariant: rejected markets never call Data API or CLOB
+        assert record.get("data_api_called", False) is False
+        assert record.get("clob_called", False) is False
+        # Data API and CLOB mocks were never called
+        mock_data.fetch_trades.assert_not_called()
 
 
 class TestStructureFromGamma:
     def test_valid_two_leg_market(self, valid_gamma_market):
         from market_structure import structure_from_gamma
         s = structure_from_gamma(valid_gamma_market)
-        assert s.condition_id == "0xabc123def456"
+        assert s.condition_id == "0xabc123def4560000000000000000000000000000000000000000000000000000000000"
         assert len(s.legs) == 2
-        assert s.legs[0].token_id == "token_yes_abc"
-        assert s.legs[1].token_id == "token_no_xyz"
+        assert s.legs[0].token_id == "token_up_abc"
+        assert s.legs[1].token_id == "token_down_xyz"
 
     def test_missing_clob_tokens_rejected(self, valid_gamma_market):
         from market_structure import structure_from_gamma, MarketStructureError
@@ -264,7 +300,7 @@ class TestV3PipelineIntegration:
         with patch("h011_v3_pipeline.structure_from_gamma", wraps=structure_from_gamma) as spy:
             process_market_v3(
                 gamma_market=valid_gamma_market,
-                now_ts=int(time.time()),
+                now_ts=1766162200,
                 config=config,
                 run_id="test", scan_id="test",
                 data_api_client=mock_data, clob_client=mock_clob,
@@ -284,7 +320,7 @@ class TestV3PipelineIntegration:
         with patch("h011_v3_pipeline.validate_trade_binding", wraps=validate_trade_binding) as spy:
             process_market_v3(
                 gamma_market=valid_gamma_market,
-                now_ts=int(time.time()),
+                now_ts=1766162200,
                 config=config,
                 run_id="test", scan_id="test",
                 data_api_client=mock_data, clob_client=mock_clob,
@@ -302,7 +338,7 @@ class TestV3PipelineIntegration:
 
         process_market_v3(
             gamma_market=valid_gamma_market,
-            now_ts=int(time.time()),
+            now_ts=1766162200,
             config=config,
             run_id="test", scan_id="test",
             data_api_client=mock_data, clob_client=mock_clob,
@@ -312,7 +348,7 @@ class TestV3PipelineIntegration:
         for call_args in mock_clob.fetch_book.call_args_list:
             arg = call_args[0][0] if call_args[0] else call_args[1].get("token_id", "")
             assert arg != valid_gamma_market["conditionId"]
-            assert arg in ["token_yes_abc", "token_no_xyz"]
+            assert arg in ["token_up_abc", "token_down_xyz"]
 
     def test_v3_pipeline_outputs_historical_signal_only_without_books(self, valid_gamma_market, sample_trades):
         from h011_v3_pipeline import process_market_v3, H011V3Config
@@ -325,7 +361,7 @@ class TestV3PipelineIntegration:
 
         record = process_market_v3(
             gamma_market=valid_gamma_market,
-            now_ts=int(time.time()),
+            now_ts=1766162200,
             config=config,
             run_id="test", scan_id="test",
             data_api_client=mock_data, clob_client=mock_clob,
@@ -346,7 +382,7 @@ class TestV3PipelineIntegration:
 
         record = process_market_v3(
             gamma_market=valid_gamma_market,
-            now_ts=int(time.time()),
+            now_ts=1766162200,
             config=config,
             run_id="test", scan_id="test",
             data_api_client=mock_data, clob_client=mock_clob,

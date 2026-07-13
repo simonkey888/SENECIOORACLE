@@ -431,7 +431,7 @@ def test_replay_rejects_tampered_selection_configuration(tmp_path, field, value)
 
 
 @pytest.mark.parametrize("mutation", [
-    lambda evidence: evidence["pages"][0].update(count=99),  # invalid count > limit
+    lambda evidence: evidence["pages"][0].update(count=-1),  # invalid negative count
     lambda evidence: evidence["pages"][0].update(limit=0),   # invalid limit
     lambda evidence: evidence.update(limit_reached=True),    # inconsistent flags
     lambda evidence: evidence.update(source_exhausted=False),
