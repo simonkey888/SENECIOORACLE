@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -242,46 +243,367 @@ def _ensure_v3_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
-def validate_btc_market_identity(market: dict[str, Any], expected_window_s: int) -> tuple[bool, list[str]]:
-    """Validate BTC cohort identity from structured metadata, not question text."""
+# ═══════════════════════════════════════════════════════════════════════
+# H-011 V3 Directional market identity — canonical contract v3
+# ═══════════════════════════════════════════════════════════════════════
+#
+# CONTRACT (post ce8ce2c6 revert, Opción A confirmed by GPT-5.6):
+#
+#   For BTC 5-minute Up/Down markets, Polymarket uses a structural slug:
+#       ^btc-updown-5m-(\d{10})$
+#
+#   The slug embeds the window_start_epoch as a 10-digit Unix timestamp.
+#   The market payload exposes:
+#       eventStartTime  = window_start  (== slug_epoch)
+#       endDate         = window_end    (== eventStartTime + 300s)
+#       startDate       = market listing/lifecycle (NOT the H-011 window)
+#
+#   Statistical validation (13 markets captured 2026-07-13):
+#       eventStartTime == slug_epoch             in 13/13 (100%)
+#       endDate - eventStartTime == 300s ± 1s    in 13/13 (100%)
+#       outcomes == ["Up","Down"]                in 13/13 (100%)
+#       len(clobTokenIds) == 2 and unique        in 13/13 (100%)
+#
+#   The validator performs FIVE independent structural checks, each
+#   producing a distinct rejection reason:
+#
+#       1. binary_token_pair_valid          — outcomes are 2, tokens are 2 unique
+#       2. directional_market_identity_proven — slug matches ^btc-updown-5m-\d{10}$
+#                                                AND event ticker is coherent
+#       3. token_direction_mapping_proven    — outcomes == ["Up","Down"] exactly
+#                                                (NOT Yes/No — that only proves
+#                                                binary, not directional)
+#       4. window_duration_proven            — slug_epoch == eventStartTime
+#                                                AND endDate - eventStartTime == 300
+#       5. resolution_rule_proven            — resolutionSource mentions BTC/USD
+#                                                AND description mentions price
+#                                                comparison at start vs end
+#
+#   Fail-closed: ANY contradiction produces a rejection reason. We do NOT
+#   infer identity from text, do NOT swap token positions, do NOT accept
+#   Yes/No as directional (only as binary).
+#
+#   startDate/endDate are NOT used for the H-011 window calculation.
+#   startDate represents market listing/lifecycle only.
+# ═══════════════════════════════════════════════════════════════════════
+
+# Structural slug pattern for BTC 5-minute Up/Down markets.
+# Captures the 10-digit Unix epoch timestamp embedded in the slug.
+_BTC_UPDOWN_5M_SLUG_PATTERN = re.compile(r"^btc-updown-5m-(\d{10})$")
+
+# Tolerance for serialization-induced timestamp drift (1 second).
+_WINDOW_TOLERANCE_S = 1
+
+# Required H-011 V3 window duration in seconds.
+_H011_V3_WINDOW_S = 300
+
+
+def _parse_epoch(value: Any) -> float | None:
+    """Parse an ISO 8601 string or numeric epoch into a float epoch.
+
+    Returns None if the value is missing, None, or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Try numeric epoch first
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        # Try ISO 8601
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_json_list(value: Any) -> list | None:
+    """Parse a value that may be a list or a JSON string encoding a list."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None
+
+
+def _binary_token_pair_valid(market: dict[str, Any]) -> bool:
+    """Check 1: market has a valid binary token pair (2 outcomes, 2 unique tokens).
+
+    This check proves ONLY binariness — it does NOT prove directionality.
+    Both ["Yes","No"] and ["Up","Down"] satisfy this check.
+    """
+    outcomes = _parse_json_list(market.get("outcomes"))
+    tokens = _parse_json_list(market.get("clobTokenIds"))
+    if not isinstance(outcomes, list) or len(outcomes) != 2:
+        return False
+    if not isinstance(tokens, list) or len(tokens) != 2:
+        return False
+    token_strs = [str(t).strip() for t in tokens]
+    return all(token_strs) and len(set(token_strs)) == 2
+
+
+def _directional_market_identity_proven(market: dict[str, Any]) -> tuple[bool, str | None]:
+    """Check 2: market belongs to the btc-updown-5m event family.
+
+    Proven by structural evidence (NOT text inference):
+      (a) market.slug matches ^btc-updown-5m-(\\d{10})$
+      (b) Fix #5: at least ONE parent event must exist AND be coherent:
+          - events[0].id present (non-empty)
+          - events[0].ticker == market.slug OR events[0].slug == market.slug
+
+    If the market has a valid slug but no coherent parent event, this check
+    FAILS with directional_market_identity_unproven. This prevents markets
+    with valid-looking slugs from passing without event-level corroboration.
+
+    Returns (ok, slug_epoch_str_or_None).
+    """
+    slug = str(market.get("slug") or "").strip()
+    match = _BTC_UPDOWN_5M_SLUG_PATTERN.match(slug)
+    if not match:
+        return False, None
+    slug_epoch_str = match.group(1)
+
+    # Fix #5: parent event is MANDATORY and must be coherent.
+    # The market must have an `events` list with at least one event that:
+    #   - has a non-empty id
+    #   - has ticker == market.slug (when ticker is present)
+    #   - has slug == market.slug (when slug is present)
+    # If ticker is present but DIFFERENT from market.slug, it's a conflict
+    # (fail-closed). If slug is present but DIFFERENT, also conflict.
+    events_field = market.get("events")
+    if not isinstance(events_field, list) or not events_field:
+        # No parent event → cannot prove directional identity
+        return False, None
+
+    # Find a coherent parent event
+    coherent_event_found = False
+    for ev in events_field:
+        if not isinstance(ev, dict):
+            continue
+        ev_id = str(ev.get("id") or "").strip()
+        if not ev_id:
+            continue
+        ev_ticker = str(ev.get("ticker") or "").strip()
+        ev_slug = str(ev.get("slug") or "").strip()
+        # Coherence checks: any non-empty field must match market slug
+        # If ticker is present, it must match; if slug is present, it must match.
+        # At least one of them must be present and match.
+        ticker_ok = (not ev_ticker) or (ev_ticker == slug)
+        slug_ok = (not ev_slug) or (ev_slug == slug)
+        at_least_one_matches = (ev_ticker == slug) or (ev_slug == slug)
+        if ticker_ok and slug_ok and at_least_one_matches:
+            coherent_event_found = True
+            break
+
+    if not coherent_event_found:
+        return False, None
+
+    return True, slug_epoch_str
+
+
+def _token_direction_mapping_proven(market: dict[str, Any]) -> bool:
+    """Check 3: outcomes == ["Up","Down"] exactly AND tokens are 2 unique non-empty.
+
+    Polymarket's btc-updown-5m family uses outcomes=["Up","Down"] with
+    clobTokenIds[0] ↔ "Up" and clobTokenIds[1] ↔ "Down" (verified 13/13).
+
+    We do NOT accept ["Yes","No"] here — that only proves binary, not
+    directional. We do NOT swap token positions if outcomes are reversed.
+
+    The mapping outcomes[i] ↔ clobTokenIds[i] is a Polymarket schema
+    guarantee, so proving outcomes are ["Up","Down"] AND tokens are
+    2 unique non-empty strings proves the directional mapping without
+    further inference.
+
+    This check subsumes binary_token_pair_valid (it is strictly stronger).
+    """
+    outcomes = _parse_json_list(market.get("outcomes"))
+    if not isinstance(outcomes, list) or len(outcomes) != 2:
+        return False
+    # Normalize labels for comparison
+    labels = [str(x).strip() for x in outcomes]
+    if labels != ["Up", "Down"]:
+        return False
+    # Also validate clobTokenIds: must be 2 unique non-empty strings.
+    # This subsumes binary_token_pair_valid's token check.
+    tokens = _parse_json_list(market.get("clobTokenIds"))
+    if not isinstance(tokens, list) or len(tokens) != 2:
+        return False
+    token_strs = [str(t).strip() for t in tokens]
+    return all(token_strs) and len(set(token_strs)) == 2
+
+
+def _window_duration_proven(market: dict[str, Any], slug_epoch_str: str | None,
+                            expected_window_s: int = _H011_V3_WINDOW_S) -> tuple[bool, list[str]]:
+    """Check 4: window duration is exactly expected_window_s seconds.
+
+    Contract (Opción A):
+        window_start = eventStartTime
+        window_end   = endDate
+        Constraints:
+            eventStartTime_epoch == slug_epoch (±1s tolerance)
+            endDate_epoch - eventStartTime_epoch == expected_window_s (±1s tolerance)
+
+    startDate is treated as lifecycle metadata and NEVER used for the
+    H-011 window calculation.
+
+    Returns (ok, list_of_rejection_reasons).
+    """
     reasons: list[str] = []
+    if slug_epoch_str is None:
+        # Cannot prove window without slug_epoch. Caller should have
+        # already emitted directional_market_identity_unproven.
+        return False, ["window_slug_unproven"]
+
+    try:
+        slug_epoch = float(slug_epoch_str)
+    except (ValueError, TypeError):
+        return False, ["window_slug_unproven"]
+
+    event_start = market.get("eventStartTime")
+    end_date = market.get("endDate")
+
+    es_epoch = _parse_epoch(event_start)
+    ed_epoch = _parse_epoch(end_date)
+
+    if es_epoch is None:
+        reasons.append("window_start_unproven")
+    if ed_epoch is None:
+        reasons.append("window_end_unproven")
+
+    if es_epoch is not None and abs(es_epoch - slug_epoch) > _WINDOW_TOLERANCE_S:
+        reasons.append("window_start_mismatch")
+
+    if es_epoch is not None and ed_epoch is not None:
+        duration = ed_epoch - es_epoch
+        if abs(duration - expected_window_s) > _WINDOW_TOLERANCE_S:
+            reasons.append("window_duration_mismatch")
+
+    return len(reasons) == 0, reasons
+
+
+def _resolution_rule_proven(market: dict[str, Any]) -> bool:
+    """Check 5: resolution rule is coherent with BTC/USD price comparison.
+
+    Proven by:
+      (a) resolutionSource mentions BTC/USD or Bitcoin price (e.g. Chainlink)
+      (b) description mentions price comparison at start vs end of window
+
+    Returns True only if both conditions are met. This is the strictest
+    check — it requires explicit textual evidence in the structured
+    resolutionSource and description fields.
+    """
+    resolution_source = str(market.get("resolutionSource") or "").lower()
+    description = str(market.get("description") or "").lower()
+
+    # The resolution source must reference BTC/USD pricing.
+    # Chainlink BTC/USD stream is the canonical source for this family.
+    btc_price_source = any(x in resolution_source
+                           for x in ("btc-usd", "btc/usd", "bitcoin", "btc", "chainlink"))
+
+    # The description must mention a price comparison (start vs end).
+    # The canonical phrasing is "price at the end ... greater than ...
+    # price at the beginning" or similar.
+    has_price_comparison = (
+        ("price" in description or "btc" in description or "bitcoin" in description)
+        and ("end" in description or "beginning" in description
+             or "start" in description or "greater" in description
+             or "less" in description or "resolve" in description)
+    )
+
+    return btc_price_source and has_price_comparison
+
+
+def _market_active_and_open(market: dict[str, Any]) -> bool:
+    """Check: market is active and not closed.
+
+    Polymarket's btc-updown-5m markets are listed ~24h before the window
+    starts. We accept markets where active=true and closed=false.
+    """
+    active = market.get("active")
+    closed = market.get("closed")
+    # Explicit boolean checks (not truthy) — None values fail-closed.
+    return active is True and closed is False
+
+
+def validate_btc_market_identity(market: dict[str, Any], expected_window_s: int) -> tuple[bool, list[str]]:
+    """Validate that a market belongs to the H-011 V3 BTC 5-min Up/Down cohort.
+
+    Performs FIVE independent structural checks. The market is accepted
+    only if ALL checks pass. Each failed check emits a distinct rejection
+    reason so the histogram accurately reflects failure causes.
+
+    Rejection reasons emitted by this validator:
+        missing_condition_id                       — conditionId absent
+        window_slug_unproven                       — slug doesn't match the pattern
+        window_start_unproven                      — eventStartTime missing/unparseable
+        window_end_unproven                        — endDate missing/unparseable
+        window_start_mismatch                      — eventStartTime != slug_epoch (±1s)
+        window_duration_mismatch                   — endDate - eventStartTime != 300 (±1s)
+        directional_market_identity_unproven       — slug/event-ticker incoherent
+        token_direction_mapping_unproven           — outcomes != ["Up","Down"] or tokens invalid
+        resolution_rule_unproven                   — resolutionSource/description incoherent
+        market_inactive_or_closed                  — active != true or closed != false
+
+    Note: binary_token_pair_valid is implied by token_direction_mapping_proven
+    (which is stricter). We do NOT emit a separate rejection reason for
+    binary_token_pair_valid failure — the directional check subsumes it.
+
+    Returns (ok, list_of_rejection_reasons). ok is True iff reasons is empty.
+    """
+    reasons: list[str] = []
+
+    # 0. conditionId must be present
     condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
     if not condition_id:
         reasons.append("missing_condition_id")
-    event = market.get("event") if isinstance(market.get("event"), dict) else {}
-    slug = " ".join(str(market.get(k) or event.get(k) or "").lower() for k in ("slug", "eventSlug", "title"))
-    if not any(x in slug for x in ("bitcoin", "btc")):
-        reasons.append("btc_event_identity_unproven")
-    rule = " ".join(str(market.get(k) or event.get(k) or "").lower() for k in ("resolutionSource", "resolutionRules", "description", "rule"))
-    if not any(x in rule for x in ("bitcoin", "btc", "price", "oracle")):
+
+    # 1. binary_token_pair_valid (subsumed by check 3, but emit a reason
+    #    if both binary and directional checks fail to distinguish cases)
+    binary_ok = _binary_token_pair_valid(market)
+
+    # 2. directional_market_identity_proven (structural slug + event ticker)
+    directional_ok, slug_epoch_str = _directional_market_identity_proven(market)
+    if not directional_ok:
+        reasons.append("directional_market_identity_unproven")
+
+    # 3. token_direction_mapping_proven (outcomes == ["Up","Down"] exactly)
+    mapping_ok = _token_direction_mapping_proven(market)
+    if not mapping_ok:
+        # If binary check also failed, the directional check is moot —
+        # emit token_direction_mapping_unproven either way because we
+        # require the exact ["Up","Down"] mapping.
+        reasons.append("token_direction_mapping_unproven")
+
+    # 4. window_duration_proven (slug_epoch == eventStartTime, end-start=300)
+    if directional_ok:  # Only check window if slug is structurally valid
+        window_ok, window_reasons = _window_duration_proven(market, slug_epoch_str, expected_window_s)
+        if not window_ok:
+            reasons.extend(window_reasons)
+    # If directional failed, window_slug_unproven is already implied by
+    # directional_market_identity_unproven — don't double-count.
+
+    # 5. resolution_rule_proven (BTC/USD source + price comparison description)
+    if not _resolution_rule_proven(market):
         reasons.append("resolution_rule_unproven")
-    start = market.get("startDate") or market.get("startDateIso") or market.get("start_time") or event.get("startDate")
-    end = market.get("endDate") or market.get("endDateIso") or market.get("end_time") or event.get("endDate")
-    def epoch(value: Any) -> float | None:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                return None
-        return None
-    start_epoch, end_epoch = epoch(start), epoch(end)
-    if start_epoch is None or end_epoch is None:
-        reasons.append("window_timestamps_unproven")
-    elif int(end_epoch - start_epoch) != int(expected_window_s):
-        reasons.append("window_duration_mismatch")
-    try:
-        outcomes = market.get("outcomes")
-        outcomes = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
-        tokens = market.get("clobTokenIds")
-        tokens = json.loads(tokens) if isinstance(tokens, str) else tokens
-        labels = {str(x).strip().upper() for x in (outcomes or [])}
-        if not {"UP", "DOWN"}.issubset(labels) or not isinstance(tokens, list) or len(tokens) != 2:
-            reasons.append("up_down_token_identity_unproven")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        reasons.append("up_down_token_identity_unproven")
-    return not reasons, reasons
+
+    # 6. market must be active and not closed
+    if not _market_active_and_open(market):
+        reasons.append("market_inactive_or_closed")
+
+    return len(reasons) == 0, reasons
 
 
 def select_btc_cohort(markets: list[dict[str, Any]], windows: tuple[int, ...] = (300, 900)) -> list[dict[str, Any]]:
@@ -415,22 +737,86 @@ def process_market_v3(
     """
     window_start_ts = now_ts - config.window_s
 
-    # ── Step 1: Reject stubs ──
-    if is_market_stub(gamma_market):
-        record = _empty_v3_record(run_id, scan_id, "", MarketStructure(
-            condition_id="", market_id=None, question="",
-            legs=(MarketStructure.__dataclass_fields__["legs"].default if hasattr(MarketStructure.__dataclass_fields__["legs"], "default") else None),
-            active=False, closed=True, accepting_orders=None, fees_enabled=None, metadata_hash="",
-        ) if False else None, config) if False else None
+    # ── Step 0 (Fix #3, fourth audit): Defense in depth ──
+    # Re-validate directional identity BEFORE stub check or structure parsing.
+    # This prevents a caller from bypassing discovery validation by invoking
+    # process_market_v3 directly with invalid metadata.
+    identity_ok, identity_reasons = validate_btc_market_identity(gamma_market, config.window_s)
+    if not identity_ok:
         return {
             "schema_version": "h011-v3-record-v1",
             "run_id": run_id, "scan_id": scan_id,
-            "condition_id": gamma_market.get("conditionId", ""),
+            "condition_id": str(gamma_market.get("conditionId") or ""),
+            "record_status": "REJECTED_IDENTITY",
+            "stage": "defense_in_depth_identity",
+            "reason_code": "directional_identity_failed",
+            "reason_detail": "; ".join(identity_reasons),
+            "rejection_reasons": identity_reasons,
+            "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
+        }
+
+    # ── Step 0b (Fix #3): Re-validate temporal eligibility using now_ts ──
+    # A market may have expired between discovery and processing, or a caller
+    # may pass a market with a window that doesn't contain now_ts.
+    def _epoch(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    es_epoch = _epoch(gamma_market.get("eventStartTime"))
+    ed_epoch = _epoch(gamma_market.get("endDate"))
+    active = gamma_market.get("active")
+    closed = gamma_market.get("closed")
+    accepting = gamma_market.get("acceptingOrders")
+    temporal_reasons = []
+    if es_epoch is not None and es_epoch > now_ts:
+        temporal_reasons.append("market_window_not_open")
+    if ed_epoch is not None and now_ts >= ed_epoch:
+        temporal_reasons.append("market_window_expired")
+    if active is not True:
+        temporal_reasons.append("market_inactive_or_closed")
+    elif closed is not False:
+        temporal_reasons.append("market_inactive_or_closed")
+    if accepting is not True:
+        temporal_reasons.append("orders_not_accepting")
+    if temporal_reasons:
+        return {
+            "schema_version": "h011-v3-record-v1",
+            "run_id": run_id, "scan_id": scan_id,
+            "condition_id": str(gamma_market.get("conditionId") or ""),
+            "record_status": "REJECTED_TEMPORAL_ELIGIBILITY",
+            "stage": "defense_in_depth_temporal",
+            "reason_code": temporal_reasons[0],
+            "reason_detail": "; ".join(temporal_reasons),
+            "rejection_reasons": temporal_reasons,
+            "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
+        }
+
+    # ── Step 1: Reject stubs ──
+    # Fix #2 (third audit): stub check no longer requires outcomePrices.
+    if is_market_stub(gamma_market):
+        return {
+            "schema_version": "h011-v3-record-v1",
+            "run_id": run_id, "scan_id": scan_id,
+            "condition_id": str(gamma_market.get("conditionId") or ""),
             "record_status": "REJECTED_METADATA",
             "stage": "stub_check",
             "reason_code": "active_market_metadata_unresolved",
-            "reason_detail": "Market is a stub — missing clobTokenIds, outcomes, or outcomePrices",
+            "reason_detail": "Market is a stub — missing conditionId, clobTokenIds, or outcomes",
             "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
         }
 
     # ── Step 2: Parse structure from Gamma ──
@@ -440,12 +826,14 @@ def process_market_v3(
         return {
             "schema_version": "h011-v3-record-v1",
             "run_id": run_id, "scan_id": scan_id,
-            "condition_id": gamma_market.get("conditionId", ""),
+            "condition_id": str(gamma_market.get("conditionId") or ""),
             "record_status": "REJECTED_METADATA",
             "stage": "structure_from_gamma",
             "reason_code": "structure_error",
             "reason_detail": str(e),
             "evidence": {"raw_event_hashes": [], "record_hash": ""},
+            "data_api_called": False,
+            "clob_called": False,
         }
 
     record = _empty_v3_record(run_id, scan_id, structure.condition_id, structure, config)

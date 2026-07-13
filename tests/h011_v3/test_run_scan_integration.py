@@ -37,23 +37,36 @@ def test_run_scan_writes_replayable_bundle_and_snapshot(tmp_path, monkeypatch):
     monkeypatch.delenv("GIT_SHA", raising=False)
     monkeypatch.delenv("SENECIO_CODE_SHA", raising=False)
 
+    # Fix #3 (fourth audit): canonical btc-updown-5m fixture
+    # slug_epoch=1766162100 → 2025-12-19T16:35:00Z, window 300s
+    # now_ts=1766162200 (midpoint, inside window)
+    slug_epoch = 1766162100
     market = {
-        "conditionId": "0xabc",
+        "conditionId": "0x" + "ab" * 32,
         "id": "market-1",
         "question": "Bitcoin Up or Down",
-        "slug": "bitcoin-up-or-down-5m",
-        "resolutionSource": "Bitcoin price oracle",
-        "startDate": "2026-07-11T00:00:00Z",
-        "endDate": "2026-07-11T00:05:00Z",
-        "outcomes": ["UP", "DOWN"],
+        "slug": f"btc-updown-5m-{slug_epoch}",
+        "description": 'This market will resolve to "Up" if the Bitcoin price at the end '
+                       'of the time range is greater than at the beginning.',
+        "resolutionSource": "https://data.chain.link/streams/btc-usd",
+        "startDate": "2025-12-18T16:35:00Z",
+        "endDate": "2025-12-19T16:40:00Z",
+        "eventStartTime": "2025-12-19T16:35:00Z",
+        "outcomes": ["Up", "Down"],
         "clobTokenIds": ["token-up", "token-down"],
-        "outcomePrices": ["0.40", "0.40"],
         "active": True,
         "closed": False,
+        "acceptingOrders": True,
         "feesEnabled": False,
+        "events": [{
+            "id": "109968",
+            "ticker": f"btc-updown-5m-{slug_epoch}",
+            "slug": f"btc-updown-5m-{slug_epoch}",
+            "title": "Bitcoin Up or Down",
+        }],
     }
     result = pipeline.run_scan_v3(
-        markets=[market], now_ts=1000, config=pipeline.H011V3Config(),
+        markets=[market], now_ts=1766162200, config=pipeline.H011V3Config(),
         data_api_client=DataClient(), clob_client=BookClient(),
         persist_raw=False,
     )
