@@ -90,11 +90,14 @@ def test_window_300_rejects_structurally_valid_window_900(tmp_path):
 
 
 def test_rejection_histogram_preserves_all_reasons(tmp_path):
+    # outcomes uses non-canonical labels ("Higher"/"Lower") so the
+    # up_down_token_identity_unproven rejection still fires after the fix
+    # that accepts Yes/No and Up/Down as valid binary conventions.
     invalid = {
         "slug": "ethereum-market",
         "startDate": None,
         "endDate": None,
-        "outcomes": ["YES", "NO"],
+        "outcomes": ["Higher", "Lower"],
         "clobTokenIds": ["a", "b"],
         "outcomePrices": ["0.4", "0.6"],
     }
