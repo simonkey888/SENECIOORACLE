@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import json
 import os
+import multiprocessing
 import re
 import sys
 import threading
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "polymarket"))
 import h011_v3_raw_transaction as rt
 from h011_v3_raw_transaction import (
     AtomicMarkerUpdateUnsupportedError,
+    AtomicMarkerRollbackFailed,
     CandidateManifestMismatchError,
     DEFAULT_MARKER_POLICY,
     DiagnosticEvidence,
@@ -40,6 +42,8 @@ from h011_v3_raw_transaction import (
     LockAcquisitionError,
     MarkerCandidateBindingError,
     MarkerIntegrityError,
+    MarkerCreateCleanupPending,
+    MarkerUpdateCleanupPending,
     MarkerValidationPolicy,
     MarkerValidationError,
     NestedLockingError,
@@ -82,16 +86,21 @@ from h011_v3_raw_transaction import (
 
 @pytest.fixture(autouse=True)
 def _cleanup_guards():
-    """Ensure no guards leak between tests."""
+    """Fail on guard/reservation leaks; never close while holding registry mutex."""
     yield
     with rt._ACTIVE_GUARDS_LOCK:
-        for token, record in list(rt._ACTIVE_GUARDS.items()):
-            try:
-                record.guard.close()
-            except Exception:
-                pass
-        rt._ACTIVE_GUARDS.clear()
-        rt._CHAIN_RESERVATIONS.clear()
+        guards = [record.guard for record in rt._ACTIVE_GUARDS.values()]
+    close_errors = []
+    for guard in guards:
+        try:
+            guard.close()
+        except Exception as exc:
+            close_errors.append(exc)
+    with rt._ACTIVE_GUARDS_LOCK:
+        assert not rt._ACTIVE_GUARDS, f"guard registry leaked: {rt._ACTIVE_GUARDS}"
+        assert not rt._CHAIN_RESERVATIONS, f"chain reservations leaked: {rt._CHAIN_RESERVATIONS}"
+    assert not close_errors, f"guard cleanup errors: {close_errors}"
+    rt.set_fault_injection_hook(None)
 
 
 @pytest.fixture
@@ -125,6 +134,18 @@ def _make_event(cid: str = "0xabc", trades: list[dict] | None = None) -> dict[st
         "cohort_id": "300s",
         "schema_version": "raw_trade_event_v1",
     }
+
+
+def _eligibility_process_worker(raw_path: str, start, output) -> None:
+    directory = Path(raw_path)
+    start.wait(5)
+    try:
+        with RawChainLock(directory, "manifest").acquire() as guard:
+            state = mark_first_eligible_scan_seen_under_lock(
+                guard, directory, "manifest", "scan-first", "2026-07-13T10:00:01Z")
+        output.put(("ok", state.first_eligible_scan_seen))
+    except BaseException as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
 
 
 def _make_candidate_manifest(
@@ -844,7 +865,7 @@ def test_pending_symlink_rejected(raw_dir: Path):
     pending_link = raw_dir / ".pending"
     os.symlink(external, pending_link)
     with pytest.raises(PathSafetyError, match="symlink"):
-        validate_real_directory(pending_link)
+        RawScanStager("r", "s", raw_dir).__enter__()
 
 
 def test_quarantine_symlink_rejected(raw_dir: Path):
@@ -853,8 +874,10 @@ def test_quarantine_symlink_rejected(raw_dir: Path):
     external.mkdir(exist_ok=True)
     q_link = raw_dir / ".quarantine"
     os.symlink(external, q_link)
-    with pytest.raises(PathSafetyError, match="symlink"):
-        validate_real_directory(q_link)
+    with RawScanStager("r", "s", raw_dir) as stager:
+        stager.append_event(_make_event())
+        with pytest.raises(DiagnosticPersistenceError):
+            stager._fail_with_diagnostic("SYMLINK", RuntimeError("boom"))
 
 
 def test_parent_symlink_escape_rejected(raw_dir: Path):
@@ -1129,15 +1152,18 @@ def test_second_transfer_rejected(raw_dir: Path):
             stager.transfer()
 
 
-def test_transfer_returns_immutable_descriptor(raw_dir: Path):
+def test_transfer_returns_owned_readonly_descriptor(raw_dir: Path):
     with RawScanStager(run_id="r1", scan_id="s1", raw_dir=raw_dir) as stager:
         stager.append_event(_make_event())
         stager.seal()
         transfer = stager.transfer()
         assert isinstance(transfer, RawArtifactTransfer)
         assert len(transfer.ownership_token) == 36
-        with pytest.raises(Exception):
-            transfer.ownership_token = "x"  # type: ignore
+        assert transfer.staging_fd >= 0
+        with pytest.raises(OSError):
+            os.write(transfer.staging_fd, b"forbidden")
+    transfer.close()
+    transfer.close()
 
 
 def test_open_ordinary_abort_cleans_staging(raw_dir: Path):
@@ -1175,6 +1201,7 @@ def test_transferred_does_not_clean_staging(raw_dir: Path):
         transfer = stager.transfer()
     assert stager.state == "TRANSFERRED"
     assert transfer.staging_path.exists()
+    transfer.close()
 
 
 def test_first_event_fsync_failure_preserves_evidence(raw_dir: Path, monkeypatch):
@@ -1185,9 +1212,7 @@ def test_first_event_fsync_failure_preserves_evidence(raw_dir: Path, monkeypatch
     different fds).
     """
     with RawScanStager(run_id="r1", scan_id="s1", raw_dir=raw_dir) as stager:
-        stager.append_event(_make_event(cid="0xabc"))
-        # Monkeypatch os.fsync to fail exactly ONCE (for the next append's
-        # fsync call), then restore to the original.
+        # Fail the fsync of the first and only append.
         original_fsync = os.fsync
         call_count = [0]
         def one_shot_fsync(fd):
@@ -1197,7 +1222,7 @@ def test_first_event_fsync_failure_preserves_evidence(raw_dir: Path, monkeypatch
             return original_fsync(fd)
         monkeypatch.setattr(os, "fsync", one_shot_fsync)
         with pytest.raises(RawEventPersistenceError):
-            stager.append_event(_make_event(cid="0xdef"))
+            stager.append_event(_make_event(cid="0xabc"))
     assert stager.state == "ABORTED_WITH_DIAGNOSTIC_EVIDENCE"
     pending = list((raw_dir / ".pending").glob("*"))
     assert pending == [], f".pending should be empty, got: {pending}"
@@ -1205,7 +1230,7 @@ def test_first_event_fsync_failure_preserves_evidence(raw_dir: Path, monkeypatch
     assert len(quarantine) >= 2  # staging + diagnostic JSON
 
 
-def test_zero_event_seal_failure_preserves_evidence(raw_dir: Path, monkeypatch):
+def test_zero_event_fchmod_failure_blocks_diagnostic_persistence(raw_dir: Path, monkeypatch):
     """F6 — Seal failure with zero events must still preserve staging.
 
     G4: Stager uses os.fchmod (not os.chmod), so we monkeypatch os.fchmod.
@@ -1219,12 +1244,10 @@ def test_zero_event_seal_failure_preserves_evidence(raw_dir: Path, monkeypatch):
                 raise OSError(errno.EIO, "simulated fchmod failure")
             return original_fchmod(fd, mode)
         monkeypatch.setattr(os, "fchmod", selective_fchmod)
-        with pytest.raises(RawEventPersistenceError):
+        with pytest.raises(DiagnosticPersistenceError):
             stager.seal()
-    # F6 rule 5: failure during seal() always preserves staging, even with zero events
-    assert stager.state == "ABORTED_WITH_DIAGNOSTIC_EVIDENCE"
-    quarantine = list((raw_dir / ".quarantine").glob("*"))
-    assert len(quarantine) >= 2  # staging + diagnostic JSON
+    assert stager.state == "BLOCKED_DIAGNOSTIC_PERSISTENCE"
+    assert not list((raw_dir / ".quarantine").glob("*"))
 
 
 def test_gzip_close_failure_preserves_evidence(raw_dir: Path):
@@ -1550,6 +1573,332 @@ def test_eligibility_write_atomic_no_temp_residue(raw_dir: Path):
         )
     temps = list(raw_dir.glob(f"{rt.ELIGIBILITY_FILENAME}.tmp.*"))
     assert temps == []
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# H1-H8 independent audit regressions
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_lock_remains_bound_to_open_directory_inode_after_path_replacement(raw_dir: Path):
+    original_path = raw_dir
+    moved = raw_dir.parent / "raw-moved"
+    guard = RawChainLock(original_path, "manifest").acquire()
+    try:
+        os.rename(original_path, moved)
+        original_path.mkdir()
+        (original_path / "manifest.lock").write_text("replacement")
+        rt.assert_guard_valid(guard, original_path, "manifest")
+        assert os.fstat(guard.trusted.fd).st_ino == moved.stat().st_ino
+    finally:
+        guard.close()
+
+
+def test_trusted_directory_close_failure_is_visible_and_retryable(raw_dir: Path, monkeypatch):
+    trusted = rt.open_trusted_directory(raw_dir)
+    real_close = os.close
+    failed = False
+    def fail_once(fd):
+        nonlocal failed
+        if fd == trusted.fd and not failed:
+            failed = True
+            raise OSError(errno.EIO, "close fault")
+        return real_close(fd)
+    monkeypatch.setattr(os, "close", fail_once)
+    with pytest.raises(OSError, match="close fault"):
+        trusted.close()
+    assert trusted._closed is False
+    trusted.close()
+    assert trusted._closed is True
+    trusted.close()
+
+
+def test_guard_aggregates_trusted_directory_close_failure(raw_dir: Path, monkeypatch):
+    guard = RawChainLock(raw_dir, "manifest").acquire()
+    real_close = os.close
+    failed = False
+    def fail_trusted_once(fd):
+        nonlocal failed
+        if fd == guard.trusted.fd and not failed:
+            failed = True
+            raise OSError(errno.EIO, "trusted close fault")
+        return real_close(fd)
+    monkeypatch.setattr(os, "close", fail_trusted_once)
+    with pytest.raises(rt.LockReleaseError, match="trusted fd"):
+        guard.close()
+    assert guard._health == "BROKEN"
+    assert guard._closed is False
+    assert rt._ACTIVE_GUARDS[guard.token].health == "BROKEN"
+    monkeypatch.setattr(os, "close", real_close)
+    guard.trusted.close()
+    object.__setattr__(guard, "_closed", True)
+    with rt._ACTIVE_GUARDS_LOCK:
+        rt._ACTIVE_GUARDS.pop(guard.token)
+
+
+@pytest.mark.parametrize("point", [
+    rt.FAULT_ENTER_AFTER_RAW_DIR_OPEN,
+    rt.FAULT_ENTER_AFTER_PENDING_OPEN,
+    rt.FAULT_ENTER_AFTER_STAGING_CREATE,
+    rt.FAULT_ENTER_AFTER_DUP,
+    rt.FAULT_ENTER_AFTER_GZIP_CREATE,
+])
+def test_enter_faults_rollback_all_resources(raw_dir: Path, point: str):
+    before = len(os.listdir("/proc/self/fd"))
+    stager = RawScanStager("run", "scan", raw_dir)
+    rt.set_fault_injection_hook(
+        lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
+    with pytest.raises(RuntimeError, match=point):
+        stager.__enter__()
+    rt.set_fault_injection_hook(None)
+    assert stager._entered is False
+    assert stager.state == "OPEN"
+    assert stager._raw_dir_fd == stager._pending_dir_fd == stager._staging_fd == -1
+    assert not list(raw_dir.glob(".pending/*.tmp"))
+    assert not list(raw_dir.parent.glob("raw_scan_*.tmp"))
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_seal_closes_writable_description_and_preserves_identity(raw_dir: Path):
+    with RawScanStager("run", "scan", raw_dir) as stager:
+        stager.append_event(_make_event())
+        old_writable_fd = stager._staging_fd
+        old_stat = os.fstat(old_writable_fd)
+        sealed = stager.seal()
+        with pytest.raises(OSError):
+            os.write(old_writable_fd, b"mutation")
+        current = os.fstat(stager._staging_fd)
+        assert (current.st_dev, current.st_ino, current.st_size) == (
+            sealed.device_id, sealed.inode, sealed.size_bytes)
+        assert (old_stat.st_dev, old_stat.st_ino) == (sealed.device_id, sealed.inode)
+        assert current.st_mode & 0o777 == 0o444
+
+
+def test_delete_reports_unconfirmed_directory_fsync(raw_dir: Path, monkeypatch):
+    stager = RawScanStager("run", "scan", raw_dir).__enter__()
+    pending_fd = stager._pending_dir_fd
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(
+        OSError(errno.EIO, "dir fsync")) if fd == pending_fd else real_fsync(fd))
+    with pytest.raises(RawEventPersistenceError, match="deleted; durability of deletion not confirmed"):
+        stager._delete_staging_safely()
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    stager._close_resources_strict(close_staging=False)
+
+
+def test_pending_unlinked_failure_never_reports_pending(raw_dir: Path, monkeypatch):
+    with RawScanStager("run", "scan", raw_dir) as stager:
+        stager.append_event(_make_event())
+        pending_fd = stager._pending_dir_fd
+        real_fsync = os.fsync
+        calls = 0
+        def fail_second_pending_fsync(fd):
+            nonlocal calls
+            if fd == pending_fd:
+                calls += 1
+                if calls == 2:
+                    raise OSError(errno.EIO, "post-unlink fsync")
+            return real_fsync(fd)
+        monkeypatch.setattr(os, "fsync", fail_second_pending_fsync)
+        with pytest.raises(RawEventPersistenceError):
+            stager._fail_with_diagnostic("POST_UNLINK", RuntimeError("trigger"))
+    diagnostics = list((raw_dir / ".quarantine").glob("diagnostic_*.json"))
+    assert diagnostics
+    diagnostic = json.loads(diagnostics[0].read_bytes())
+    assert diagnostic["evidence_location"] == "QUARANTINE"
+
+
+def test_diagnostic_collision_is_real_and_never_overwrites(raw_dir: Path, monkeypatch):
+    sentinel = b"preexisting-diagnostic"
+    real_link = os.link
+    collision_name = []
+    injected = False
+    def collide_once(src, dst, *args, **kwargs):
+        nonlocal injected
+        if str(dst).startswith("diagnostic_") and not injected:
+            injected = True
+            collision_name.append(str(dst))
+            dir_fd = kwargs["dst_dir_fd"]
+            fd = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=dir_fd)
+            os.write(fd, sentinel)
+            os.close(fd)
+            raise FileExistsError(errno.EEXIST, "collision")
+        return real_link(src, dst, *args, **kwargs)
+    monkeypatch.setattr(os, "link", collide_once)
+    with RawScanStager("run", "scan", raw_dir) as stager:
+        stager.append_event(_make_event())
+        with pytest.raises(RawEventPersistenceError):
+            stager._fail_with_diagnostic("COLLISION", RuntimeError("trigger"))
+    q = raw_dir / ".quarantine"
+    assert (q / collision_name[0]).read_bytes() == sentinel
+    valid = [p for p in q.glob("diagnostic_*.json") if p.name != collision_name[0]]
+    assert valid and json.loads(valid[0].read_bytes())["evidence_location"] == "QUARANTINE"
+
+
+@pytest.mark.parametrize("point", [
+    rt.FAULT_CREATE_AFTER_FINAL_LINK,
+    rt.FAULT_CREATE_AFTER_TEMP_UNLINK,
+    rt.FAULT_CREATE_AFTER_DIR_FSYNC,
+])
+def test_marker_create_fault_points_report_committed_cleanup_pending(
+        raw_dir: Path, policy, point: str):
+    body = _make_valid_marker_body(policy)
+    rt.set_fault_injection_hook(
+        lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(MarkerCreateCleanupPending):
+            create_marker_no_replace_under_lock(guard, raw_dir, "fault.marker", body, policy)
+    assert (raw_dir / "fault.marker").exists()
+
+
+@pytest.mark.parametrize("point", [
+    rt.FAULT_AFTER_EXCHANGE,
+    rt.FAULT_AFTER_NEW_MARKER_VERIFY,
+    rt.FAULT_BEFORE_FIRST_DIR_FSYNC,
+])
+def test_marker_update_precommit_faults_prove_rollback(raw_dir: Path, policy, point: str):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(guard, raw_dir, "rollback.marker", old, policy)
+    old_bytes = (raw_dir / "rollback.marker").read_bytes()
+    rt.set_fault_injection_hook(
+        lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(rt.AtomicMarkerUpdateError):
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "rollback.marker", new, policy)
+    assert (raw_dir / "rollback.marker").read_bytes() == old_bytes
+    assert not list(raw_dir.glob("rollback.marker.tmp.*"))
+
+
+@pytest.mark.parametrize("point", [
+    rt.FAULT_AFTER_FIRST_DIR_FSYNC,
+    rt.FAULT_AFTER_OLD_MARKER_UNLINK,
+    rt.FAULT_AFTER_SECOND_DIR_FSYNC,
+])
+def test_marker_update_postcommit_faults_report_cleanup_pending(
+        raw_dir: Path, policy, point: str):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(guard, raw_dir, "commit.marker", old, policy)
+    rt.set_fault_injection_hook(
+        lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(MarkerUpdateCleanupPending):
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "commit.marker", new, policy)
+    parsed = parse_marker((raw_dir / "commit.marker").read_bytes())
+    assert parsed["status"] == "COMMITTED"
+
+
+@pytest.mark.parametrize("rollback_point", [
+    rt.FAULT_ROLLBACK_EXCHANGE_FAILURE,
+    rt.FAULT_ROLLBACK_FSYNC_FAILURE,
+    rt.FAULT_ROLLBACK_TEMP_UNLINK_FAILURE,
+])
+def test_marker_rollback_faults_raise_explicit_ambiguity(
+        raw_dir: Path, policy, rollback_point: str):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(guard, raw_dir, "ambiguous.marker", old, policy)
+    def hook(point):
+        if point in (rt.FAULT_AFTER_EXCHANGE, rollback_point):
+            raise RuntimeError(point)
+    rt.set_fault_injection_hook(hook)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(AtomicMarkerRollbackFailed, match="rollback failed"):
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "ambiguous.marker", new, policy)
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2026-02-30T00:00:00Z", "2026-07-13T10:00:00", "2026-07-13T11:00:00+01:00", 123,
+])
+def test_eligibility_rejects_invalid_or_non_utc_timestamp(raw_dir: Path, timestamp):
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(ValueError):
+            mark_first_eligible_scan_seen_under_lock(
+                guard, raw_dir, "manifest", "scan", timestamp)
+
+
+def test_eligibility_real_process_concurrency(raw_dir: Path):
+    context = multiprocessing.get_context("fork")
+    start = context.Event()
+    output = context.Queue()
+    processes = [context.Process(
+        target=_eligibility_process_worker, args=(str(raw_dir), start, output)) for _ in range(2)]
+    for process in processes:
+        process.start()
+    start.set()
+    results = [output.get(timeout=10) for _ in processes]
+    for process in processes:
+        process.join(10)
+        assert process.exitcode == 0
+    assert results == [("ok", True), ("ok", True)] or results == [("ok", True)] * 2
+    assert read_eligibility_state(raw_dir).first_eligible_scan_seen is True
+    assert len(list(raw_dir.glob(rt.ELIGIBILITY_FILENAME))) == 1
+    assert not list(raw_dir.glob(f"{rt.ELIGIBILITY_FILENAME}.tmp.*"))
+
+
+def test_eligibility_temp_write_hardlink_and_dir_fsync_failures(raw_dir: Path, monkeypatch):
+    real_fdopen, real_link, real_fsync = os.fdopen, os.link, os.fsync
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        monkeypatch.setattr(os, "fdopen", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(errno.EIO, "temp write")))
+        with pytest.raises(OSError, match="temp write"):
+            mark_first_eligible_scan_seen_under_lock(guard, raw_dir, "manifest", "s", "2026-07-13T10:00:01Z")
+    monkeypatch.setattr(os, "fdopen", real_fdopen)
+    assert not list(raw_dir.glob(f"{rt.ELIGIBILITY_FILENAME}.tmp.*"))
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        monkeypatch.setattr(os, "link", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(errno.EIO, "hardlink")))
+        with pytest.raises(OSError, match="hardlink"):
+            mark_first_eligible_scan_seen_under_lock(guard, raw_dir, "manifest", "s", "2026-07-13T10:00:01Z")
+    monkeypatch.setattr(os, "link", real_link)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        directory_fd = guard.trusted.fd
+        monkeypatch.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(
+            OSError(errno.EIO, "directory fsync")) if fd == directory_fd else real_fsync(fd))
+        with pytest.raises(MarkerCreateCleanupPending, match="committed"):
+            mark_first_eligible_scan_seen_under_lock(guard, raw_dir, "manifest", "s", "2026-07-13T10:00:01Z")
+
+
+def test_fd_leaks_zero_across_100_lifecycle_cycles(raw_dir: Path, monkeypatch):
+    baseline = len(os.listdir("/proc/self/fd"))
+    real_fchmod = os.fchmod
+    for index in range(100):
+        with RawScanStager("r", f"open-{index}", raw_dir):
+            pass
+        with RawScanStager("r", f"sealed-{index}", raw_dir) as stager:
+            stager.append_event(_make_event())
+            stager.seal()
+        with RawScanStager("r", f"transfer-{index}", raw_dir) as stager:
+            stager.append_event(_make_event())
+            stager.seal()
+            transfer = stager.transfer()
+        transfer.close()
+        with RawScanStager("r", f"diagnostic-{index}", raw_dir) as stager:
+            stager.append_event(_make_event())
+            with pytest.raises(RawEventPersistenceError):
+                stager._fail_with_diagnostic("FD_TEST", RuntimeError("expected"))
+        with RawScanStager("r", f"blocked-{index}", raw_dir) as stager:
+            stager.append_event(_make_event())
+            staging_fd = stager._staging_fd
+            monkeypatch.setattr(os, "fchmod", lambda fd, mode, target=staging_fd: (
+                (_ for _ in ()).throw(OSError(errno.EIO, "fchmod"))
+                if fd == target and mode == 0o444 else real_fchmod(fd, mode)))
+            with pytest.raises(DiagnosticPersistenceError):
+                stager._fail_with_diagnostic("FD_BLOCKED", RuntimeError("expected"))
+            monkeypatch.setattr(os, "fchmod", real_fchmod)
+        rt.set_fault_injection_hook(
+            lambda point: (_ for _ in ()).throw(RuntimeError(point))
+            if point == rt.FAULT_ENTER_AFTER_STAGING_CREATE else None)
+        with pytest.raises(RuntimeError):
+            RawScanStager("r", f"enter-fault-{index}", raw_dir).__enter__()
+        rt.set_fault_injection_hook(None)
+    assert len(os.listdir("/proc/self/fd")) == baseline
 
 
 # ═══════════════════════════════════════════════════════════════════════

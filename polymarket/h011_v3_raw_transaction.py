@@ -226,8 +226,16 @@ class AtomicMarkerUpdateError(RawTransactionError):
     """Raised when a transactional marker update fails and rollback was attempted (G3)."""
 
 
+class AtomicMarkerRollbackFailed(RawTransactionError):
+    """Rollback could not prove restoration of the pre-update marker."""
+
+
+class MarkerCreateCleanupPending(RawTransactionError):
+    """Marker creation committed but temp cleanup/durability is incomplete."""
+
+
 class MarkerUpdateCleanupPending(RawTransactionError):
-    """Raised when update committed but old marker cleanup is pending (G3)."""
+    """Marker update committed but old marker cleanup/durability is incomplete."""
 
 
 class DiagnosticPersistenceError(RawTransactionError):
@@ -286,7 +294,7 @@ def validate_safe_prefix(prefix: str) -> None:
         raise PathSafetyError(f"prefix does not match ^[A-Za-z0-9_]+$: {prefix!r}")
 
 
-@dataclass(frozen=True)
+@dataclass
 class TrustedDirectory:
     """G1 — A directory opened and verified as trusted.
 
@@ -298,12 +306,13 @@ class TrustedDirectory:
     fd: int
     st_dev: int
     st_ino: int
+    _closed: bool = False
 
     def close(self) -> None:
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        if self._closed:
+            return
+        os.close(self.fd)
+        self._closed = True
 
     def __enter__(self) -> "TrustedDirectory":
         return self
@@ -843,9 +852,21 @@ _RENAME_EXCHANGE: Final[int] = 2
 # G3 fault injection points
 FAULT_AFTER_EXCHANGE: Final[str] = "AFTER_EXCHANGE"
 FAULT_AFTER_NEW_MARKER_VERIFY: Final[str] = "AFTER_NEW_MARKER_VERIFY"
+FAULT_BEFORE_FIRST_DIR_FSYNC: Final[str] = "BEFORE_FIRST_DIR_FSYNC"
 FAULT_AFTER_FIRST_DIR_FSYNC: Final[str] = "AFTER_FIRST_DIR_FSYNC"
 FAULT_AFTER_OLD_MARKER_UNLINK: Final[str] = "AFTER_OLD_MARKER_UNLINK"
 FAULT_AFTER_SECOND_DIR_FSYNC: Final[str] = "AFTER_SECOND_DIR_FSYNC"
+FAULT_CREATE_AFTER_FINAL_LINK: Final[str] = "CREATE_AFTER_FINAL_LINK"
+FAULT_CREATE_AFTER_TEMP_UNLINK: Final[str] = "CREATE_AFTER_TEMP_UNLINK"
+FAULT_CREATE_AFTER_DIR_FSYNC: Final[str] = "CREATE_AFTER_DIR_FSYNC"
+FAULT_ROLLBACK_EXCHANGE_FAILURE: Final[str] = "ROLLBACK_EXCHANGE_FAILURE"
+FAULT_ROLLBACK_FSYNC_FAILURE: Final[str] = "ROLLBACK_FSYNC_FAILURE"
+FAULT_ROLLBACK_TEMP_UNLINK_FAILURE: Final[str] = "ROLLBACK_TEMP_UNLINK_FAILURE"
+FAULT_ENTER_AFTER_RAW_DIR_OPEN: Final[str] = "ENTER_AFTER_RAW_DIR_OPEN"
+FAULT_ENTER_AFTER_PENDING_OPEN: Final[str] = "ENTER_AFTER_PENDING_OPEN"
+FAULT_ENTER_AFTER_STAGING_CREATE: Final[str] = "ENTER_AFTER_STAGING_CREATE"
+FAULT_ENTER_AFTER_DUP: Final[str] = "ENTER_AFTER_DUP"
+FAULT_ENTER_AFTER_GZIP_CREATE: Final[str] = "ENTER_AFTER_GZIP_CREATE"
 
 # Global fault injection hook (for testing). Set to a callable that takes
 # the fault point name and raises if it matches the desired fault.
@@ -961,32 +982,88 @@ def create_marker_no_replace_under_lock(
         0o644,
         dir_fd=dir_fd,
     )
+    committed = False
+    temp_present = True
     try:
         with os.fdopen(temp_fd, "wb") as f:
             f.write(canonical_bytes)
             f.flush()
             os.fsync(f.fileno())
-    except Exception:
-        try:
-            os.unlink(temp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        raise
-    try:
         os.link(temp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-    except FileExistsError:
-        try:
-            os.unlink(temp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        raise
-    finally:
-        try:
-            os.unlink(temp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-    _dir_fsync_via_fd(dir_fd)
+        committed = True
+        _inject_fault(FAULT_CREATE_AFTER_FINAL_LINK)
+        os.unlink(temp_name, dir_fd=dir_fd)
+        temp_present = False
+        _inject_fault(FAULT_CREATE_AFTER_TEMP_UNLINK)
+        _dir_fsync_via_fd(dir_fd)
+        _inject_fault(FAULT_CREATE_AFTER_DIR_FSYNC)
+    except Exception as exc:
+        if not committed:
+            if temp_present:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                    _dir_fsync_via_fd(dir_fd)
+                except FileNotFoundError:
+                    pass
+            raise
+        raise MarkerCreateCleanupPending(
+            f"marker creation committed; cleanup/durability pending: "
+            f"marker={marker_name} temp={temp_name if temp_present else None} phase={exc}"
+        ) from exc
     return directory / marker_name
+
+
+def _rollback_marker_update(
+    dir_fd: int,
+    marker_name: str,
+    temp_name: str,
+    original_stat: os.stat_result,
+    original_bytes: bytes,
+    cause: BaseException,
+) -> NoReturn:
+    """Restore and prove the original marker, or report an explicit ambiguity."""
+    phase = "exchange"
+    try:
+        _inject_fault(FAULT_ROLLBACK_EXCHANGE_FAILURE)
+        _renameat2_exchange(dir_fd, temp_name, marker_name)
+        phase = "directory fsync"
+        _inject_fault(FAULT_ROLLBACK_FSYNC_FAILURE)
+        _dir_fsync_via_fd(dir_fd)
+        phase = "original verification"
+        fd = os.open(marker_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            restored_stat = os.fstat(fd)
+            restored_bytes = b""
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                restored_bytes += chunk
+        finally:
+            os.close(fd)
+        if ((restored_stat.st_dev, restored_stat.st_ino) !=
+                (original_stat.st_dev, original_stat.st_ino) or
+                restored_bytes != original_bytes):
+            raise OSError("restored marker inode/dev or bytes mismatch")
+        phase = "new temp unlink"
+        _inject_fault(FAULT_ROLLBACK_TEMP_UNLINK_FAILURE)
+        os.unlink(temp_name, dir_fd=dir_fd)
+        _dir_fsync_via_fd(dir_fd)
+        try:
+            os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise OSError("rollback temp still exists")
+    except Exception as rollback_exc:
+        raise AtomicMarkerRollbackFailed(
+            f"marker rollback failed at {phase}; marker={marker_name} temp={temp_name}; "
+            f"original_dev={original_stat.st_dev} original_ino={original_stat.st_ino}; "
+            f"cause={cause}; rollback_error={rollback_exc}"
+        ) from rollback_exc
+    raise AtomicMarkerUpdateError(
+        f"marker update failed before commit and original marker was restored: {cause}"
+    ) from cause
 
 
 def update_existing_marker_atomic_under_lock(
@@ -1040,6 +1117,12 @@ def update_existing_marker_atomic_under_lock(
         raise
     try:
         existing_stat = os.fstat(existing_fd)
+        original_bytes = b""
+        while True:
+            chunk = os.read(existing_fd, 65536)
+            if not chunk:
+                break
+            original_bytes += chunk
     finally:
         os.close(existing_fd)
 
@@ -1085,65 +1168,37 @@ def update_existing_marker_atomic_under_lock(
     try:
         _inject_fault(FAULT_AFTER_EXCHANGE)
     except Exception as exc:
-        # Rollback: exchange back
-        try:
-            _renameat2_exchange(dir_fd, temp_name, marker_name)
-            _dir_fsync_via_fd(dir_fd)
-            os.unlink(temp_name, dir_fd=dir_fd)
-            _dir_fsync_via_fd(dir_fd)
-        except Exception:
-            pass
-        raise AtomicMarkerUpdateError(
-            f"fault after exchange, rollback attempted: {exc}"
-        ) from exc
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, exc)
 
     # 6. Verify temp now has old marker inode/dev
     try:
         verify_fd = os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
     except OSError as exc:
-        # Cannot verify — attempt rollback
-        try:
-            _renameat2_exchange(dir_fd, temp_name, marker_name)
-            _dir_fsync_via_fd(dir_fd)
-            os.unlink(temp_name, dir_fd=dir_fd)
-            _dir_fsync_via_fd(dir_fd)
-        except Exception:
-            pass
-        raise AtomicMarkerUpdateError(f"cannot open temp for verify: {exc}") from exc
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, exc)
     try:
         verify_stat = os.fstat(verify_fd)
     finally:
         os.close(verify_fd)
     if verify_stat.st_dev != existing_stat.st_dev or verify_stat.st_ino != existing_stat.st_ino:
-        # Inode mismatch — do NOT unlink. Attempt rollback.
-        try:
-            _renameat2_exchange(dir_fd, temp_name, marker_name)
-            _dir_fsync_via_fd(dir_fd)
-        except Exception:
-            pass
-        raise AtomicMarkerUpdateError(
+        mismatch = AtomicMarkerUpdateError(
             f"RENAME_EXCHANGE verification failed: temp inode/dev mismatch. "
             f"Expected dev={existing_stat.st_dev} ino={existing_stat.st_ino}, "
             f"got dev={verify_stat.st_dev} ino={verify_stat.st_ino}."
         )
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, mismatch)
 
     # FAULT_AFTER_NEW_MARKER_VERIFY
     try:
         _inject_fault(FAULT_AFTER_NEW_MARKER_VERIFY)
     except Exception as exc:
-        # Rollback: exchange back
-        try:
-            _renameat2_exchange(dir_fd, temp_name, marker_name)
-            _dir_fsync_via_fd(dir_fd)
-            os.unlink(temp_name, dir_fd=dir_fd)
-            _dir_fsync_via_fd(dir_fd)
-        except Exception:
-            pass
-        raise AtomicMarkerUpdateError(
-            f"fault after verify, rollback attempted: {exc}"
-        ) from exc
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, exc)
 
     # 7. Verify marker now has new bytes (read and compare)
+    new_marker_fd = -1
     try:
         new_marker_fd = os.open(marker_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
         new_bytes = b""
@@ -1152,32 +1207,28 @@ def update_existing_marker_atomic_under_lock(
             if not chunk:
                 break
             new_bytes += chunk
-        os.close(new_marker_fd)
     except OSError as exc:
-        # Cannot verify new marker — attempt rollback
-        try:
-            _renameat2_exchange(dir_fd, temp_name, marker_name)
-            _dir_fsync_via_fd(dir_fd)
-            os.unlink(temp_name, dir_fd=dir_fd)
-            _dir_fsync_via_fd(dir_fd)
-        except Exception:
-            pass
-        raise AtomicMarkerUpdateError(f"cannot read new marker for verify: {exc}") from exc
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, exc)
+    finally:
+        if new_marker_fd >= 0:
+            os.close(new_marker_fd)
     if new_bytes != canonical_bytes:
-        # New marker does not match — attempt rollback
-        try:
-            _renameat2_exchange(dir_fd, temp_name, marker_name)
-            _dir_fsync_via_fd(dir_fd)
-            os.unlink(temp_name, dir_fd=dir_fd)
-            _dir_fsync_via_fd(dir_fd)
-        except Exception:
-            pass
-        raise AtomicMarkerUpdateError(
-            "new marker bytes do not match canonical_bytes"
-        )
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes,
+            AtomicMarkerUpdateError("new marker bytes do not match canonical_bytes"))
 
     # 8. fsync directory — COMMIT POINT
-    _dir_fsync_via_fd(dir_fd)
+    try:
+        _inject_fault(FAULT_BEFORE_FIRST_DIR_FSYNC)
+    except Exception as exc:
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, exc)
+    try:
+        _dir_fsync_via_fd(dir_fd)
+    except OSError as exc:
+        _rollback_marker_update(
+            dir_fd, marker_name, temp_name, existing_stat, original_bytes, exc)
 
     # FAULT_AFTER_FIRST_DIR_FSYNC — after commit point
     try:
@@ -1213,7 +1264,12 @@ def update_existing_marker_atomic_under_lock(
         ) from exc
 
     # 10. fsync directory
-    _dir_fsync_via_fd(dir_fd)
+    try:
+        _dir_fsync_via_fd(dir_fd)
+    except OSError as exc:
+        raise MarkerUpdateCleanupPending(
+            f"new marker committed and old marker unlinked; second directory fsync failed: {exc}"
+        ) from exc
 
     # FAULT_AFTER_SECOND_DIR_FSYNC
     try:
@@ -1249,7 +1305,7 @@ class GuardRecord:
     st_ino: int        # lock file ino
     trusted_dev: int   # trusted directory dev (G2: chain key)
     trusted_ino: int   # trusted directory ino (G2: chain key)
-    lock_path: Path
+    lock_name: str
     token: str
     health: GuardHealth
 
@@ -1297,13 +1353,14 @@ class RawChainLockGuard:
         except OSError as exc:
             release_errors.append(f"close lock_fd failed: {exc}")
             object.__setattr__(self, "_health", "BROKEN")
-        # Close trusted directory fd
+        # Close trusted directory fd. TrustedDirectory does not mark itself
+        # closed when close(2) fails, so the BROKEN registry remains truthful.
         try:
             self.trusted.close()
         except OSError as exc:
             release_errors.append(f"close trusted fd failed: {exc}")
             object.__setattr__(self, "_health", "BROKEN")
-        object.__setattr__(self, "_closed", True)
+        object.__setattr__(self, "_closed", not release_errors)
         # Remove from registry only after successful release
         with _ACTIVE_GUARDS_LOCK:
             record = _ACTIVE_GUARDS.get(self.token)
@@ -1315,6 +1372,24 @@ class RawChainLockGuard:
                     _ACTIVE_GUARDS.pop(self.token, None)
         if release_errors:
             raise LockReleaseError("; ".join(release_errors))
+
+
+def _release_unregistered_lock_strict(lock_fd: int, trusted: TrustedDirectory) -> None:
+    errors: list[str] = []
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    except OSError as exc:
+        errors.append(f"flock unlock failed: {exc}")
+    try:
+        os.close(lock_fd)
+    except OSError as exc:
+        errors.append(f"lock fd close failed: {exc}")
+    try:
+        trusted.close()
+    except OSError as exc:
+        errors.append(f"trusted directory close failed: {exc}")
+    if errors:
+        raise LockReleaseError("; ".join(errors))
 
 
 @dataclass(frozen=True)
@@ -1344,17 +1419,18 @@ class RawChainLock:
         # 2. Open trusted root
         trusted = open_trusted_directory(self.directory)
         # 3. Open lock file with O_NOFOLLOW
-        lock_path = trusted.path / f"{self.prefix}.lock"
+        lock_name = f"{self.prefix}.lock"
         try:
             lock_fd = os.open(
-                str(lock_path),
+                lock_name,
                 os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
                 0o644,
+                dir_fd=trusted.fd,
             )
         except OSError as exc:
             trusted.close()
             if exc.errno == errno.ELOOP:
-                raise PathSafetyError(f"lock file is a symlink: {lock_path}") from exc
+                raise PathSafetyError(f"lock file is a symlink: {lock_name}") from exc
             raise LockAcquisitionError(f"cannot open lock file: {exc}") from exc
         # 4. Reserve chain key (under mutex)
         chain_key = (trusted.st_dev, trusted.st_ino, self.prefix)
@@ -1401,12 +1477,7 @@ class RawChainLock:
                     record.prefix == self.prefix and
                     record.health == "ACTIVE"):
                     # Another thread acquired between our check and flock
-                    try:
-                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                    except OSError:
-                        pass
-                    os.close(lock_fd)
-                    trusted.close()
+                    _release_unregistered_lock_strict(lock_fd, trusted)
                     raise NestedLockingError(
                         f"another guard became active while waiting for flock"
                     )
@@ -1414,12 +1485,7 @@ class RawChainLock:
             try:
                 st = os.fstat(lock_fd)
             except OSError as exc:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
-                os.close(lock_fd)
-                trusted.close()
+                _release_unregistered_lock_strict(lock_fd, trusted)
                 raise LockAcquisitionError(f"fstat of lock file failed: {exc}") from exc
             token = str(uuid.uuid4())
             guard = RawChainLockGuard(
@@ -1440,7 +1506,7 @@ class RawChainLock:
                 st_ino=st.st_ino,
                 trusted_dev=trusted.st_dev,
                 trusted_ino=trusted.st_ino,
-                lock_path=lock_path,
+                lock_name=lock_name,
                 token=token,
                 health="ACTIVE",
             )
@@ -1504,12 +1570,16 @@ def assert_guard_valid(
                 f"registry dev={record.st_dev} ino={record.st_ino}"
             )
         try:
-            path_st = os.lstat(str(record.lock_path))
+            path_st = os.stat(
+                record.lock_name,
+                dir_fd=guard.trusted.fd,
+                follow_symlinks=False,
+            )
         except OSError as exc:
             raise GuardValidationError(f"lock path lstat failed: {exc}") from exc
         if statmod.S_ISLNK(path_st.st_mode):
             raise GuardValidationError(
-                f"lock path was replaced with a symlink: {record.lock_path}"
+                f"lock name was replaced with a symlink: {record.lock_name}"
             )
         if path_st.st_dev != record.st_dev or path_st.st_ino != record.st_ino:
             raise GuardValidationError(
@@ -1555,12 +1625,44 @@ class SealedRawArtifact:
     inode: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class RawArtifactTransfer:
-    """A8 (D5, E5) — Immutable ownership transfer descriptor."""
+    """Owns the sealed read-only inode and its trusted pending directory."""
     sealed: SealedRawArtifact
     ownership_token: str
-    staging_path: Path
+    staging_filename: str
+    staging_fd: int
+    pending_directory: TrustedDirectory
+    _closed: bool = False
+
+    @property
+    def staging_path(self) -> Path:
+        """Informational only; fd + dir_fd are the security authority."""
+        return self.pending_directory.path / self.staging_filename
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        errors: list[str] = []
+        if self.staging_fd >= 0:
+            try:
+                os.close(self.staging_fd)
+                self.staging_fd = -1
+            except OSError as exc:
+                errors.append(f"close transfer staging fd failed: {exc}")
+        try:
+            self.pending_directory.close()
+        except OSError as exc:
+            errors.append(f"close transfer pending directory failed: {exc}")
+        if errors:
+            raise RawEventPersistenceError("; ".join(errors))
+        self._closed = True
+
+    def __enter__(self) -> "RawArtifactTransfer":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -1722,7 +1824,11 @@ class RawScanStager:
     _raw_dir_fd: int = -1
     _pending_dir_fd: int = -1
     _staging_fd: int = -1
+    _raw_trusted: TrustedDirectory | None = None
+    _pending_trusted: TrustedDirectory | None = None
+    _quarantine_trusted: TrustedDirectory | None = None
     _staging_name: str = ""
+    _raw_file: Any = None
     _gzip_handle: Any = None
     # G6 flags
     _entered: bool = False
@@ -1734,125 +1840,173 @@ class RawScanStager:
     def __enter__(self) -> "RawScanStager":
         if self._entered:
             raise StagerStateError("stager already entered — cannot enter twice")
-        self._entered = True
         if self._state != "OPEN":
             raise StagerStateError(f"cannot enter from state {self._state}")
-        # G4: Open raw_dir as trusted directory
-        trusted_raw = open_trusted_directory(self.raw_dir)
-        self._raw_dir_fd = trusted_raw.fd
-        # G4: Open .pending relative to raw_dir_fd
+        trusted_raw: TrustedDirectory | None = None
+        pending_trusted: TrustedDirectory | None = None
+        staging_fd = -1
+        dup_fd = -1
+        raw_file = None
+        gzip_handle = None
+        staging_name = ""
         try:
-            self._pending_dir_fd = os.open(
-                ".pending",
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=self._raw_dir_fd,
+            trusted_raw = open_trusted_directory(self.raw_dir)
+            _inject_fault(FAULT_ENTER_AFTER_RAW_DIR_OPEN)
+            try:
+                pending_fd = os.open(
+                    ".pending", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=trusted_raw.fd,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(".pending", dir_fd=trusted_raw.fd, mode=0o755)
+                except FileExistsError:
+                    pass
+                pending_fd = os.open(
+                    ".pending", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=trusted_raw.fd,
+                )
+            except OSError as pending_exc:
+                if pending_exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise PathSafetyError(".pending is a symlink or not a directory") from pending_exc
+                raise
+            pending_stat = os.fstat(pending_fd)
+            pending_trusted = TrustedDirectory(
+                path=self.raw_dir / ".pending", fd=pending_fd,
+                st_dev=pending_stat.st_dev, st_ino=pending_stat.st_ino,
             )
-        except FileNotFoundError:
-            # Create .pending (relative to raw_dir_fd)
-            os.mkdir(".pending", dir_fd=self._raw_dir_fd, mode=0o755)
-            self._pending_dir_fd = os.open(
-                ".pending",
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=self._raw_dir_fd,
+            _inject_fault(FAULT_ENTER_AFTER_PENDING_OPEN)
+            safe_id = _safe_scan_id(self.scan_id)
+            staging_name = f"raw_scan_{safe_id}_{uuid.uuid4().hex[:12]}.jsonl.gz.tmp"
+            staging_fd = os.open(
+                staging_name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
+                0o644, dir_fd=pending_trusted.fd,
             )
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise PathSafetyError(".pending is a symlink") from exc
+            _inject_fault(FAULT_ENTER_AFTER_STAGING_CREATE)
+            dup_fd = os.dup(staging_fd)
+            _inject_fault(FAULT_ENTER_AFTER_DUP)
+            raw_file = os.fdopen(dup_fd, "ab", closefd=True)
+            dup_fd = -1
+            gzip_handle = gzip.GzipFile(fileobj=raw_file, mode="ab")
+            _inject_fault(FAULT_ENTER_AFTER_GZIP_CREATE)
+        except BaseException:
+            cleanup_errors: list[str] = []
+            for label, resource in (("gzip", gzip_handle), ("raw file", raw_file)):
+                if resource is not None:
+                    try:
+                        resource.close()
+                    except Exception as close_exc:
+                        cleanup_errors.append(f"{label} close failed: {close_exc}")
+            if dup_fd >= 0:
+                try:
+                    os.close(dup_fd)
+                except OSError as close_exc:
+                    cleanup_errors.append(f"dup close failed: {close_exc}")
+            if staging_fd >= 0:
+                try:
+                    os.close(staging_fd)
+                except OSError as close_exc:
+                    cleanup_errors.append(f"staging close failed: {close_exc}")
+            if staging_name and pending_trusted is not None:
+                try:
+                    os.unlink(staging_name, dir_fd=pending_trusted.fd)
+                    os.fsync(pending_trusted.fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as cleanup_exc:
+                    cleanup_errors.append(f"staging rollback failed: {cleanup_exc}")
+            for label, trusted in (("pending", pending_trusted), ("raw", trusted_raw)):
+                if trusted is not None:
+                    try:
+                        trusted.close()
+                    except OSError as close_exc:
+                        cleanup_errors.append(f"{label} directory close failed: {close_exc}")
+            if cleanup_errors:
+                raise RawEventPersistenceError("enter rollback: " + "; ".join(cleanup_errors))
             raise
-        # G4: Create staging file via dir_fd
-        safe_id = _safe_scan_id(self.scan_id)
-        unique_suffix = uuid.uuid4().hex[:12]
-        self._staging_name = f"raw_scan_{safe_id}_{unique_suffix}.jsonl.gz.tmp"
-        self._staging_fd = os.open(
-            self._staging_name,
-            os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
-            0o644,
-            dir_fd=self._pending_dir_fd,
-        )
-        # G4: Create gzip over a duplicated fd
-        dup_fd = os.dup(self._staging_fd)
-        raw_file = os.fdopen(dup_fd, "ab", closefd=True)
-        self._gzip_handle = gzip.GzipFile(fileobj=raw_file, mode="ab")
+        self._raw_trusted = trusted_raw
+        self._pending_trusted = pending_trusted
+        self._raw_dir_fd = trusted_raw.fd
+        self._pending_dir_fd = pending_trusted.fd
+        self._staging_fd = staging_fd
+        self._staging_name = staging_name
+        self._raw_file = raw_file
+        self._gzip_handle = gzip_handle
+        self._entered = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         """G5 — Propagate failures. Do NOT silence errors."""
-        cleanup_errors: list[str] = []
         original_exception = exc_val if isinstance(exc_val, BaseException) else None
-
-        # Close gzip handle
-        if self._gzip_handle is not None:
-            try:
-                self._gzip_handle.close()
-            except Exception as exc:
-                cleanup_errors.append(f"gzip close failed: {exc}")
-            self._gzip_handle = None
-
-        # If _fail_with_diagnostic already ran, state is set
-        if self._state in ("ABORTED_WITH_DIAGNOSTIC_EVIDENCE",
-                           "BLOCKED_DIAGNOSTIC_PERSISTENCE"):
-            if cleanup_errors and original_exception is None:
-                raise RawEventPersistenceError("; ".join(cleanup_errors))
-            return False
-
-        if self._state == "TRANSFERRED":
-            if cleanup_errors and original_exception is None:
-                raise RawEventPersistenceError("; ".join(cleanup_errors))
-            return False
-
-        if self._state == "SEALED":
-            try:
+        try:
+            if self._state == "TRANSFERRED":
+                self._close_resources_strict(close_staging=False, close_pending=False)
+                return False
+            if self._state in ("ABORTED_WITH_DIAGNOSTIC_EVIDENCE",
+                               "BLOCKED_DIAGNOSTIC_PERSISTENCE"):
+                self._close_resources_strict()
+                return False
+            if self._state == "SEALED":
                 self._delete_staging_safely()
                 self._state = "ABORTED_BEFORE_TRANSFER"
-            except RawEventPersistenceError as exc:
-                self._state = "BLOCKED_DIAGNOSTIC_PERSISTENCE"
-                if original_exception is not None:
-                    raise DiagnosticPersistenceError(
-                        f"cleanup failed after original error: {exc}"
-                    ) from original_exception
-                raise DiagnosticPersistenceError(
-                    f"SEALED cleanup failed: {exc}"
-                ) from exc
-            if cleanup_errors and original_exception is None:
-                raise RawEventPersistenceError("; ".join(cleanup_errors))
-            return False
-
-        # state == OPEN
-        if exc_type is not None:
-            if self._write_attempted or self._seal_started:
-                try:
-                    self._preserve_diagnostic_evidence(
-                        f"OPEN_EXCEPTION ({exc_type.__name__})",
-                        exc_val if isinstance(exc_val, BaseException) else RuntimeError(str(exc_val)),
-                    )
-                    self._state = "ABORTED_WITH_DIAGNOSTIC_EVIDENCE"
-                except Exception as diag_exc:
-                    self._state = "BLOCKED_DIAGNOSTIC_PERSISTENCE"
-                    raise DiagnosticPersistenceError(
-                        f"failed to persist diagnostic evidence: {diag_exc}"
-                    ) from (original_exception or diag_exc)
+            elif exc_type is not None and (self._write_attempted or self._seal_started):
+                self._preserve_diagnostic_evidence(
+                    f"OPEN_EXCEPTION ({exc_type.__name__})",
+                    original_exception or RuntimeError(str(exc_val)),
+                )
+                self._state = "ABORTED_WITH_DIAGNOSTIC_EVIDENCE"
             else:
-                try:
-                    self._delete_staging_safely()
-                    self._state = "ABORTED_BEFORE_TRANSFER"
-                except RawEventPersistenceError as exc:
-                    self._state = "BLOCKED_DIAGNOSTIC_PERSISTENCE"
-                    raise DiagnosticPersistenceError(
-                        f"cleanup failed: {exc}"
-                    ) from (original_exception or exc)
-            return False
-
-        # Normal exit from OPEN
-        try:
-            self._delete_staging_safely()
-            self._state = "ABORTED_BEFORE_TRANSFER"
-        except RawEventPersistenceError as exc:
+                self._delete_staging_safely()
+                self._state = "ABORTED_BEFORE_TRANSFER"
+            self._close_resources_strict(close_staging=False)
+        except RawEventPersistenceError as cleanup_exc:
             self._state = "BLOCKED_DIAGNOSTIC_PERSISTENCE"
-            raise RawEventPersistenceError(f"normal exit cleanup failed: {exc}") from exc
-
-        if cleanup_errors:
-            raise RawEventPersistenceError("; ".join(cleanup_errors))
+            raise DiagnosticPersistenceError(
+                f"strict exit cleanup failed: {cleanup_exc}"
+            ) from (original_exception or cleanup_exc)
         return False
+
+    def _close_resources_strict(self, *, close_staging: bool = True,
+                                close_pending: bool = True,
+                                close_raw: bool = True) -> None:
+        """Close every resource owned by this stager and aggregate failures."""
+        errors: list[str] = []
+        for attribute, label in (("_gzip_handle", "gzip"), ("_raw_file", "raw file")):
+            resource = getattr(self, attribute)
+            if resource is not None:
+                try:
+                    resource.close()
+                    setattr(self, attribute, None)
+                except Exception as exc:
+                    errors.append(f"{label} close failed: {exc}")
+        if close_staging and self._staging_fd >= 0:
+            try:
+                os.close(self._staging_fd)
+                self._staging_fd = -1
+            except OSError as exc:
+                errors.append(f"staging fd close failed: {exc}")
+        if close_pending and self._pending_trusted is not None:
+            try:
+                self._pending_trusted.close()
+                self._pending_trusted = None
+                self._pending_dir_fd = -1
+            except OSError as exc:
+                errors.append(f"pending directory close failed: {exc}")
+        if self._quarantine_trusted is not None:
+            try:
+                self._quarantine_trusted.close()
+                self._quarantine_trusted = None
+            except OSError as exc:
+                errors.append(f"quarantine directory close failed: {exc}")
+        if close_raw and self._raw_trusted is not None:
+            try:
+                self._raw_trusted.close()
+                self._raw_trusted = None
+                self._raw_dir_fd = -1
+            except OSError as exc:
+                errors.append(f"raw directory close failed: {exc}")
+        if errors:
+            raise RawEventPersistenceError("; ".join(errors))
 
     def append_event(self, event: dict[str, Any]) -> None:
         """G4/G6 — Append a raw event with fail-closed lifecycle."""
@@ -1879,7 +2033,7 @@ class RawScanStager:
             self._gzip_handle.write(line.encode("utf-8"))
             self._gzip_handle.flush()
             os.fsync(self._gzip_handle.fileno())
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError, EOFError, gzip.BadGzipFile) as exc:
             self._fail_with_diagnostic("APPEND_EVENT_FSYNC", exc)
         self._events.append(event)
         cid = event.get("requested_condition_id", "")
@@ -1913,15 +2067,21 @@ class RawScanStager:
         # 1. flush
         try:
             self._gzip_handle.flush()
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError, EOFError, gzip.BadGzipFile) as exc:
             self._fail_with_diagnostic("SEAL_FLUSH", exc)
         # 2. close
         try:
             self._gzip_handle.close()
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError, EOFError, gzip.BadGzipFile) as exc:
             self._gzip_handle = None
             self._fail_with_diagnostic("SEAL_GZIP_CLOSE", exc)
         self._gzip_handle = None
+        if self._raw_file is not None:
+            try:
+                self._raw_file.close()
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._fail_with_diagnostic("SEAL_RAW_FILE_CLOSE", exc)
+            self._raw_file = None
         # 3. fsync staging fd
         try:
             os.fsync(self._staging_fd)
@@ -1948,15 +2108,18 @@ class RawScanStager:
         except OSError as exc:
             self._fail_with_diagnostic("SEAL_DIR_FSYNC", exc)
         # 8. strict reread via dup fd
+        reread_fd = -1
         try:
             reread_fd = os.dup(self._staging_fd)
             disk_events = load_raw_events_strict_fd(reread_fd)
             os.close(reread_fd)
-        except (ValueError, OSError) as exc:
-            try:
-                os.close(reread_fd)  # best-effort
-            except OSError:
-                pass
+            reread_fd = -1
+        except (ValueError, OSError, RuntimeError, EOFError, gzip.BadGzipFile) as exc:
+            if reread_fd >= 0:
+                try:
+                    os.close(reread_fd)
+                except OSError as close_exc:
+                    exc = RuntimeError(f"{exc}; reread fd close failed: {close_exc}")
             self._fail_with_diagnostic("SEAL_STRICT_REREAD", exc)
         # 9. verify event count
         if len(disk_events) != len(self._events):
@@ -1971,7 +2134,32 @@ class RawScanStager:
                 disk_condition_ids.add(cid)
         disk_canonical_sha = canonical_events_sha256(disk_events)
         # 10. file_sha256 from fd
-        file_sha = _compute_sha256_from_fd(self._staging_fd)
+        try:
+            file_sha = _compute_sha256_from_fd(self._staging_fd)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._fail_with_diagnostic("SEAL_FILE_HASH", exc)
+        # 10b. Drop the O_RDWR description permanently and reopen by trusted
+        # dir_fd as O_RDONLY. chmod cannot revoke write access from an open fd.
+        writable_fd = self._staging_fd
+        try:
+            os.close(writable_fd)
+            self._staging_fd = -1
+            readonly_fd = os.open(
+                self._staging_name, os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=self._pending_dir_fd,
+            )
+            self._staging_fd = readonly_fd
+            readonly_stat = os.fstat(readonly_fd)
+            if ((readonly_stat.st_dev, readonly_stat.st_ino, readonly_stat.st_size) !=
+                    (st.st_dev, st.st_ino, st.st_size)):
+                raise OSError("sealed inode/dev/size changed during read-only reopen")
+            if statmod.S_IMODE(readonly_stat.st_mode) != 0o444:
+                raise OSError(
+                    f"sealed mode is {oct(statmod.S_IMODE(readonly_stat.st_mode))}, expected 0o444")
+            if _compute_sha256_from_fd(readonly_fd) != file_sha:
+                raise OSError("sealed hash changed during read-only reopen")
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._fail_with_diagnostic("SEAL_READONLY_REOPEN", exc)
         # 11. build SealedRawArtifact
         safe_id = _safe_scan_id(self.scan_id)
         scan_id_hash = hashlib.sha256(self.scan_id.encode("utf-8")).hexdigest()[:12]
@@ -2007,27 +2195,47 @@ class RawScanStager:
             raise StagerStateError("internal: sealed descriptor missing")
         self._transferred = True
         self._ownership_token = str(uuid.uuid4())
+        if self._staging_fd < 0 or self._pending_trusted is None:
+            raise StagerStateError("sealed resources are unavailable for transfer")
+        transfer_fd = self._staging_fd
+        transfer_pending = self._pending_trusted
+        self._staging_fd = -1
+        self._pending_trusted = None
+        self._pending_dir_fd = -1
         self._state = "TRANSFERRED"
         return RawArtifactTransfer(
             sealed=self._sealed_descriptor,
             ownership_token=self._ownership_token,
-            staging_path=self.staging_path,
+            staging_filename=self._staging_name,
+            staging_fd=transfer_fd,
+            pending_directory=transfer_pending,
         )
 
     # ─── G6/G7: fail-closed internal methods ───
 
     def _fail_with_diagnostic(self, stage: str, exc: BaseException) -> NoReturn:
         """G6 — Single route for diagnostic preservation."""
+        secondary_errors: list[str] = []
         if self._gzip_handle is not None:
             try:
                 self._gzip_handle.close()
-            except Exception:
-                pass
-            self._gzip_handle = None
+                self._gzip_handle = None
+            except Exception as close_exc:
+                secondary_errors.append(f"gzip close failed: {close_exc}")
+        if self._raw_file is not None:
+            try:
+                self._raw_file.close()
+                self._raw_file = None
+            except Exception as close_exc:
+                secondary_errors.append(f"raw file close failed: {close_exc}")
+        diagnostic_exc: BaseException = exc
+        if secondary_errors:
+            diagnostic_exc = RuntimeError(f"{exc}; secondary close failures: {'; '.join(secondary_errors)}")
         self._persistence_failure = True
         if self._write_attempted or self._seal_started:
             try:
-                self._preserve_diagnostic_evidence(stage, exc)
+                self._preserve_diagnostic_evidence(stage, diagnostic_exc)
+                self._close_resources_strict()
                 self._state = "ABORTED_WITH_DIAGNOSTIC_EVIDENCE"
             except Exception as diag_exc:
                 self._state = "BLOCKED_DIAGNOSTIC_PERSISTENCE"
@@ -2047,23 +2255,29 @@ class RawScanStager:
 
     def _delete_staging_safely(self) -> None:
         """G4 — Delete staging via dir_fd. Does NOT silence errors."""
-        if self._staging_fd < 0 or not self._staging_name:
+        if not self._staging_name:
             return
-        # Close staging fd first
         if self._staging_fd >= 0:
             try:
                 os.close(self._staging_fd)
-            except OSError:
-                pass
+            except OSError as exc:
+                raise RawEventPersistenceError(
+                    f"failed to close staging {self._staging_name}: {exc}") from exc
             self._staging_fd = -1
-        # Unlink via dir_fd
         try:
             os.unlink(self._staging_name, dir_fd=self._pending_dir_fd)
         except FileNotFoundError:
-            pass  # Already deleted
+            return
         except OSError as exc:
             raise RawEventPersistenceError(
                 f"failed to unlink staging {self._staging_name}: {exc}"
+            ) from exc
+        try:
+            os.fsync(self._pending_dir_fd)
+        except OSError as exc:
+            raise RawEventPersistenceError(
+                f"staging file {self._staging_name} was deleted; "
+                f"durability of deletion not confirmed: {exc}"
             ) from exc
 
     def _preserve_diagnostic_evidence(self, stage: str, exc: BaseException) -> None:
@@ -2082,9 +2296,9 @@ class RawScanStager:
             os.fchmod(self._staging_fd, 0o444)
             os.fsync(self._staging_fd)
         except OSError as inner_exc:
-            # If fchmod fails, evidence is not read-only — still proceed
-            # but note the failure
-            pass
+            raise DiagnosticPersistenceError(
+                f"cannot make diagnostic evidence immutable and durable: {inner_exc}"
+            ) from inner_exc
         # fsync .pending directory
         try:
             os.fsync(self._pending_dir_fd)
@@ -2134,9 +2348,14 @@ class RawScanStager:
                     dir_fd=self._raw_dir_fd,
                 )
             except OSError as inner_exc:
-                if exc.errno == errno.ELOOP:
+                if inner_exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise PathSafetyError(".quarantine is a symlink") from inner_exc
                 raise
+            quarantine_stat = os.fstat(quarantine_dir_fd)
+            self._quarantine_trusted = TrustedDirectory(
+                path=self.raw_dir / ".quarantine", fd=quarantine_dir_fd,
+                st_dev=quarantine_stat.st_dev, st_ino=quarantine_stat.st_ino,
+            )
 
             # G6: hardlink staging → quarantine (no-replace)
             quarantine_name = f"{base_name}.{uuid.uuid4().hex[:8]}.quarantined"
@@ -2162,6 +2381,7 @@ class RawScanStager:
             quarantine_fsynced = True
 
             # G6: verify quarantine hardlink exists and matches
+            q_verify_fd = -1
             try:
                 q_verify_fd = os.open(
                     quarantine_name,
@@ -2169,11 +2389,13 @@ class RawScanStager:
                     dir_fd=quarantine_dir_fd,
                 )
                 q_st = os.fstat(q_verify_fd)
-                os.close(q_verify_fd)
                 if q_st.st_dev != staging_dev or q_st.st_ino != staging_ino:
                     raise OSError("quarantine hardlink inode/dev mismatch")
             except OSError as inner_exc:
                 raise OSError(f"quarantine verify failed: {inner_exc}") from inner_exc
+            finally:
+                if q_verify_fd >= 0:
+                    os.close(q_verify_fd)
 
             # G6: unlink staging from pending
             try:
@@ -2192,23 +2414,59 @@ class RawScanStager:
             secondary_evidence_location = None
             secondary_evidence_filename = None
 
-        except OSError as inner_exc:
-            # Hardlink/move failed — staging stays in pending
-            if not pending_fsynced:
+        except (OSError, ValueError, RuntimeError, EOFError, gzip.BadGzipFile) as inner_exc:
+            # Resolve location from completed transitions, never from intent.
+            if pending_unlinked:
+                if not link_created or not quarantine_fsynced:
+                    raise DiagnosticPersistenceError(
+                        "pending link removed but quarantine durability is unconfirmed"
+                    ) from inner_exc
+                evidence_location = "QUARANTINE"
+                evidence_filename = quarantine_name
+                secondary_evidence_location = None
+                secondary_evidence_filename = None
+            elif not pending_fsynced:
                 try:
                     os.fsync(self._pending_dir_fd)
                 except OSError:
                     raise OSError(
                         f"cannot ensure staging durability in pending: {inner_exc}"
                     ) from inner_exc
-            evidence_location = "PENDING"
-            evidence_filename = staging_name
-            if link_created and quarantine_name:
-                secondary_evidence_location = "QUARANTINE"
-                secondary_evidence_filename = quarantine_name
+                evidence_location = "PENDING"
+                evidence_filename = staging_name
+                if link_created and quarantine_name:
+                    secondary_evidence_location = "QUARANTINE"
+                    secondary_evidence_filename = quarantine_name
+            else:
+                evidence_location = "PENDING"
+                evidence_filename = staging_name
+                if link_created and quarantine_name:
+                    secondary_evidence_location = "QUARANTINE"
+                    secondary_evidence_filename = quarantine_name
+
+        # Verify the selected primary evidence by fd before naming it in a
+        # diagnostic record.
+        primary_dir_fd = (
+            quarantine_dir_fd if evidence_location == "QUARANTINE"
+            else self._pending_dir_fd
+        )
+        if primary_dir_fd < 0:
+            raise DiagnosticPersistenceError("primary evidence directory fd unavailable")
+        evidence_fd = os.open(
+            evidence_filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=primary_dir_fd)
+        try:
+            evidence_stat = os.fstat(evidence_fd)
+            if not statmod.S_ISREG(evidence_stat.st_mode):
+                raise DiagnosticPersistenceError("primary evidence is not a regular file")
+            if ((evidence_stat.st_dev, evidence_stat.st_ino, evidence_stat.st_size) !=
+                    (staging_dev, staging_ino, staging_size)):
+                raise DiagnosticPersistenceError("primary evidence inode/dev/size mismatch")
+            if statmod.S_IMODE(evidence_stat.st_mode) != 0o444:
+                raise DiagnosticPersistenceError("primary evidence mode is not 0o444")
+            if _compute_sha256_from_fd(evidence_fd) != staging_sha:
+                raise DiagnosticPersistenceError("primary evidence SHA-256 mismatch")
         finally:
-            if quarantine_dir_fd >= 0:
-                os.close(quarantine_dir_fd)
+            os.close(evidence_fd)
 
         # Build diagnostic dict
         txn_uuid = str(uuid.uuid4())
@@ -2240,16 +2498,7 @@ class RawScanStager:
         diag_bytes = canonical_json_bytes(diag_dict)
 
         # Write diagnostic JSON via O_EXCL temp + hardlink (no-replace)
-        diag_dir_fd = quarantine_dir_fd if evidence_location == "QUARANTINE" else self._pending_dir_fd
-        # Reopen the appropriate dir fd (quarantine_dir_fd was closed above)
-        if evidence_location == "QUARANTINE":
-            diag_dir_fd = os.open(
-                ".quarantine",
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=self._raw_dir_fd,
-            )
-        else:
-            diag_dir_fd = self._pending_dir_fd
+        diag_dir_fd = primary_dir_fd
         try:
             diag_name = f"diagnostic_{txn_uuid}.json"
             temp_name = f"{diag_name}.tmp.{uuid.uuid4().hex}"
@@ -2275,15 +2524,38 @@ class RawScanStager:
                 os.link(temp_name, final_diag_name,
                         src_dir_fd=diag_dir_fd, dst_dir_fd=diag_dir_fd)
             except FileExistsError:
-                final_diag_name = f"{diag_name}.{uuid.uuid4().hex[:8]}"
+                final_diag_name = f"diagnostic_{txn_uuid}.{uuid.uuid4().hex[:8]}.json"
                 os.link(temp_name, final_diag_name,
                         src_dir_fd=diag_dir_fd, dst_dir_fd=diag_dir_fd)
             os.fsync(diag_dir_fd)
             os.unlink(temp_name, dir_fd=diag_dir_fd)
             os.fsync(diag_dir_fd)
+            final_fd = os.open(
+                final_diag_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=diag_dir_fd)
+            try:
+                final_bytes = b""
+                while True:
+                    chunk = os.read(final_fd, 65536)
+                    if not chunk:
+                        break
+                    final_bytes += chunk
+            finally:
+                os.close(final_fd)
+            parsed_diag = json.loads(final_bytes.decode("utf-8"))
+            if compute_diagnostic_integrity_sha256(parsed_diag) != parsed_diag.get(
+                    "diagnostic_integrity_sha256"):
+                raise DiagnosticPersistenceError("diagnostic integrity reread failed")
+            if (parsed_diag.get("evidence_location") != evidence_location or
+                    parsed_diag.get("evidence_filename") != evidence_filename):
+                raise DiagnosticPersistenceError("diagnostic evidence location reread failed")
+            os.fsync(diag_dir_fd)
         finally:
-            if evidence_location == "QUARANTINE":
-                os.close(diag_dir_fd)
+            if quarantine_dir_fd >= 0:
+                if self._quarantine_trusted is not None:
+                    self._quarantine_trusted.close()
+                    self._quarantine_trusted = None
+                else:
+                    os.close(quarantine_dir_fd)
 
         self._diagnostic_evidence = (evidence_location, evidence_filename)
 
@@ -2310,6 +2582,22 @@ class EligibilityState:
     first_eligible_scan_id: str | None
     first_persistible_data_api_request_at: str | None
     state_sha256: str
+
+
+def _validate_utc_timestamp(value: Any, field_name: str,
+                            error_type: type[Exception] = ValueError) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise error_type(f"{field_name} must be a non-empty string")
+    if not _ISO_8601_RE.fullmatch(value):
+        raise error_type(f"{field_name} must include an explicit timezone: {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise error_type(f"{field_name} invalid ISO 8601: {value!r}: {exc}") from exc
+    offset = parsed.utcoffset()
+    if offset is None or offset != timedelta(0):
+        raise error_type(f"{field_name} must be UTC, got offset {offset}: {value!r}")
+    return parsed
 
 
 def _read_eligibility_via_fd(dir_fd: int) -> EligibilityState | None:
@@ -2372,18 +2660,8 @@ def _read_eligibility_via_fd(dir_fd: int) -> EligibilityState | None:
         raise EligibilityCorruptionError(
             f"first_persistible_data_api_request_at must be non-empty string, got {rat!r}"
         )
-    try:
-        normalized = rat.replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as inner_exc:
-        raise EligibilityCorruptionError(
-            f"first_persistible_data_api_request_at invalid ISO 8601: {rat!r}: {inner_exc}"
-        ) from inner_exc
-    offset = parsed.utcoffset()
-    if offset is None or offset != timedelta(0):
-        raise EligibilityCorruptionError(
-            f"first_persistible_data_api_request_at must be UTC, got offset {offset}: {rat!r}"
-        )
+    _validate_utc_timestamp(
+        rat, "first_persistible_data_api_request_at", EligibilityCorruptionError)
     if not isinstance(obj["state_sha256"], str) or not _HEX64_RE.match(obj["state_sha256"]):
         raise EligibilityCorruptionError(
             f"state_sha256 must be 64-char hex, got {obj['state_sha256']!r}"
@@ -2423,16 +2701,10 @@ def mark_first_eligible_scan_seen_under_lock(
     assert_guard_valid(guard, directory, prefix)
     if not isinstance(first_eligible_scan_id, str) or not first_eligible_scan_id:
         raise ValueError("first_eligible_scan_id must be non-empty string")
-    if not isinstance(first_persistible_data_api_request_at, str) or not first_persistible_data_api_request_at:
-        raise ValueError("first_persistible_data_api_request_at must be non-empty string")
-    try:
-        normalized = first_persistible_data_api_request_at.replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ValueError(f"first_persistible_data_api_request_at invalid ISO 8601: {inner_exc}") from inner_exc
-    offset = parsed.utcoffset()
-    if offset is None or offset != timedelta(0):
-        raise ValueError(f"first_persistible_data_api_request_at must be UTC, got offset {offset}")
+    _validate_utc_timestamp(
+        first_persistible_data_api_request_at,
+        "first_persistible_data_api_request_at",
+    )
     dir_fd = guard.trusted.fd
     existing = _read_eligibility_via_fd(dir_fd)
     if existing is not None:
@@ -2458,35 +2730,61 @@ def mark_first_eligible_scan_seen_under_lock(
         0o644,
         dir_fd=dir_fd,
     )
+    temp_file = None
     try:
-        with os.fdopen(temp_fd, "wb") as f:
+        temp_file = os.fdopen(temp_fd, "wb")
+        temp_fd = -1
+        with temp_file as f:
             f.write(canonical)
             f.flush()
             os.fsync(f.fileno())
-    except Exception:
+    except Exception as exc:
+        if temp_fd >= 0:
+            os.close(temp_fd)
         try:
             os.unlink(temp_name, dir_fd=dir_fd)
+            os.fsync(dir_fd)
         except FileNotFoundError:
             pass
-        raise
+        except OSError as cleanup_exc:
+            raise MarkerCreateCleanupPending(
+                f"eligibility temp write failed and cleanup is pending: {cleanup_exc}"
+            ) from cleanup_exc
+        raise exc
+    final_created = False
     try:
         os.link(temp_name, ELIGIBILITY_FILENAME,
                 src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        final_created = True
     except FileExistsError:
         try:
             os.unlink(temp_name, dir_fd=dir_fd)
+            os.fsync(dir_fd)
         except FileNotFoundError:
             pass
         existing = _read_eligibility_via_fd(dir_fd)
         if existing is not None and existing.first_eligible_scan_seen is True:
             return existing
         raise EligibilityCorruptionError("concurrent eligibility write resulted in unexpected state")
-    finally:
+    except Exception as exc:
         try:
             os.unlink(temp_name, dir_fd=dir_fd)
+            os.fsync(dir_fd)
         except FileNotFoundError:
             pass
-    os.fsync(dir_fd)
+        except OSError as cleanup_exc:
+            raise MarkerCreateCleanupPending(
+                f"eligibility hardlink failed and temp cleanup is pending: {cleanup_exc}"
+            ) from cleanup_exc
+        raise exc
+    if final_created:
+        try:
+            os.unlink(temp_name, dir_fd=dir_fd)
+            os.fsync(dir_fd)
+        except OSError as exc:
+            raise MarkerCreateCleanupPending(
+                f"eligibility committed; cleanup/durability pending: {exc}"
+            ) from exc
     return EligibilityState(
         schema_version=body["schema_version"],
         first_eligible_scan_seen=body["first_eligible_scan_seen"],
@@ -2508,7 +2806,7 @@ def marker_filename(prefix: str, sequence: int, transaction_uuid: str) -> str:
     try:
         u = uuid.UUID(transaction_uuid)
     except ValueError as exc:
-        raise ValueError(f"transaction_uuid invalid UUID: {inner_exc}") from inner_exc
+        raise ValueError(f"transaction_uuid invalid UUID: {exc}") from exc
     if u.version != 4:
         raise ValueError(f"transaction_uuid must be UUID version 4, got version {u.version}")
     return f"{prefix}_txn_{sequence:06d}_{transaction_uuid}.marker"
@@ -2584,4 +2882,3 @@ def _dir_fsync(directory: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-
