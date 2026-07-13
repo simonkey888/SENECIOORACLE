@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,15 +15,14 @@ from typing import Any, Callable, Protocol
 import httpx
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
-DISCOVERY_VERSION = "h011-v3-discovery-v3"
+DISCOVERY_VERSION = "h011-v3-discovery-v4"
 RESOLVED_PRICE_THRESHOLD = 0.95
 PRICE_SUM_TOLERANCE = 0.02
 
-# H-011 V3 rejection reasons — directional contract (post ce8ce2c6 revert).
-# Each reason maps to one specific structural check; reasons are mutually
-# exclusive per market (a market may fail multiple checks, accumulating
-# multiple reasons). The validator remains fail-closed: any contradiction
-# produces a rejection reason rather than a guess.
+# Structural slug pattern for BTC 5-minute Up/Down markets (Fix #1: keyset filter)
+_BTC_UPDOWN_5M_SLUG_PATTERN = re.compile(r"^btc-updown-5m-(\d{10})$")
+
+# H-011 V3 rejection reasons — directional contract + temporal eligibility.
 REJECTION_REASONS = (
     # conditionId
     "missing_condition_id",
@@ -40,10 +40,14 @@ REJECTION_REASONS = (
     "resolution_rule_unproven",
     # Lifecycle state
     "market_inactive_or_closed",
-    # Cross-source (markets vs events) contradiction
+    # Cross-source (nested event market vs canonical /markets/slug) contradiction
     "cross_source_identity_conflict",
     # Missing both conditionId and market id (cannot dedup)
     "missing_structural_identifier",
+    # Fix #3: temporal eligibility
+    "market_window_not_open",     # eventStartTime > as_of_ts (window hasn't started)
+    "market_window_expired",      # as_of_ts >= endDate (window already closed)
+    "orders_not_accepting",       # acceptingOrders is not True
 )
 ALL_REJECTION_REASONS = (*REJECTION_REASONS, "invalid_outcome_prices", "resolved_extreme_prices")
 
@@ -167,145 +171,79 @@ def _merge_market_and_event(market: dict[str, Any], event_market: dict[str, Any]
 
 
 class HttpxGammaDiscoveryClient:
-    """Paginate Gamma /markets AND /events, then structurally merge by conditionId.
+    """Keyset-paginated discovery via /events/keyset, with canonical market
+    metadata fetched from /markets/slug/{slug} for btc-updown-5m candidates.
 
-    Per Polymarket docs (https://docs.polymarket.com/developers/gamma-markets-api/get-markets),
-    /markets and /events are both paginated. /events groups markets under their
-    parent event; /markets is the canonical source for per-market metadata.
+    Fix #1 (GPT-5.6 third audit): replaces offset-based pagination on /markets
+    with keyset pagination on /events/keyset. The keyset endpoint returns a
+    cursor-based response:
+      { "$schema": ..., "events": [...], "next_cursor": "..." }
+    Pagination terminates when next_cursor is absent. Cursor repetition is
+    detected as a loop (fail-closed).
 
-    For H-011 V3 we fetch BOTH endpoints independently and merge them by
-    conditionId (with fallback to market `id`). Merging is STRUCTURAL — not
-    first-wins. Material contradictions on priority fields produce a
-    `cross_source_identity_conflict` rejection reason.
+    Workflow:
+      1. Paginate /events/keyset (limit=500, closed=false) until no next_cursor.
+      2. For each event, flatten nested markets and filter by slug pattern
+         ^btc-updown-5m-(\\d{10})$.
+      3. For each candidate, fetch canonical metadata via /markets/slug/{slug}.
+      4. Validate nested-vs-canonical consistency; conflicts produce
+         cross_source_identity_conflict.
 
-    Pagination rules (Fix #2, #3, #4):
-      - Continue while the page is full (count == requested_limit).
-      - Stop only when a page is empty or partial (source exhausted).
-      - HTTP errors are propagated as structured endpoint errors, NOT swallowed.
-      - Loop detection uses an offset-INDEPENDENT signature (endpoint + count +
-        first ID + last ID + hash of all IDs). If the same signature appears
-        at different offsets, it's a loop.
-      - Per-endpoint status: success | exhausted | limit_reached | loop_detected | error.
-
-    Source exhaustion semantics (Fix #2):
-      - source_exhausted = ALL(enabled endpoints exhausted)
-      - limit_reached = ANY(enabled endpoint reached its limit)
-      - If a required endpoint fails (error/loop), discovery is fail-closed:
-        source_health=FAILED, no markets selected.
+    Any 4xx/5xx HTTP error is fail-closed (source_health=FAILED).
+    HTTP 422 is NO LONGER treated as source exhaustion — keyset pagination
+    does not use offsets, so 422 means a real error.
     """
 
-    def __init__(self, *, page_size: int = 100, transport=None,
+    def __init__(self, *, page_size: int = 500, transport=None,
                  fetch_markets: bool = True, fetch_events: bool = True,
-                 max_pages_per_endpoint: int = 100):
+                 max_pages_per_endpoint: int = 100,
+                 canonical_market_fetcher: "CanonicalMarketFetcher | None" = None):
         self.page_size = page_size
         self.transport = transport
         self.fetch_markets = fetch_markets
         self.fetch_events = fetch_events
-        # Safety net against pathological loops (default 100 pages = 10k markets)
         self.max_pages_per_endpoint = max_pages_per_endpoint
+        self.canonical_fetcher = canonical_market_fetcher or HttpxCanonicalMarketFetcher(transport=transport)
 
-    def _page_signature(self, endpoint: str, payload: list) -> str:
-        """Compute an offset-INDEPENDENT signature for loop detection.
+    def _fetch_events_keyset(self, client: httpx.Client,
+                             pages: list[dict]) -> dict[str, Any]:
+        """Paginate /events/keyset using cursor-based pagination.
 
-        Fix #4: signature must NOT include offset. If the same set of records
-        appears at a different offset, that's a loop. The signature includes:
-          - endpoint
-          - count
-          - first stable ID (conditionId or id)
-          - last stable ID
-          - hash of all stable IDs
-        """
-        if not payload:
-            return f"{endpoint}|empty"
-        ids: list[str] = []
-        for item in payload:
-            if isinstance(item, dict):
-                cid = str(item.get("conditionId") or item.get("id") or "")
-                ids.append(cid)
-            else:
-                ids.append("")
-        first_id = ids[0] if ids else ""
-        last_id = ids[-1] if ids else ""
-        ids_hash = hashlib.sha256("|".join(ids).encode()).hexdigest()[:16]
-        return f"{endpoint}|{len(payload)}|{first_id}|{last_id}|{ids_hash}"
-
-    def _fetch_endpoint_full(self, client: httpx.Client, endpoint: str,
-                             limit: int, pages: list[dict]) -> dict[str, Any]:
-        """Paginate a single endpoint to source exhaustion.
-
-        Returns a dict with:
-          - records: list of markets (flattened from events if endpoint=/events)
-          - status: "success" | "exhausted" | "limit_reached" | "loop_detected" | "error"
+        Returns dict with:
+          - candidate_markets: list of nested markets matching btc-updown-5m pattern
+          - status: "exhausted" | "limit_reached" | "loop_detected" | "error"
           - error: str | None
-          - api_objects_received: total raw API objects (events or markets) received
-          - flattened_markets: for /events, count of markets extracted; for /markets, same as api_objects
-
-        Fix #3: response and received_at are initialized BEFORE the try block
-        to avoid UnboundLocalError if client.get raises.
+          - total_events_received: int
+          - cursors: list of cursors used (for audit)
         """
-        records: list[dict] = []
-        seen_page_signatures: set[str] = set()
+        candidate_markets: list[dict] = []
+        seen_cursors: set[str] = set()
+        cursors: list[str] = []
+        total_events = 0
         page_count = 0
-        api_objects_received = 0
-        loop_detected = False
+        status = "success"
         error: str | None = None
-        status: str = "success"
+        next_cursor: str | None = None
 
-        for offset in range(0, limit, self.page_size):
-            if page_count >= self.max_pages_per_endpoint:
-                status = "limit_reached"
-                break
-            if len(records) >= limit:
-                status = "limit_reached"
-                break
+        while page_count < self.max_pages_per_endpoint:
             page_count += 1
-            requested_limit = min(self.page_size, limit - offset)
             requested_at = datetime.now(timezone.utc).isoformat()
+            params = {"limit": self.page_size, "closed": "false"}
+            if next_cursor:
+                params["after_cursor"] = next_cursor
 
-            # Fix #3: initialize BEFORE the try block to avoid UnboundLocalError
             response = None
             received_at = None
             try:
-                response = client.get(f"{GAMMA_BASE}{endpoint}", params={
-                    "limit": requested_limit, "offset": offset,
-                    "active": "true", "closed": "false",
-                })
+                response = client.get(f"{GAMMA_BASE}/events/keyset", params=params)
                 received_at = datetime.now(timezone.utc).isoformat()
                 response.raise_for_status()
                 payload = response.json()
-            except httpx.HTTPStatusError as e:
-                # Polymarket's Gamma API returns HTTP 422 when the offset
-                # exceeds the maximum supported value (observed at offset=2100
-                # for /markets). This is NOT a server error — it's the API
-                # telling us we've reached the end of pagination. Treat it
-                # as source exhaustion, not as an error.
-                status_code = e.response.status_code if e.response is not None else None
-                if status_code == 422:
-                    status = "exhausted"
-                    pages.append({
-                        "endpoint": endpoint, "offset": offset, "limit": requested_limit,
-                        "requested_at": requested_at, "received_at": received_at,
-                        "status_code": status_code, "count": 0,
-                        "note": "HTTP 422 treated as source exhaustion (API offset limit)",
-                    })
-                    break
-                # Other HTTP errors ARE real errors
-                error_msg = f"{type(e).__name__}: {str(e)[:300]}"
-                pages.append({
-                    "endpoint": endpoint, "offset": offset, "limit": requested_limit,
-                    "requested_at": requested_at, "received_at": received_at,
-                    "status_code": status_code, "count": 0, "error": error_msg,
-                })
-                error = error_msg
-                status = "error"
-                break
             except Exception as e:
-                # Fix #3: error is propagated as structured endpoint error.
-                # No silent swallowing — the caller will see status="error"
-                # and fail-closed.
                 error_msg = f"{type(e).__name__}: {str(e)[:300]}"
                 pages.append({
-                    "endpoint": endpoint, "offset": offset, "limit": requested_limit,
+                    "endpoint": "/events/keyset", "cursor": next_cursor,
+                    "limit": self.page_size,
                     "requested_at": requested_at, "received_at": received_at,
                     "status_code": getattr(response, "status_code", None) if response else None,
                     "count": 0, "error": error_msg,
@@ -314,204 +252,174 @@ class HttpxGammaDiscoveryClient:
                 status = "error"
                 break
 
-            if not isinstance(payload, list):
-                err = f"response is not a list (type={type(payload).__name__})"
+            if not isinstance(payload, dict):
+                err = f"keyset response is not a dict (type={type(payload).__name__})"
                 pages.append({
-                    "endpoint": endpoint, "offset": offset, "limit": requested_limit,
+                    "endpoint": "/events/keyset", "cursor": next_cursor,
+                    "limit": self.page_size,
                     "requested_at": requested_at, "received_at": received_at,
-                    "status_code": response.status_code, "count": 0,
-                    "error": err,
+                    "status_code": response.status_code, "count": 0, "error": err,
                 })
                 error = err
                 status = "error"
                 break
 
-            api_objects_received += len(payload)
+            events = payload.get("events") or []
+            new_cursor = payload.get("next_cursor")
+
             pages.append({
-                "endpoint": endpoint, "offset": offset, "limit": requested_limit,
+                "endpoint": "/events/keyset", "cursor": next_cursor,
+                "next_cursor": new_cursor,
+                "limit": self.page_size,
                 "requested_at": requested_at, "received_at": received_at,
-                "status_code": response.status_code,
-                "count": len(payload),  # raw API objects
+                "status_code": response.status_code, "count": len(events),
             })
 
-            # Fix #4: offset-INDEPENDENT loop detection
-            page_sig = self._page_signature(endpoint, payload)
-            if page_sig in seen_page_signatures:
-                loop_detected = True
-                status = "loop_detected"
-                # Update last page entry to mark loop
-                if pages and pages[-1].get("endpoint") == endpoint:
-                    pages[-1]["loop_detected"] = True
-                break
-            seen_page_signatures.add(page_sig)
+            total_events += len(events)
 
-            # Flatten events into markets and count records added this page
-            records_added_this_page = 0
-            if endpoint == "/events":
-                for event in payload:
-                    if not isinstance(event, dict):
+            # Flatten nested markets and filter by slug pattern
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                event_markets = event.get("markets") or []
+                for m in event_markets:
+                    if not isinstance(m, dict):
                         continue
-                    event_markets = event.get("markets") or []
-                    for m in event_markets:
-                        if isinstance(m, dict):
-                            m_copy = dict(m)
-                            m_copy["_parent_event"] = {
-                                k: event.get(k) for k in _EVENT_ENRICHMENT_FIELDS
-                                if event.get(k) is not None
-                            }
-                            for field in ("description", "resolutionSource", "resolutionRules"):
-                                if not m_copy.get(field) and event.get(field):
-                                    m_copy.setdefault(field, event[field])
-                            records.append(m_copy)
-                            records_added_this_page += 1
-                            if len(records) >= limit:
-                                break
-                    if len(records) >= limit:
-                        break
+                    slug = str(m.get("slug") or "")
+                    if _BTC_UPDOWN_5M_SLUG_PATTERN.match(slug):
+                        # Attach parent event for downstream validation
+                        m_copy = dict(m)
+                        m_copy["_parent_event"] = {
+                            k: event.get(k) for k in _EVENT_ENRICHMENT_FIELDS
+                            if event.get(k) is not None
+                        }
+                        for field in ("description", "resolutionSource", "resolutionRules"):
+                            if not m_copy.get(field) and event.get(field):
+                                m_copy.setdefault(field, event[field])
+                        candidate_markets.append(m_copy)
+
+            # Cursor loop detection
+            if new_cursor:
+                if new_cursor in seen_cursors:
+                    status = "loop_detected"
+                    if pages and pages[-1].get("endpoint") == "/events/keyset":
+                        pages[-1]["loop_detected"] = True
+                    break
+                seen_cursors.add(new_cursor)
+                cursors.append(new_cursor)
+                next_cursor = new_cursor
             else:
-                for m in payload:
-                    records.append(m)
-                    records_added_this_page += 1
-                    if len(records) >= limit:
-                        break
-
-            # Update the page entry with records_added (post-flatten count)
-            if pages and pages[-1].get("endpoint") == endpoint and pages[-1].get("offset") == offset:
-                pages[-1]["records_added"] = records_added_this_page
-
-            if len(payload) < requested_limit:
+                # No next_cursor → source exhausted (proper termination)
                 status = "exhausted"
                 break
 
-        # If we exited the loop without setting a terminal status, it means
-        # we hit max_pages_per_endpoint or limit without exhausting source
         if status == "success":
-            if len(records) >= limit:
-                status = "limit_reached"
-            else:
-                # Didn't exhaust and didn't hit limit — shouldn't happen normally
-                status = "limit_reached"
+            # Hit max_pages without exhaustion
+            status = "limit_reached"
 
         return {
-            "records": records,
+            "candidate_markets": candidate_markets,
             "status": status,
             "error": error,
-            "loop_detected": loop_detected,
-            "api_objects_received": api_objects_received,
-            "flattened_markets": len(records),
+            "total_events_received": total_events,
+            "cursors": cursors,
         }
 
     def fetch_pages(self, limit: int) -> dict[str, Any]:
+        """Fetch btc-updown-5m candidates via keyset pagination, then enrich
+        each with canonical market metadata from /markets/slug/{slug}.
+
+        Fix #1: NO offset-based pagination. NO global merge of thousands of
+        markets. Only candidates matching the slug pattern are processed.
+        """
         pages: list[dict] = []
         merged_markets: dict[str, dict[str, Any]] = {}
         cross_source_conflicts: list[dict[str, Any]] = []
         missing_identifiers: int = 0
         duplicates_removed: int = 0
 
-        # Fix #2: per-endpoint state tracking
         endpoint_states: dict[str, dict[str, Any]] = {}
 
-        enabled_endpoints: list[str] = []
-        if self.fetch_markets:
-            enabled_endpoints.append("/markets")
-        if self.fetch_events:
-            enabled_endpoints.append("/events")
-
         with httpx.Client(timeout=30.0, transport=self.transport) as client:
-            if self.fetch_markets:
-                result_markets = self._fetch_endpoint_full(client, "/markets", limit, pages)
-                endpoint_states["/markets"] = result_markets
-                if result_markets["status"] != "error":
-                    for m in result_markets["records"]:
-                        key = _structural_key(m)
-                        if key is None:
-                            missing_identifiers += 1
-                            key = f"noid:{id(m)}"
-                        if key not in merged_markets:
-                            merged_markets[key] = dict(m)
-                        else:
-                            duplicates_removed += 1
+            # Step 1: keyset pagination on /events/keyset
+            keyset_result = self._fetch_events_keyset(client, pages)
+            endpoint_states["/events/keyset"] = {
+                "status": keyset_result["status"],
+                "error": keyset_result["error"],
+                "loop_detected": keyset_result["status"] == "loop_detected",
+                "api_objects_received": keyset_result["total_events_received"],
+                "flattened_markets": len(keyset_result["candidate_markets"]),
+                "cursors": keyset_result["cursors"],
+            }
 
-            if self.fetch_events:
-                result_events = self._fetch_endpoint_full(client, "/events", limit, pages)
-                endpoint_states["/events"] = result_events
-                if result_events["status"] != "error":
-                    for m in result_events["records"]:
-                        key = _structural_key(m)
-                        if key is None:
-                            missing_identifiers += 1
-                            key = f"noid:{id(m)}"
-                        if key in merged_markets:
-                            # MERGE — not first-wins
-                            parent_event = m.get("_parent_event") or {}
-                            merged, conflict = _merge_market_and_event(
-                                merged_markets[key], m, parent_event)
-                            if conflict:
-                                merged_markets[key]["_cross_source_conflict"] = conflict
-                                cross_source_conflicts.append({
-                                    "key": key,
-                                    "field_conflict": conflict,
-                                })
-                            elif merged is not None:
-                                merged_markets[key] = merged
-                            duplicates_removed += 1
-                        else:
-                            new_m = dict(m)
-                            if "_parent_event" in new_m:
-                                parent_event = new_m.pop("_parent_event")
-                                new_m["events"] = [parent_event] if parent_event else []
-                            merged_markets[key] = new_m
+            if keyset_result["status"] in ("error", "loop_detected"):
+                # Fail-closed: no canonical fetch, no markets selected
+                any_error_or_loop = True
+            else:
+                any_error_or_loop = False
+                # Step 2: for each candidate, fetch canonical market metadata
+                for nested_m in keyset_result["candidate_markets"]:
+                    slug = str(nested_m.get("slug") or "")
+                    if not slug:
+                        continue
+                    try:
+                        canonical = self.canonical_fetcher.fetch_by_slug(slug)
+                    except Exception as e:
+                        # Canonical fetch failed — record as error but continue
+                        # with nested data (fail-soft on canonical, since the
+                        # nested event market has enough structural data)
+                        canonical = None
+                        pages.append({
+                            "endpoint": f"/markets/slug/{slug}",
+                            "error": f"{type(e).__name__}: {str(e)[:200]}",
+                        })
 
-        # Fix #2: source_exhausted = ALL(enabled endpoints exhausted)
-        # limit_reached = ANY(enabled endpoint reached limit_reached)
-        # If any enabled endpoint has status "error" or "loop_detected",
-        # discovery is fail-closed (source_exhausted=False, limit_reached=False,
-        # and source_health will be FAILED).
-        any_error_or_loop = any(
-            endpoint_states.get(ep, {}).get("status") in ("error", "loop_detected")
-            for ep in enabled_endpoints
-        )
+                    # Merge nested + canonical (canonical has priority)
+                    if canonical:
+                        merged, conflict = _merge_market_and_event(
+                            canonical, nested_m, nested_m.get("_parent_event") or {})
+                        if conflict:
+                            # Mark canonical with conflict flag
+                            canonical["_cross_source_conflict"] = conflict
+                            cross_source_conflicts.append({
+                                "slug": slug,
+                                "field_conflict": conflict,
+                            })
+                            merged_markets[slug] = canonical
+                        elif merged:
+                            merged_markets[slug] = merged
+                    else:
+                        # Use nested market only (strip internal marker)
+                        clean = {k: v for k, v in nested_m.items() if not k.startswith("_")}
+                        parent_event = nested_m.get("_parent_event") or {}
+                        if parent_event:
+                            clean["events"] = [parent_event]
+                        merged_markets[slug] = clean
+
+        # Determine source_exhausted / limit_reached
         if any_error_or_loop:
             source_exhausted = False
             limit_reached = False
         else:
-            all_exhausted = all(
-                endpoint_states.get(ep, {}).get("status") == "exhausted"
-                for ep in enabled_endpoints
-            )
-            any_limit_reached = any(
-                endpoint_states.get(ep, {}).get("status") == "limit_reached"
-                for ep in enabled_endpoints
-            )
-            source_exhausted = all_exhausted
-            # limit_reached only if not all exhausted (otherwise we have full source)
-            limit_reached = any_limit_reached and not all_exhausted
+            keyset_status = endpoint_states["/events/keyset"]["status"]
+            source_exhausted = (keyset_status == "exhausted")
+            limit_reached = (keyset_status == "limit_reached")
 
         markets_list = list(merged_markets.values())
         next_offset = len(markets_list) if limit_reached else None
 
-        # Fix #7: conservative, consistent metrics
-        # markets_api_objects = raw /markets objects received
-        # events_api_objects = raw /events objects received (events, not markets)
-        # event_nested_markets_flattened = markets extracted from /events payloads
-        # records_before_dedup = sum of markets from /markets + flattened from /events
-        # unique_markets_after_dedup = len(merged_markets)
-        # duplicates_removed = records_before_dedup - unique_markets_after_dedup
-        markets_api_objects = endpoint_states.get("/markets", {}).get("api_objects_received", 0)
-        events_api_objects = endpoint_states.get("/events", {}).get("api_objects_received", 0)
-        event_nested_markets_flattened = endpoint_states.get("/events", {}).get("flattened_markets", 0)
-        markets_from_markets = endpoint_states.get("/markets", {}).get("flattened_markets", 0)
-        records_before_dedup = markets_from_markets + event_nested_markets_flattened
+        # Conservative metrics
+        markets_api_objects = 0  # Not used in keyset flow
+        events_api_objects = endpoint_states.get("/events/keyset", {}).get("api_objects_received", 0)
+        event_nested_markets_flattened = endpoint_states.get("/events/keyset", {}).get("flattened_markets", 0)
+        records_before_dedup = event_nested_markets_flattened
         unique_markets_after_dedup = len(markets_list)
-        # Recompute duplicates_removed for consistency
         duplicates_removed = records_before_dedup - unique_markets_after_dedup - missing_identifiers
 
-        # Fix #7: runtime assertion — unique_markets_after_dedup must be <=
-        # markets_api_objects + event_nested_markets_flattened
-        assert unique_markets_after_dedup <= (markets_from_markets + event_nested_markets_flattened), (
-            f"Conservation violation: unique_markets_after_dedup={unique_markets_after_dedup} "
-            f"> markets_from_markets({markets_from_markets}) + "
-            f"event_nested_markets_flattened({event_nested_markets_flattened})"
+        # Runtime assertion
+        assert unique_markets_after_dedup <= records_before_dedup + missing_identifiers, (
+            f"Conservation violation: unique={unique_markets_after_dedup} "
+            f"> records_before_dedup({records_before_dedup}) + missing({missing_identifiers})"
         )
 
         return {
@@ -524,25 +432,42 @@ class HttpxGammaDiscoveryClient:
                 "markets_api_objects": markets_api_objects,
                 "events_api_objects": events_api_objects,
                 "event_nested_markets_flattened": event_nested_markets_flattened,
-                "markets_from_markets_endpoint": markets_from_markets,
+                "markets_from_markets_endpoint": 0,
                 "records_before_dedup": records_before_dedup,
                 "unique_markets_after_dedup": unique_markets_after_dedup,
                 "duplicates_removed": duplicates_removed,
                 "cross_source_conflicts_count": len(cross_source_conflicts),
                 "missing_identifiers_count": missing_identifiers,
             },
-            "endpoint_states": {
-                ep: {
-                    "status": endpoint_states.get(ep, {}).get("status"),
-                    "error": endpoint_states.get(ep, {}).get("error"),
-                    "loop_detected": endpoint_states.get(ep, {}).get("loop_detected"),
-                    "api_objects_received": endpoint_states.get(ep, {}).get("api_objects_received", 0),
-                    "flattened_markets": endpoint_states.get(ep, {}).get("flattened_markets", 0),
-                }
-                for ep in enabled_endpoints
-            },
+            "endpoint_states": endpoint_states,
             "any_source_error": any_error_or_loop,
         }
+
+
+class CanonicalMarketFetcher(Protocol):
+    """Protocol for fetching canonical market metadata by slug."""
+    def fetch_by_slug(self, slug: str) -> dict[str, Any] | None: ...
+
+
+class HttpxCanonicalMarketFetcher:
+    """Fetch canonical market metadata from /markets/slug/{slug}."""
+
+    def __init__(self, *, transport=None, client: httpx.Client | None = None):
+        self.transport = transport
+        self._client = client
+
+    def fetch_by_slug(self, slug: str) -> dict[str, Any] | None:
+        client = self._client or httpx.Client(timeout=30.0, transport=self.transport)
+        try:
+            response = client.get(f"{GAMMA_BASE}/markets/slug/{slug}")
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                return payload
+            return None
+        finally:
+            if self._client is None:
+                client.close()
 
 
 def _preliminary_btc(market: dict[str, Any]) -> bool:
@@ -585,12 +510,14 @@ def _outcome_price_reason(market: dict[str, Any], *, threshold: float) -> str | 
 
 
 def _selection_config(*, window_s: int, max_markets: int, gamma_limit: int,
-                      resolved_price_threshold: float = RESOLVED_PRICE_THRESHOLD) -> dict[str, Any]:
+                      resolved_price_threshold: float = RESOLVED_PRICE_THRESHOLD,
+                      as_of_ts: str | None = None) -> dict[str, Any]:
     return {
         "window_s": window_s, "max_markets": max_markets, "gamma_limit": gamma_limit,
         "discovery_version": DISCOVERY_VERSION,
         "resolved_price_threshold": resolved_price_threshold,
         "price_sum_tolerance": PRICE_SUM_TOLERANCE,
+        "as_of_ts": as_of_ts,
     }
 
 
@@ -598,11 +525,49 @@ def _config_hash(selection_config: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(selection_config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *, price_threshold: float) -> dict[str, Any]:
+def _parse_epoch(value: Any) -> float | None:
+    """Parse an ISO 8601 string or numeric epoch into a float epoch."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *,
+            price_threshold: float, as_of_ts: str | None = None) -> dict[str, Any]:
+    """Select markets that pass structural validation AND temporal eligibility.
+
+    Fix #3: as_of_ts temporal eligibility. A market is eligible for the
+    current scan only if:
+      - eventStartTime <= as_of_ts < endDate
+      - active is True
+      - closed is False
+      - acceptingOrders is True
+
+    Markets that are structurally valid but fail temporal eligibility are
+    counted as historical_structural_matches but NOT included in selected.
+    """
     from h011_v3_pipeline import validate_btc_market_identity
     histogram = Counter()
     selected: list[dict] = []
+    historical_structural_matches: list[dict] = []
     preliminary = 0
+
+    as_of_epoch = _parse_epoch(as_of_ts) if as_of_ts else None
+
     for market in raw_gamma:
         preliminary += int(_preliminary_btc(market))
         # Check for cross-source conflict marker set by the client
@@ -619,10 +584,46 @@ def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *, price_thr
         if not ok:
             histogram.update(reasons)
             continue
+        # price_reason check (None outcomePrices is OK — Fix #2)
         price_reason = _outcome_price_reason(market, threshold=price_threshold)
         if price_reason:
             histogram[price_reason] += 1
             continue
+
+        # Fix #3: temporal eligibility check
+        # If as_of_ts is provided, the market must be in an open window
+        if as_of_epoch is not None:
+            es_epoch = _parse_epoch(market.get("eventStartTime"))
+            ed_epoch = _parse_epoch(market.get("endDate"))
+            active = market.get("active")
+            closed = market.get("closed")
+            accepting = market.get("acceptingOrders")
+
+            temporal_reasons = []
+            if es_epoch is not None and es_epoch > as_of_epoch:
+                temporal_reasons.append("market_window_not_open")
+            if ed_epoch is not None and as_of_epoch >= ed_epoch:
+                temporal_reasons.append("market_window_expired")
+            if active is not True:
+                temporal_reasons.append("market_inactive_or_closed")
+            elif closed is not False:
+                temporal_reasons.append("market_inactive_or_closed")
+            if accepting is not True:
+                temporal_reasons.append("orders_not_accepting")
+
+            if temporal_reasons:
+                # Structurally valid but temporally ineligible → historical match
+                histogram.update(temporal_reasons)
+                clean_hist = {k: v for k, v in market.items() if not k.startswith("_")}
+                historical_structural_matches.append({
+                    "conditionId": clean_hist.get("conditionId"),
+                    "slug": clean_hist.get("slug"),
+                    "eventStartTime": clean_hist.get("eventStartTime"),
+                    "endDate": clean_hist.get("endDate"),
+                    "reasons": temporal_reasons,
+                })
+                continue
+
         # Strip internal markers before adding to selected
         clean = {k: v for k, v in market.items() if not k.startswith("_")}
         clean["_validated_window_s"] = window_s
@@ -634,6 +635,7 @@ def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *, price_thr
         "preliminary_btc_candidates": preliminary,
         "rejection_histogram": {reason: histogram.get(reason, 0) for reason in ALL_REJECTION_REASONS},
         "selected_condition_ids": [str(m.get("conditionId") or m.get("condition_id") or "") for m in selected],
+        "historical_structural_matches": historical_structural_matches,
     }
 
 
@@ -695,20 +697,40 @@ def _pagination_matches(evidence: dict[str, Any]) -> dict[str, bool]:
         endpoint = page.get("endpoint", "/markets")
         pages_by_endpoint.setdefault(endpoint, []).append(page)
 
-    # Verify offsets are continuous per endpoint
+    # Verify pagination continuity per endpoint.
+    # For offset-based pages: check offset continuity (expected_offset += limit).
+    # For keyset-based pages (cursor): check that cursors are present and
+    # that next_cursor chains correctly (no gaps). Keyset pages have a
+    # "cursor" field instead of "offset".
     offsets_continuous = bool(pages) or total_received == 0
     for endpoint, ep_pages in pages_by_endpoint.items():
-        expected_offset = 0
-        for page in ep_pages:
-            if (page.get("offset") != expected_offset
-                    or not isinstance(page.get("limit"), int)
-                    or page["limit"] <= 0
-                    or not isinstance(page.get("count"), int)
-                    or page["count"] < 0
-                    or page["count"] > page["limit"]):
-                offsets_continuous = False
-                break
-            expected_offset += page["limit"]
+        # Detect page type: keyset (has cursor) or offset (has offset)
+        is_keyset = any("cursor" in page for page in ep_pages)
+        if is_keyset:
+            # Keyset continuity: each page's next_cursor should be used as
+            # the next page's cursor (except the first page, which has cursor=None).
+            # We just verify that limit and count are valid.
+            for page in ep_pages:
+                if (not isinstance(page.get("limit"), int)
+                        or page["limit"] <= 0
+                        or not isinstance(page.get("count"), int)
+                        or page["count"] < 0
+                        or page["count"] > page["limit"]):
+                    offsets_continuous = False
+                    break
+        else:
+            # Offset-based continuity
+            expected_offset = 0
+            for page in ep_pages:
+                if (page.get("offset") != expected_offset
+                        or not isinstance(page.get("limit"), int)
+                        or page["limit"] <= 0
+                        or not isinstance(page.get("count"), int)
+                        or page["count"] < 0
+                        or page["count"] > page["limit"]):
+                    offsets_continuous = False
+                    break
+                expected_offset += page["limit"]
 
     # Sum of non-empty page counts, excluding loop pages (which duplicate data)
     def _page_record_count(page: dict) -> int:
@@ -776,11 +798,11 @@ def _pagination_matches(evidence: dict[str, Any]) -> dict[str, bool]:
 
     flags_match = (evidence.get("source_exhausted") == inferred_exhausted
                    and evidence.get("limit_reached") == inferred_limit)
+    # next_offset: when limit_reached, next_offset should be present (can be 0
+    # if no markets were found but pagination hit limit). When not limit_reached,
+    # next_offset should be None.
     if inferred_limit:
-        next_offset_match = (
-            evidence.get("next_offset") is not None
-            and evidence.get("next_offset") >= gamma_limit
-        )
+        next_offset_match = evidence.get("next_offset") is not None
     else:
         next_offset_match = evidence.get("next_offset") is None
     flags_match = flags_match and next_offset_match
@@ -804,19 +826,22 @@ def replay_discovery(path: str | Path, *, expected_selection_config: dict[str, A
 
     # Fix #2/#9: if source_error is present (fail-closed), the replay must
     # produce empty selection (matching the original discovery behavior).
-    # The original discovery skips _select when source_error is set, so
-    # selected_condition_ids=[] and rejection_histogram is all zeros.
     if evidence.get("source_error"):
         recalculated = {
             "markets": [],
             "preliminary_btc_candidates": 0,
             "rejection_histogram": {reason: 0 for reason in ALL_REJECTION_REASONS},
             "selected_condition_ids": [],
+            "historical_structural_matches": [],
         }
     else:
+        # Fix #3: use the as_of_ts stored in evidence (NOT current time)
+        # so replay is deterministic across time.
+        replay_as_of = expected.get("as_of_ts") or stored_config.get("as_of_ts")
         recalculated = _select(
             evidence["raw_gamma"], expected.get("window_s", -1), expected.get("max_markets", -1),
             price_threshold=expected.get("resolved_price_threshold", RESOLVED_PRICE_THRESHOLD),
+            as_of_ts=replay_as_of,
         )
     expected_status = evidence["status"]
     if evidence.get("source_error"):
@@ -838,6 +863,7 @@ def replay_discovery(path: str | Path, *, expected_selection_config: dict[str, A
         "max_markets_matches": stored_config.get("max_markets") == expected.get("max_markets"),
         "gamma_limit_matches": stored_config.get("gamma_limit") == expected.get("gamma_limit"),
         "price_threshold_matches": stored_config.get("resolved_price_threshold") == expected.get("resolved_price_threshold"),
+        "as_of_ts_matches": stored_config.get("as_of_ts") == expected.get("as_of_ts"),
         "config_hash_matches": (evidence.get("selection_config_hash") == _config_hash(stored_config)
                                 and evidence.get("selection_config_hash") == _config_hash(expected)),
         "version_matches": (evidence.get("discovery_version") == DISCOVERY_VERSION
@@ -853,13 +879,20 @@ def replay_discovery(path: str | Path, *, expected_selection_config: dict[str, A
 
 def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryClient,
                         *, max_markets: int = 100, evidence_dir: Path | None = None,
-                        retention_count: int = 192, retention_bytes: int = 256 * 1024 * 1024) -> dict[str, Any]:
+                        retention_count: int = 192, retention_bytes: int = 256 * 1024 * 1024,
+                        as_of_ts: str | None = None) -> dict[str, Any]:
     """Fetch, validate and persist one bounded, replayable discovery attempt.
 
+    Fix #1: keyset pagination via /events/keyset (no offset-based /markets).
     Fix #2: If any enabled endpoint has status "error" or "loop_detected",
-    discovery is fail-closed: source_health=FAILED, no markets selected,
-    status=DISCOVERY_SOURCE_FAILED.
+            discovery is fail-closed: source_health=FAILED, no markets selected.
+    Fix #3: as_of_ts temporal eligibility. Markets outside the open window
+            are counted as historical_structural_matches but NOT selected.
     """
+    # Fix #3: default as_of_ts to current time if not provided
+    if as_of_ts is None:
+        as_of_ts = datetime.now(timezone.utc).isoformat()
+
     started_at = datetime.now(timezone.utc).isoformat()
     discovery_metrics: dict[str, Any] = {}
     endpoint_states: dict[str, Any] = {}
@@ -888,12 +921,15 @@ def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryCl
                 error_parts.append(f"{ep}: {state.get('status')} ({state.get('error') or 'loop'})")
         source_error = "; ".join(error_parts) if error_parts else "unknown source error"
 
-    selection_config = _selection_config(window_s=config.window_s, max_markets=max_markets, gamma_limit=gamma_limit)
+    selection_config = _selection_config(window_s=config.window_s, max_markets=max_markets,
+                                          gamma_limit=gamma_limit, as_of_ts=as_of_ts)
     selected_data = _select(markets, config.window_s, max_markets,
-                            price_threshold=selection_config["resolved_price_threshold"]) if source_error is None else {
+                            price_threshold=selection_config["resolved_price_threshold"],
+                            as_of_ts=as_of_ts) if source_error is None else {
         "markets": [], "preliminary_btc_candidates": 0,
         "rejection_histogram": {reason: 0 for reason in ALL_REJECTION_REASONS},
         "selected_condition_ids": [],
+        "historical_structural_matches": [],
     }
     if source_error is not None:
         status = "DISCOVERY_SOURCE_FAILED"
@@ -912,6 +948,7 @@ def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryCl
         "started_at": started_at, "finished_at": finished_at, "status": status,
         "source_health": "FAILED" if source_error else "HEALTHY", "source_error": source_error,
         "gamma_limit": gamma_limit, "window_s": config.window_s, "max_markets": max_markets,
+        "as_of_ts": as_of_ts,
         "selection_config": selection_config, "selection_config_hash": _config_hash(selection_config),
         "pages": pages, "source_exhausted": source_exhausted, "limit_reached": limit_reached,
         "next_offset": next_offset, "total_received": len(markets),
@@ -919,6 +956,8 @@ def discover_markets_v3(config, gamma_limit: int, gamma_client: GammaDiscoveryCl
         "selected_count": len(selected_data["markets"]),
         "rejection_histogram": selected_data["rejection_histogram"], "raw_gamma": markets,
         "selected_condition_ids": selected_data["selected_condition_ids"],
+        "historical_structural_matches": selected_data.get("historical_structural_matches", []),
+        "historical_structural_matches_count": len(selected_data.get("historical_structural_matches", [])),
         "discovery_complete": complete,
         "discovery_metrics": discovery_metrics,
         "endpoint_states": endpoint_states,

@@ -97,12 +97,17 @@ def structure_from_gamma(market: dict) -> MarketStructure:
     """
     Parse a Gamma API market dict into a MarketStructure.
 
+    Fix #2 (GPT-5.6 third audit): outcomePrices is NO LONGER a structural
+    requirement. Prices are mutable state and must not affect the structural
+    identity hash. Only conditionId, outcomes, and clobTokenIds are required.
+
     Raises MarketStructureError if:
       - conditionId is missing
       - outcomes != 2
       - clobTokenIds != 2
-      - outcomePrices != 2
       - token IDs are empty or not unique
+
+    Does NOT raise for missing outcomePrices (None, missing, or empty).
     """
     condition_id = str(
         market.get("conditionId") or market.get("condition_id") or ""
@@ -113,14 +118,11 @@ def structure_from_gamma(market: dict) -> MarketStructure:
 
     outcomes = parse_list(market.get("outcomes"), "outcomes")
     token_ids = parse_list(market.get("clobTokenIds"), "clobTokenIds")
-    prices = parse_list(market.get("outcomePrices"), "outcomePrices")
 
     if len(outcomes) != 2:
         raise MarketStructureError(f"expected 2 outcomes, got {len(outcomes)}")
     if len(token_ids) != 2:
         raise MarketStructureError(f"expected 2 token IDs, got {len(token_ids)}")
-    if len(prices) != 2:
-        raise MarketStructureError(f"expected 2 prices, got {len(prices)}")
 
     normalized_tokens = [str(token).strip() for token in token_ids]
 
@@ -138,11 +140,15 @@ def structure_from_gamma(market: dict) -> MarketStructure:
         for index in range(2)
     )
 
+    # Fix #2: structural hash excludes outcomePrices (mutable state).
+    # Only immutable identity fields are hashed: conditionId, outcomes,
+    # clobTokenIds, active, closed, acceptingOrders, feesEnabled.
+    # Two markets with the same identity but different prices MUST have
+    # the same metadata_hash.
     source = {
         "conditionId": condition_id,
         "outcomes": outcomes,
         "clobTokenIds": normalized_tokens,
-        "outcomePrices": prices,
         "active": market.get("active"),
         "closed": market.get("closed"),
         "acceptingOrders": market.get("acceptingOrders"),
@@ -170,14 +176,17 @@ def is_market_stub(market: dict) -> bool:
     """
     Check if a market dict is a stub (incomplete metadata).
 
+    Fix #2: outcomePrices is NO LONGER required for stub detection.
+    A market is a stub only if it lacks conditionId, outcomes, OR clobTokenIds.
+
     Stubs are markets detected from the global trade stream that haven't
     been resolved via the Gamma API. They have a conditionId but lack
-    clobTokenIds, outcomes, or outcomePrices.
+    clobTokenIds or outcomes.
     """
+    has_condition = market.get("conditionId") is not None or market.get("condition_id") is not None
     has_tokens = market.get("clobTokenIds") is not None
     has_outcomes = market.get("outcomes") is not None
-    has_prices = market.get("outcomePrices") is not None
-    return not (has_tokens and has_outcomes and has_prices)
+    return not (has_condition and has_tokens and has_outcomes)
 
 
 # ═══════════════════════════════════════════════════════════════════════

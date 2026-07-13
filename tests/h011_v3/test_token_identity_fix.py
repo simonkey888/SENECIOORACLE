@@ -337,6 +337,11 @@ def test_btc_updown_15m_rejected_with_300s_window():
 # End-to-end discovery tests
 # ═══════════════════════════════════════════════════════════════════════
 
+# Fix #3: as_of_ts must be inside the market's window for selection.
+# DEFAULT_SLUG_EPOCH=1766162100 → window 16:35:00Z to 16:40:00Z
+# Use midpoint 16:37:30Z as as_of_ts.
+_AS_OF_TS = "2025-12-19T16:37:30Z"
+
 class _SequenceGamma:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -364,7 +369,8 @@ def test_discovery_finds_valid_btc_updown_5m_market(tmp_path):
     """End-to-end: a valid BTC updown 5m market is discovered."""
     valid = make_real_btc_updown_market(slug_epoch=1766162100)
     gamma = _SequenceGamma([[valid]])
-    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
+    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
     assert result["status"] == "SELECTED_NONEMPTY"
     assert len(result["markets"]) == 1
     h = result["evidence"]["rejection_histogram"]
@@ -376,7 +382,8 @@ def test_discovery_finds_valid_btc_updown_5m_market(tmp_path):
 def test_discovery_rejects_btc_long_window_market(tmp_path):
     """End-to-end: a BTC long-window market is rejected for directional identity."""
     gamma = _SequenceGamma([[FIXTURE_BTC_LONG_WINDOW_PRICE_TARGET]])
-    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
+    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
     assert result["status"] == "EMPTY_SELECTED_COHORT"
     h = result["evidence"]["rejection_histogram"]
     assert h["directional_market_identity_unproven"] == 1
@@ -385,69 +392,69 @@ def test_discovery_rejects_btc_long_window_market(tmp_path):
 def test_discovery_rejects_yes_no_market_as_directional(tmp_path):
     """End-to-end: a generic Yes/No market is rejected for directional identity."""
     gamma = _SequenceGamma([[FIXTURE_GENERIC_YES_NO_MARKET]])
-    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
+    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
     assert result["status"] == "EMPTY_SELECTED_COHORT"
     h = result["evidence"]["rejection_histogram"]
     assert h["directional_market_identity_unproven"] == 1
 
 
-def test_discovery_pagination_finds_btc_updown_after_offset_500(tmp_path):
-    """End-to-end: pagination discovers a btc-updown-5m market located
-    beyond offset 500 (which is where production markets appear)."""
-    # Build 600 generic markets + 1 valid btc-updown-5m at position 600
-    generic = [
-        {
-            "conditionId": f"0x{i:064x}", "slug": f"generic-{i}",
-            "outcomes": ["Yes", "No"],
-            "clobTokenIds": [f"a{i}-synthetic", f"b{i}-synthetic"],
-            "outcomePrices": '["0.4", "0.6"]',
-        }
-        for i in range(600)
-    ]
-    valid = make_real_btc_updown_market(slug_epoch=1766162100)
-    all_markets = generic + [valid]
+def test_discovery_pagination_finds_btc_updown_via_keyset(tmp_path):
+    """Fix #1: keyset pagination via /events/keyset finds btc-updown-5m market.
 
-    offsets_seen = []
+    The valid market is nested inside an event in the keyset response.
+    """
+    valid = make_real_btc_updown_market(slug_epoch=1766162100)
 
     def handler(request):
-        offset = int(request.url.params["offset"])
-        offsets_seen.append(offset)
-        page_size = int(request.url.params["limit"])
-        return httpx.Response(200, json=all_markets[offset:offset + page_size])
+        if request.url.path == "/events/keyset":
+            return httpx.Response(200, json={
+                "events": [{
+                    "id": "109968",
+                    "ticker": valid["slug"],
+                    "slug": valid["slug"],
+                    "markets": [valid],
+                }],
+                "next_cursor": None,  # source exhausted
+            })
+        elif request.url.path == f"/markets/slug/{valid['slug']}":
+            return httpx.Response(200, json=valid)
+        return httpx.Response(404)
 
-    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler),
-                                       fetch_events=False)
-    result = discover_markets_v3(_config(300), 700, client, evidence_dir=tmp_path)
+    client = HttpxGammaDiscoveryClient(page_size=500, transport=httpx.MockTransport(handler))
+    result = discover_markets_v3(_config(300), 700, client, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
     assert result["status"] == "SELECTED_NONEMPTY"
     assert len(result["markets"]) == 1
     assert result["markets"][0]["conditionId"] == valid["conditionId"]
-    assert offsets_seen == [0, 100, 200, 300, 400, 500, 600]
-    h = result["evidence"]["rejection_histogram"]
-    # 600 generic markets all rejected for directional identity (slug mismatch)
-    assert h["directional_market_identity_unproven"] == 600
 
 
 def test_discovery_deduplication_by_condition_id(tmp_path):
-    """End-to-end: same conditionId appearing in both /markets and /events
-    is deduplicated — only one copy is processed."""
+    """End-to-end: same conditionId appearing in both keyset events and
+    /markets/slug is deduplicated — only one copy is processed."""
     valid = make_real_btc_updown_market(slug_epoch=1766162100)
-    # Simulate the same market appearing in both /markets and /events
-    # by having the MockTransport return it for both endpoints
-    seen_endpoints = []
 
     def handler(request):
-        endpoint = request.url.path
-        seen_endpoints.append(endpoint)
-        # Both endpoints return the same market
-        return httpx.Response(200, json=[valid])
+        if request.url.path == "/events/keyset":
+            # Event contains the market as nested
+            return httpx.Response(200, json={
+                "events": [{
+                    "id": "109968",
+                    "ticker": valid["slug"],
+                    "slug": valid["slug"],
+                    "markets": [valid],
+                }],
+                "next_cursor": None,
+            })
+        elif request.url.path == f"/markets/slug/{valid['slug']}":
+            # Canonical fetch returns the same market
+            return httpx.Response(200, json=valid)
+        return httpx.Response(404)
 
-    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler),
-                                       fetch_markets=True, fetch_events=True)
-    result = discover_markets_v3(_config(300), 10, client, evidence_dir=tmp_path)
-    # Both endpoints were called
-    assert "/markets" in seen_endpoints
-    assert "/events" in seen_endpoints
-    # But only ONE market is selected (deduplication by conditionId)
+    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler))
+    result = discover_markets_v3(_config(300), 10, client, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
+    # Only ONE market is selected (deduplication by conditionId via slug key)
     assert len(result["markets"]) == 1
     assert result["evidence"]["total_received"] == 1
 
@@ -456,7 +463,8 @@ def test_discovery_replay_is_deterministic(tmp_path):
     """End-to-end: replaying the evidence artifact produces the same result."""
     valid = make_real_btc_updown_market(slug_epoch=1766162100)
     gamma = _SequenceGamma([[valid]])
-    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
+    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
     assert result["discovery_replay_verified"] is True
     assert result["file_sha256_matches"] is True
     # Replay the artifact and verify the histogram matches
@@ -517,7 +525,8 @@ def test_discovery_mixed_cohort_rejects_for_correct_reasons(tmp_path):
         FIXTURE_BTC_UPDOWN_5M_NO_RESOLUTION_SOURCE,
     ]
     gamma = _SequenceGamma([markets])
-    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
+    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path,
+                                as_of_ts=_AS_OF_TS)
     h = result["evidence"]["rejection_histogram"]
     # 2 markets fail directional identity (long-window + generic yes-no)
     assert h["directional_market_identity_unproven"] == 2
