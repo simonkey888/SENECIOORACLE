@@ -1,9 +1,15 @@
 import hashlib
+import gzip
+import json
 from types import SimpleNamespace
+
+import httpx
 
 from polymarket.discovery_v3 import (
     discover_markets_v3,
+    HttpxGammaDiscoveryClient,
     monitor_discovery_loop,
+    replay_discovery,
 )
 
 
@@ -33,7 +39,13 @@ class SequenceGamma:
         self.calls += 1
         if isinstance(value, Exception):
             raise value
-        return value, [{"offset": 0, "limit": limit, "count": len(value)}]
+        return {
+            "markets": value,
+            "pages": [{"offset": 0, "limit": limit, "count": len(value)}],
+            "source_exhausted": True,
+            "limit_reached": False,
+            "next_offset": None,
+        }
 
 
 def config():
@@ -135,3 +147,80 @@ def test_discovery_sidecar_matches_exact_bytes(tmp_path):
         sidecar = handle.read().strip()
     assert sidecar == expected
     assert result["file_sha256_matches"] is True
+
+
+def test_http_client_paginates_offsets_and_finds_third_page_btc(tmp_path):
+    offsets = []
+    generic = [{"conditionId": f"0x{i}", "slug": f"generic-{i}"} for i in range(200)]
+
+    def handler(request):
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        if offset < 200:
+            return httpx.Response(200, json=generic[offset:offset + 100])
+        return httpx.Response(200, json=[market()])
+
+    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler))
+    result = discover_markets_v3(config(), 500, client, evidence_dir=tmp_path)
+    assert offsets == [0, 100, 200]
+    assert [page["offset"] for page in result["evidence"]["pages"]] == offsets
+    assert result["status"] == "SELECTED_NONEMPTY"
+    assert result["markets"][0]["conditionId"] == "0xbtc"
+    assert result["evidence"]["source_exhausted"] is True
+
+
+def test_full_pages_until_limit_are_truncated(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(int(request.url.params["offset"]))
+        return httpx.Response(200, json=[{"conditionId": f"x{n}"} for n in range(100)])
+
+    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler))
+    result = discover_markets_v3(config(), 2000, client, evidence_dir=tmp_path)
+    assert len(calls) == 20
+    assert result["status"] == "DISCOVERY_TRUNCATED"
+    assert result["discovery_complete"] is False
+    assert result["evidence"]["source_exhausted"] is False
+    assert result["evidence"]["limit_reached"] is True
+    assert result["evidence"]["next_offset"] == 2000
+
+
+def test_evidence_is_compressed_atomic_and_replay_verified(tmp_path):
+    result = discover_markets_v3(config(), 500, SequenceGamma([[market()]]), evidence_dir=tmp_path)
+    artifact = tmp_path / result["artifact_path"]
+    assert str(artifact).endswith(".json.gz")
+    assert not list(tmp_path.glob("*.tmp"))
+    evidence = json.loads(gzip.decompress(artifact.read_bytes()))
+    assert evidence["raw_gamma"][0]["conditionId"] == "0xbtc"
+    replay = replay_discovery(artifact)
+    assert replay["discovery_replay_verified"] is True
+    assert result["discovery_replay_verified"] is True
+
+
+def test_discovery_replay_detects_tampered_selection(tmp_path):
+    result = discover_markets_v3(config(), 500, SequenceGamma([[market()]]), evidence_dir=tmp_path)
+    artifact = tmp_path / result["artifact_path"]
+    evidence = json.loads(gzip.decompress(artifact.read_bytes()))
+    evidence["selected_condition_ids"] = ["tampered"]
+    artifact.write_bytes(gzip.compress(json.dumps(evidence).encode(), mtime=0))
+    replay = replay_discovery(artifact)
+    assert replay["selected_ids_match"] is False
+    assert replay["discovery_replay_verified"] is False
+
+
+def test_retention_count_and_bytes_keep_newest(tmp_path):
+    for index in range(4):
+        result = discover_markets_v3(
+            config(), 500, SequenceGamma([[market(cid=f"0x{index}")]]),
+            evidence_dir=tmp_path, retention_count=2, retention_bytes=1,
+        )
+    artifacts = list(tmp_path.glob("discovery_*.json.gz"))
+    assert len(artifacts) == 1
+    assert artifacts[0] == tmp_path / result["artifact_path"]
+    assert artifacts[0].with_suffix(".gz.sha256").exists()
+
+
+def test_v3_dockerfile_packages_discovery_module():
+    dockerfile = (__import__("pathlib").Path(__file__).parents[2] / "polymarket" / "Dockerfile.h011-v3").read_text()
+    assert "polymarket/discovery_v3.py" in dockerfile

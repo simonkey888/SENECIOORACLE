@@ -14,6 +14,7 @@ RUN mkdir -p /app/polymarket/results/v3/raw /app/polymarket/results/v3/scans /ap
 
 # Copiar TODOS los módulos V3 + control_plane + dashboard
 COPY polymarket/h011_v3_pipeline.py \
+     polymarket/discovery_v3.py \
      polymarket/evidence_state.py \
      polymarket/validation_semantics.py \
      polymarket/market_structure.py \
