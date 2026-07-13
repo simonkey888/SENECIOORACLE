@@ -2,3 +2,4 @@ httpx
 numpy
 fastapi
 uvicorn
+pytest
