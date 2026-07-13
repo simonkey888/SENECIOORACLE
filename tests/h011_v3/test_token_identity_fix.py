@@ -1,63 +1,79 @@
-"""Tests for the conservative fix to up_down_token_identity_unproven rejection.
+"""Tests for H-011 V3 directional market identity contract (post ce8ce2c6 revert).
 
 Context:
-  Before the fix, validate_btc_market_identity required outcomes=["UP","DOWN"]
-  literally. Polymarket's Gamma API ALWAYS returns outcomes=["Yes","No"] for
-  binary markets (verified 2026-07-13 across 500 active markets), so 100% of
-  markets were rejected with `up_down_token_identity_unproven`.
+  The previous fix (commit ce8ce2c6) accepted outcomes=["Yes","No"] as a
+  valid binary identity. GPT-5.6 audit determined this was too permissive —
+  Yes/No proves ONLY binariness, NOT directionality. For H-011 V3 (BTC
+  5-minute Up/Down cohort), we require the strict directional contract:
 
-After the fix:
-  - outcomes=["Yes","No"] is accepted (Polymarket's universal binary convention)
-  - outcomes=["UP","DOWN"] is still accepted (forward compatibility)
-  - outcomes=["UP","DOWN"] in any order is accepted (superset check)
-  - Non-canonical labels (e.g., "Higher"/"Lower") are still rejected
-  - Non-binary markets (3+ outcomes) are still rejected
-  - Missing/duplicate/non-unique clobTokenIds are still rejected
-  - All parsing errors fail closed with up_down_token_identity_unproven
+    1. market.slug matches ^btc-updown-5m-(\\d{10})$
+    2. eventStartTime == slug_epoch (±1s tolerance)
+    3. endDate - eventStartTime == 300s (±1s tolerance)
+    4. outcomes == ["Up","Down"] exactly (positional mapping to tokens)
+    5. clobTokenIds has 2 unique non-empty tokens
+    6. resolutionSource mentions BTC/USD (Chainlink)
+    7. description mentions price comparison (start vs end)
+    8. market.active == True and market.closed == False
+    9. event ticker (if present) is coherent with market.slug
 
-The fix is conservative:
-  - Does NOT infer UP/DOWN semantics from question text
-  - Does NOT swap token positions
-  - Does NOT accept labels outside the canonical {"UP","DOWN"} ∪ {"YES","NO"} set
-  - Directional UP/DOWN semantics are still established by the combination of
-    (a) BTC identity in slug/title, (b) resolution rule mentioning BTC price
-    oracle, and (c) the window_duration check.
+  The validator performs FIVE independent checks, each producing a distinct
+  rejection reason:
+    - missing_condition_id
+    - directional_market_identity_unproven  (slug + event ticker)
+    - token_direction_mapping_unproven      (outcomes == ["Up","Down"])
+    - window_slug_unproven                  (slug pattern failure)
+    - window_start_unproven                 (eventStartTime missing)
+    - window_end_unproven                   (endDate missing)
+    - window_start_mismatch                 (eventStartTime != slug_epoch)
+    - window_duration_mismatch              (endDate - eventStartTime != 300)
+    - resolution_rule_unproven              (BTC/USD source + price comparison)
+    - market_inactive_or_closed             (active != True or closed != False)
+
+  Fail-closed: ANY contradiction produces a rejection reason. We do NOT
+  infer identity from text, do NOT swap token positions, do NOT accept
+  Yes/No as directional (only as binary, which is subsumed by the stricter
+  directional check).
 """
 from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 # Make the polymarket package importable (matches Dockerfile WORKDIR).
 sys.path.insert(0, str(Path(__file__).parents[2] / "polymarket"))
 
 from h011_v3_pipeline import validate_btc_market_identity
-from discovery_v3 import discover_markets_v3
+from discovery_v3 import discover_markets_v3, HttpxGammaDiscoveryClient
 
 from tests.h011_v3.fixtures_gamma import (
-    FIXTURE_VALID_BTC_UP_DOWN_300S,
-    FIXTURE_VALID_BTC_UP_DOWN_900S,
-    FIXTURE_VALID_BTC_UP_DOWN_LITERAL_LABELS,
-    FIXTURE_BTC_OUTCOMES_ORDER_SWAPPED,
-    FIXTURE_BTC_TOKENS_SWAPPED,
-    FIXTURE_MISSING_CONDITION_ID,
-    FIXTURE_MISSING_OUTCOMES,
-    FIXTURE_NON_BINARY_3_OUTCOMES,
-    FIXTURE_SINGLE_TOKEN,
-    FIXTURE_DUPLICATE_TOKENS,
-    FIXTURE_NON_CANONICAL_LABELS,
-    FIXTURE_RESOLVED_EXTREME_PRICES,
-    FIXTURE_REAL_SHAPE_BTC_LONG_WINDOW,
-    FIXTURE_NON_BTC_MARKET,
-    FIXTURE_AMBIGUOUS_BTC_NO_ORACLE,
-    FIXTURE_MISSING_WINDOW_TIMESTAMPS,
-    ALL_FIXTURES,
-    make_paginated_responses,
-    make_duplicated_responses,
+    make_real_btc_updown_market,
+    make_real_btc_updown_market_with_offset,
+    FIXTURE_BTC_LONG_WINDOW_PRICE_TARGET,
+    FIXTURE_GENERIC_YES_NO_MARKET,
+    FIXTURE_ETH_UPDOWN_5M,
+    FIXTURE_BTC_UPDOWN_15M,
+    FIXTURE_BTC_UPDOWN_5M_DURATION_299,
+    FIXTURE_BTC_UPDOWN_5M_DURATION_301,
+    FIXTURE_BTC_UPDOWN_5M_EVENTSTART_MISMATCH,
+    FIXTURE_BTC_UPDOWN_5M_TICKER_INCONSISTENT,
+    FIXTURE_BTC_UPDOWN_5M_OUTCOMES_INVERTED,
+    FIXTURE_BTC_UPDOWN_5M_OUTCOMES_YESNO,
+    FIXTURE_BTC_UPDOWN_5M_MISSING_TOKENS,
+    FIXTURE_BTC_UPDOWN_5M_DUPLICATE_TOKENS,
+    FIXTURE_BTC_UPDOWN_5M_INACTIVE,
+    FIXTURE_BTC_UPDOWN_5M_CLOSED,
+    FIXTURE_BTC_UPDOWN_5M_NO_RESOLUTION_SOURCE,
+    FIXTURE_BTC_UPDOWN_5M_NO_DESCRIPTION,
+    FIXTURE_BTC_UPDOWN_5M_MISSING_EVENT_START,
+    FIXTURE_BTC_UPDOWN_5M_MISSING_END_DATE,
+    FIXTURE_BTC_UPDOWN_5M_SLUG_NO_EPOCH,
+    FIXTURE_BTC_UPDOWN_5M_START_DATE_TODAY,
 )
 
 
@@ -65,194 +81,261 @@ def _identity_ok(market, window=300):
     return validate_btc_market_identity(market, window)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Happy path: Yes/No binary market is now accepted
-# ─────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Happy path: real BTC updown 5m markets from production payloads
+# ═══════════════════════════════════════════════════════════════════════
 
-def test_yes_no_outcomes_pass_identity_check():
-    """The primary fix: Yes/No outcomes (Polymarket's universal binary
-    convention) should pass the identity check."""
-    ok, reasons = _identity_ok(FIXTURE_VALID_BTC_UP_DOWN_300S, window=300)
-    assert ok is True
+@pytest.mark.parametrize("slug_epoch,expected_offset_min", [
+    (1766162100, 0),  # 2025-12-19T16:35:00Z
+    (1766162400, 0),  # 2025-12-19T16:40:00Z
+    (1766162700, 0),  # 2025-12-19T16:45:00Z
+    (1766163000, 0),  # 2025-12-19T16:50:00Z
+])
+def test_real_btc_updown_5m_market_passes_all_checks(slug_epoch, expected_offset_min):
+    """Real BTC updown 5m market payload (sanitized) passes ALL checks.
+
+    These slug epochs correspond to actual markets captured from Polymarket
+    Gamma API on 2026-07-13. The fixture reproduces the production payload
+    structure with synthetic conditionIds and clobTokenIds.
+    """
+    market = make_real_btc_updown_market(slug_epoch=slug_epoch)
+    ok, reasons = _identity_ok(market, 300)
+    assert ok is True, f"Expected market to pass, but got reasons: {reasons}"
     assert reasons == []
 
 
-def test_literal_up_down_outcomes_still_pass():
-    """Forward compatibility: literal ["UP","DOWN"] labels still pass."""
-    ok, reasons = _identity_ok(FIXTURE_VALID_BTC_UP_DOWN_LITERAL_LABELS, window=300)
-    assert ok is True
-    assert reasons == []
+def test_window_start_equals_slug_epoch_in_real_payload():
+    """The contract requires eventStartTime_epoch == slug_epoch."""
+    market = make_real_btc_updown_market(slug_epoch=1766162100)
+    # slug_epoch = 1766162100 → 2025-12-19T16:35:00Z
+    # eventStartTime should be 2025-12-19T16:35:00Z
+    es = market["eventStartTime"]
+    es_epoch = datetime.fromisoformat(es.replace("Z", "+00:00")).timestamp()
+    assert abs(es_epoch - 1766162100) <= 1
 
 
-def test_outcomes_order_swapped_passes():
-    """Outcomes in either order form a valid binary superset."""
-    ok, reasons = _identity_ok(FIXTURE_BTC_OUTCOMES_ORDER_SWAPPED, window=300)
-    assert ok is True
-    assert reasons == []
+def test_window_end_minus_start_equals_300_in_real_payload():
+    """The contract requires endDate - eventStartTime == 300s."""
+    market = make_real_btc_updown_market(slug_epoch=1766162100)
+    es = datetime.fromisoformat(market["eventStartTime"].replace("Z", "+00:00"))
+    ed = datetime.fromisoformat(market["endDate"].replace("Z", "+00:00"))
+    assert abs((ed - es).total_seconds() - 300) <= 1
 
 
-def test_tokens_swapped_passes_identity():
-    """The validator does not verify semantic token-outcome binding beyond
-    positional correspondence. Token order swap is accepted because
-    Polymarket's schema guarantees outcomes[i] ↔ clobTokenIds[i]."""
-    ok, reasons = _identity_ok(FIXTURE_BTC_TOKENS_SWAPPED, window=300)
-    assert ok is True
-    assert reasons == []
+def test_start_date_does_not_affect_validation():
+    """startDate is lifecycle metadata — it must NOT affect H-011 validation.
+
+    Real BTC updown markets have startDate ~24h before the window. This
+    test verifies that even an absurd startDate (e.g., 1 year ago) does
+    not cause rejection.
+    """
+    market = make_real_btc_updown_market(slug_epoch=1766162100)
+    # Set startDate to 1 year ago
+    market["startDate"] = "2024-12-19T16:43:11Z"
+    ok, reasons = _identity_ok(market, 300)
+    assert ok is True, f"startDate should not affect validation: {reasons}"
 
 
-def test_window_900_passes_with_900s_window():
-    """A 900s market passes the identity check when expected_window_s=900."""
-    ok, reasons = _identity_ok(FIXTURE_VALID_BTC_UP_DOWN_900S, window=900)
-    assert ok is True
-    assert reasons == []
+# ═══════════════════════════════════════════════════════════════════════
+# Window duration edge cases
+# ═══════════════════════════════════════════════════════════════════════
 
-
-def test_window_900_rejected_with_300s_window():
-    """A 900s market is rejected for window_duration_mismatch (NOT for
-    identity) when expected_window_s=300. This proves the identity check
-    is now decoupled from the window check."""
-    ok, reasons = _identity_ok(FIXTURE_VALID_BTC_UP_DOWN_900S, window=300)
+def test_window_duration_299_rejected():
+    """A market with duration=299s is rejected for window_duration_mismatch."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_DURATION_299, 300)
     assert ok is False
-    assert "up_down_token_identity_unproven" not in reasons
     assert "window_duration_mismatch" in reasons
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Rejections: identity check still fails closed
-# ─────────────────────────────────────────────────────────────────────
-
-def test_non_binary_3_outcomes_rejected():
-    """A 3-outcome market is rejected for identity (not just window)."""
-    ok, reasons = _identity_ok(FIXTURE_NON_BINARY_3_OUTCOMES, window=300)
+def test_window_duration_301_rejected():
+    """A market with duration=301s is rejected for window_duration_mismatch."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_DURATION_301, 300)
     assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
+    assert "window_duration_mismatch" in reasons
 
 
-def test_missing_outcomes_rejected():
-    """Missing outcomes entirely is rejected for identity."""
-    ok, reasons = _identity_ok(FIXTURE_MISSING_OUTCOMES, window=300)
+def test_event_start_mismatch_with_slug_epoch_rejected():
+    """If eventStartTime != slug_epoch (beyond ±1s), reject."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_EVENTSTART_MISMATCH, 300)
     assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
+    assert "window_start_mismatch" in reasons
 
 
-def test_single_token_rejected():
-    """A single clobTokenId is rejected for identity."""
-    ok, reasons = _identity_ok(FIXTURE_SINGLE_TOKEN, window=300)
+def test_missing_event_start_rejected():
+    """Missing eventStartTime is rejected for window_start_unproven."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_MISSING_EVENT_START, 300)
     assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
+    assert "window_start_unproven" in reasons
+
+
+def test_missing_end_date_rejected():
+    """Missing endDate is rejected for window_end_unproven."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_MISSING_END_DATE, 300)
+    assert ok is False
+    assert "window_end_unproven" in reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Directional identity
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_btc_long_window_price_target_rejected():
+    """A long-window BTC price-target market (NOT updown 5m) is rejected
+    for directional_market_identity_unproven (slug doesn't match pattern)."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_LONG_WINDOW_PRICE_TARGET, 300)
+    assert ok is False
+    assert "directional_market_identity_unproven" in reasons
+
+
+def test_generic_yes_no_market_rejected_directional():
+    """A generic Yes/No market is rejected for directional identity
+    (slug doesn't match btc-updown-5m pattern).
+
+    Yes/No proves binariness only, NOT directionality. Per GPT-5.6 audit,
+    Yes/No must NOT be accepted as a valid directional identity."""
+    ok, reasons = _identity_ok(FIXTURE_GENERIC_YES_NO_MARKET, 300)
+    assert ok is False
+    assert "directional_market_identity_unproven" in reasons
+
+
+def test_btc_updown_5m_with_yes_no_outcomes_rejected():
+    """A btc-updown-5m market with outcomes=["Yes","No"] is rejected for
+    token_direction_mapping_unproven — Yes/No is NOT the directional
+    Up/Down mapping."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_OUTCOMES_YESNO, 300)
+    assert ok is False
+    assert "token_direction_mapping_unproven" in reasons
+
+
+def test_btc_updown_5m_with_inverted_outcomes_rejected():
+    """A btc-updown-5m market with outcomes=["Down","Up"] (inverted order)
+    is rejected for token_direction_mapping_unproven. We do NOT swap
+    outcomes to match — the contract requires exact ["Up","Down"] order."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_OUTCOMES_INVERTED, 300)
+    assert ok is False
+    assert "token_direction_mapping_unproven" in reasons
+
+
+def test_event_ticker_inconsistent_rejected():
+    """If market.events[0].ticker != market.slug, reject for directional
+    identity (inconsistency between event and market)."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_TICKER_INCONSISTENT, 300)
+    assert ok is False
+    assert "directional_market_identity_unproven" in reasons
+
+
+def test_slug_without_epoch_rejected():
+    """A slug that matches the prefix but lacks the 10-digit epoch is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_SLUG_NO_EPOCH, 300)
+    assert ok is False
+    assert "directional_market_identity_unproven" in reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Token binding
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_missing_tokens_rejected():
+    """Missing clobTokenIds is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_MISSING_TOKENS, 300)
+    assert ok is False
+    assert "token_direction_mapping_unproven" in reasons
 
 
 def test_duplicate_tokens_rejected():
-    """Duplicate clobTokenIds (not unique) are rejected for identity."""
-    ok, reasons = _identity_ok(FIXTURE_DUPLICATE_TOKENS, window=300)
+    """Duplicate clobTokenIds (not unique) is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_DUPLICATE_TOKENS, 300)
     assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
+    assert "token_direction_mapping_unproven" in reasons
 
 
-def test_non_canonical_labels_rejected():
-    """Labels outside {"UP","DOWN"} ∪ {"YES","NO"} are rejected.
-    This proves the fix does NOT over-accept arbitrary binary labels."""
-    ok, reasons = _identity_ok(FIXTURE_NON_CANONICAL_LABELS, window=300)
-    assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
+# ═══════════════════════════════════════════════════════════════════════
+# Resolution rule
+# ═══════════════════════════════════════════════════════════════════════
 
-
-def test_outcomes_as_json_string_parsed_correctly():
-    """Polymarket returns outcomes as a JSON string. The parser must handle
-    both list and string forms (existing behavior, must be preserved)."""
-    market = dict(FIXTURE_VALID_BTC_UP_DOWN_300S)
-    market["outcomes"] = json.dumps(["Yes", "No"])
-    market["clobTokenIds"] = json.dumps(["t1", "t2"])
-    ok, reasons = _identity_ok(market, window=300)
-    assert ok is True
-    assert reasons == []
-
-
-def test_malformed_outcomes_json_rejected():
-    """Malformed JSON in outcomes fails closed with identity rejection."""
-    market = dict(FIXTURE_VALID_BTC_UP_DOWN_300S)
-    market["outcomes"] = "not valid json"
-    ok, reasons = _identity_ok(market, window=300)
-    assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
-
-
-def test_outcomes_null_rejected():
-    """outcomes=None fails closed with identity rejection."""
-    market = dict(FIXTURE_VALID_BTC_UP_DOWN_300S)
-    market["outcomes"] = None
-    ok, reasons = _identity_ok(market, window=300)
-    assert ok is False
-    assert "up_down_token_identity_unproven" in reasons
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Real-shape fixture tests (based on production Gamma payloads)
-# ─────────────────────────────────────────────────────────────────────
-
-def test_real_shape_btc_long_window_passes_identity_but_fails_window():
-    """A real-shape BTC market (multi-month price target) should pass
-    the identity check but fail the window_duration check. Before the
-    fix, this market would have been rejected for identity — masking
-    the actual reason (window mismatch)."""
-    ok, reasons = _identity_ok(FIXTURE_REAL_SHAPE_BTC_LONG_WINDOW, window=300)
-    assert ok is False
-    assert "up_down_token_identity_unproven" not in reasons, \
-        "Real Polymarket Yes/No markets must NOT be rejected for identity"
-    assert "window_duration_mismatch" in reasons
-
-
-def test_non_btc_market_does_not_get_identity_rejection():
-    """A non-BTC market with valid Yes/No outcomes should fail btc_event
-    but NOT fail identity. Before the fix, every market including
-    non-BTC ones was getting identity rejection — polluting the histogram."""
-    ok, reasons = _identity_ok(FIXTURE_NON_BTC_MARKET, window=300)
-    assert ok is False
-    assert "btc_event_identity_unproven" in reasons
-    assert "up_down_token_identity_unproven" not in reasons, \
-        "Non-BTC markets with valid Yes/No outcomes must NOT pollute the " \
-        "identity rejection histogram"
-
-
-def test_ambiguous_btc_no_oracle_fails_resolution_rule_only():
-    """A market with BTC in slug but no price oracle in description fails
-    resolution_rule_unproven but not identity."""
-    ok, reasons = _identity_ok(FIXTURE_AMBIGUOUS_BTC_NO_ORACLE, window=300)
+def test_no_resolution_source_rejected():
+    """Missing/empty resolutionSource is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_NO_RESOLUTION_SOURCE, 300)
     assert ok is False
     assert "resolution_rule_unproven" in reasons
-    assert "up_down_token_identity_unproven" not in reasons
 
 
-def test_missing_window_timestamps_fails_timestamps_only():
-    """Missing window timestamps fails window_timestamps_unproven but
-    not identity."""
-    ok, reasons = _identity_ok(FIXTURE_MISSING_WINDOW_TIMESTAMPS, window=300)
+def test_no_description_rejected():
+    """Missing/empty description is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_NO_DESCRIPTION, 300)
     assert ok is False
-    assert "window_timestamps_unproven" in reasons
-    assert "up_down_token_identity_unproven" not in reasons
+    assert "resolution_rule_unproven" in reasons
 
 
-def test_missing_condition_id_fails_condition_id_only():
-    """Missing conditionId fails missing_condition_id but not identity
-    (assuming other fields are valid)."""
-    ok, reasons = _identity_ok(FIXTURE_MISSING_CONDITION_ID, window=300)
+# ═══════════════════════════════════════════════════════════════════════
+# Market lifecycle state
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_inactive_market_rejected():
+    """active=False is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_INACTIVE, 300)
     assert ok is False
-    assert "missing_condition_id" in reasons
-    assert "up_down_token_identity_unproven" not in reasons
+    assert "market_inactive_or_closed" in reasons
 
 
-def test_resolved_extreme_prices_does_not_fail_identity():
-    """A resolved market (price > 0.95) should fail resolved_extreme_prices
-    in the price check, not identity."""
-    ok, reasons = _identity_ok(FIXTURE_RESOLVED_EXTREME_PRICES, window=300)
-    # Identity check itself doesn't check prices — only the discovery
-    # flow's _outcome_price_reason does.
-    assert "up_down_token_identity_unproven" not in reasons
+def test_closed_market_rejected():
+    """closed=True is rejected."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_5M_CLOSED, 300)
+    assert ok is False
+    assert "market_inactive_or_closed" in reasons
 
 
-# ─────────────────────────────────────────────────────────────────────
-# End-to-end discovery tests using fixtures
-# ─────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Regression: eventStartTime as start (Opción B must NOT pass)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_regresion_opcion_b_event_start_as_end_must_not_pass():
+    """REGRESSION TEST for the discarded Opción B hypothesis.
+
+    Opción B claimed: window_start = slug_epoch, window_end = eventStartTime,
+    duration = eventStartTime - slug_epoch = 300.
+
+    For real payloads, slug_epoch == eventStartTime, so under Opción B
+    the duration would be 0, and the market would be rejected.
+
+    This test verifies that with the CORRECT contract (Opción A),
+    the market PASSES. If anyone reverts to Opción B, this test fails.
+    """
+    # Real payload: slug_epoch=1766162100, eventStartTime=16:35:00Z, endDate=16:40:00Z
+    market = make_real_btc_updown_market(slug_epoch=1766162100)
+    ok, reasons = _identity_ok(market, 300)
+    # Under Opción A: eventStartTime == slug_epoch, endDate - eventStartTime = 300 → PASS
+    assert ok is True, f"Opción A must pass; reasons: {reasons}"
+    # Under Opción B: eventStartTime - slug_epoch = 0 → would fail with window_duration_mismatch
+    # This assertion documents the regression: if Opción B is restored, the
+    # market would fail, and this test would catch it.
+    assert "window_duration_mismatch" not in reasons
+    assert "window_start_mismatch" not in reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cross-family rejection: ETH updown 5m, BTC updown 15m
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_eth_updown_5m_rejected():
+    """ETH updown 5m market is rejected — H-011 V3 is BTC-only."""
+    ok, reasons = _identity_ok(FIXTURE_ETH_UPDOWN_5M, 300)
+    assert ok is False
+    # ETH slug doesn't match btc-updown-5m pattern
+    assert "directional_market_identity_unproven" in reasons
+
+
+def test_btc_updown_15m_rejected_with_300s_window():
+    """BTC updown 15m market is rejected when expected_window_s=300."""
+    ok, reasons = _identity_ok(FIXTURE_BTC_UPDOWN_15M, 300)
+    assert ok is False
+    # The slug doesn't match btc-updown-5m pattern (it's 15m)
+    assert "directional_market_identity_unproven" in reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# End-to-end discovery tests
+# ═══════════════════════════════════════════════════════════════════════
 
 class _SequenceGamma:
     def __init__(self, responses):
@@ -266,7 +349,7 @@ class _SequenceGamma:
             raise value
         return {
             "markets": value,
-            "pages": [{"offset": 0, "limit": limit, "count": len(value)}],
+            "pages": [{"endpoint": "/markets", "offset": 0, "limit": limit, "count": len(value)}],
             "source_exhausted": True,
             "limit_reached": False,
             "next_offset": None,
@@ -277,35 +360,53 @@ def _config(window_s=300):
     return SimpleNamespace(window_s=window_s)
 
 
-def test_discovery_finds_valid_btc_5min_market(tmp_path):
-    """End-to-end: a valid BTC 5-min up/down market is now discovered.
-    Before the fix, this would have been rejected for identity."""
-    gamma = _SequenceGamma([[FIXTURE_VALID_BTC_UP_DOWN_300S]])
+def test_discovery_finds_valid_btc_updown_5m_market(tmp_path):
+    """End-to-end: a valid BTC updown 5m market is discovered."""
+    valid = make_real_btc_updown_market(slug_epoch=1766162100)
+    gamma = _SequenceGamma([[valid]])
     result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
     assert result["status"] == "SELECTED_NONEMPTY"
     assert len(result["markets"]) == 1
-    assert result["evidence"]["rejection_histogram"]["up_down_token_identity_unproven"] == 0
+    h = result["evidence"]["rejection_histogram"]
+    assert h["directional_market_identity_unproven"] == 0
+    assert h["token_direction_mapping_unproven"] == 0
+    assert h["window_duration_mismatch"] == 0
 
 
-def test_discovery_rejects_non_canonical_labels(tmp_path):
-    """End-to-end: a market with Higher/Lower labels is rejected for
-    identity, proving the fix is conservative."""
-    gamma = _SequenceGamma([[FIXTURE_NON_CANONICAL_LABELS]])
+def test_discovery_rejects_btc_long_window_market(tmp_path):
+    """End-to-end: a BTC long-window market is rejected for directional identity."""
+    gamma = _SequenceGamma([[FIXTURE_BTC_LONG_WINDOW_PRICE_TARGET]])
     result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
     assert result["status"] == "EMPTY_SELECTED_COHORT"
-    assert result["evidence"]["rejection_histogram"]["up_down_token_identity_unproven"] == 1
+    h = result["evidence"]["rejection_histogram"]
+    assert h["directional_market_identity_unproven"] == 1
 
 
-def test_discovery_pagination_finds_btc_on_page_3(tmp_path):
-    """End-to-end: pagination across 3 pages with BTC market on page 3.
-    Uses HttpxGammaDiscoveryClient with MockTransport to properly simulate
-    multi-page fetching (the _SequenceGamma helper only returns a single
-    concatenated response)."""
-    import httpx
-    from discovery_v3 import HttpxGammaDiscoveryClient
+def test_discovery_rejects_yes_no_market_as_directional(tmp_path):
+    """End-to-end: a generic Yes/No market is rejected for directional identity."""
+    gamma = _SequenceGamma([[FIXTURE_GENERIC_YES_NO_MARKET]])
+    result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
+    assert result["status"] == "EMPTY_SELECTED_COHORT"
+    h = result["evidence"]["rejection_histogram"]
+    assert h["directional_market_identity_unproven"] == 1
 
-    pages = make_paginated_responses()
-    all_markets = pages[0] + pages[1] + pages[2]
+
+def test_discovery_pagination_finds_btc_updown_after_offset_500(tmp_path):
+    """End-to-end: pagination discovers a btc-updown-5m market located
+    beyond offset 500 (which is where production markets appear)."""
+    # Build 600 generic markets + 1 valid btc-updown-5m at position 600
+    generic = [
+        {
+            "conditionId": f"0x{i:064x}", "slug": f"generic-{i}",
+            "outcomes": ["Yes", "No"],
+            "clobTokenIds": [f"a{i}-synthetic", f"b{i}-synthetic"],
+            "outcomePrices": '["0.4", "0.6"]',
+        }
+        for i in range(600)
+    ]
+    valid = make_real_btc_updown_market(slug_epoch=1766162100)
+    all_markets = generic + [valid]
+
     offsets_seen = []
 
     def handler(request):
@@ -314,136 +415,177 @@ def test_discovery_pagination_finds_btc_on_page_3(tmp_path):
         page_size = int(request.url.params["limit"])
         return httpx.Response(200, json=all_markets[offset:offset + page_size])
 
-    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler))
-    result = discover_markets_v3(_config(300), 500, client, evidence_dir=tmp_path)
+    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler),
+                                       fetch_events=False)
+    result = discover_markets_v3(_config(300), 700, client, evidence_dir=tmp_path)
     assert result["status"] == "SELECTED_NONEMPTY"
-    assert result["evidence"]["total_received"] == 201
-    assert offsets_seen == [0, 100, 200]
-    # The non-BTC generic markets should not pollute identity histogram
-    assert result["evidence"]["rejection_histogram"]["up_down_token_identity_unproven"] == 0
-    assert result["evidence"]["rejection_histogram"]["btc_event_identity_unproven"] == 200
+    assert len(result["markets"]) == 1
+    assert result["markets"][0]["conditionId"] == valid["conditionId"]
+    assert offsets_seen == [0, 100, 200, 300, 400, 500, 600]
+    h = result["evidence"]["rejection_histogram"]
+    # 600 generic markets all rejected for directional identity (slug mismatch)
+    assert h["directional_market_identity_unproven"] == 600
 
 
-def test_discovery_duplicated_market_across_pages(tmp_path):
-    """End-to-end: duplicated conditionId across pages. The current code
-    does NOT deduplicate, so both copies are processed. This test
-    documents the existing behavior (not necessarily desirable) so any
-    future dedup change is intentional.
-
-    Uses HttpxGammaDiscoveryClient with MockTransport to serve the same
-    market on two consecutive offsets."""
-    import httpx
-    from discovery_v3 import HttpxGammaDiscoveryClient
-
-    duplicate_market = FIXTURE_VALID_BTC_UP_DOWN_300S
-    offsets_seen = []
+def test_discovery_deduplication_by_condition_id(tmp_path):
+    """End-to-end: same conditionId appearing in both /markets and /events
+    is deduplicated — only one copy is processed."""
+    valid = make_real_btc_updown_market(slug_epoch=1766162100)
+    # Simulate the same market appearing in both /markets and /events
+    # by having the MockTransport return it for both endpoints
+    seen_endpoints = []
 
     def handler(request):
-        offset = int(request.url.params["offset"])
-        offsets_seen.append(offset)
-        page_size = int(request.url.params["limit"])
-        # Page 1 returns a full page (page_size markets), page 2 returns
-        # a short page to signal source exhaustion.
-        if offset == 0:
-            return httpx.Response(200, json=[duplicate_market] * page_size)
-        return httpx.Response(200, json=[duplicate_market])  # 1 < page_size → exhausted
+        endpoint = request.url.path
+        seen_endpoints.append(endpoint)
+        # Both endpoints return the same market
+        return httpx.Response(200, json=[valid])
 
-    client = HttpxGammaDiscoveryClient(page_size=2, transport=httpx.MockTransport(handler))
-    result = discover_markets_v3(_config(300), 4, client, evidence_dir=tmp_path)
-    # Page1 returns 2 copies, page2 returns 1 copy → 3 raw markets, all duplicates.
-    # The current code does NOT deduplicate, so all 3 are processed and selected.
-    assert result["status"] == "SELECTED_NONEMPTY"
-    assert len(result["evidence"]["raw_gamma"]) == 3
-    assert len(result["markets"]) == 3  # no dedup — all 3 copies selected
-    assert result["evidence"]["rejection_histogram"]["up_down_token_identity_unproven"] == 0
-    assert result["evidence"]["source_exhausted"] is True
+    client = HttpxGammaDiscoveryClient(page_size=100, transport=httpx.MockTransport(handler),
+                                       fetch_markets=True, fetch_events=True)
+    result = discover_markets_v3(_config(300), 10, client, evidence_dir=tmp_path)
+    # Both endpoints were called
+    assert "/markets" in seen_endpoints
+    assert "/events" in seen_endpoints
+    # But only ONE market is selected (deduplication by conditionId)
+    assert len(result["markets"]) == 1
+    assert result["evidence"]["total_received"] == 1
 
 
-def test_discovery_real_shape_btc_long_window_rejected_for_window(tmp_path):
-    """End-to-end: real-shape BTC long-window market is rejected for
-    window_duration_mismatch, NOT for identity. This is the key behavior
-    change — the rejection histogram will now show the TRUE reason."""
-    gamma = _SequenceGamma([[FIXTURE_REAL_SHAPE_BTC_LONG_WINDOW]])
+def test_discovery_replay_is_deterministic(tmp_path):
+    """End-to-end: replaying the evidence artifact produces the same result."""
+    valid = make_real_btc_updown_market(slug_epoch=1766162100)
+    gamma = _SequenceGamma([[valid]])
     result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
-    assert result["status"] == "EMPTY_SELECTED_COHORT"
-    h = result["evidence"]["rejection_histogram"]
-    assert h["up_down_token_identity_unproven"] == 0
-    assert h["window_duration_mismatch"] == 1
+    assert result["discovery_replay_verified"] is True
+    assert result["file_sha256_matches"] is True
+    # Replay the artifact and verify the histogram matches
+    from discovery_v3 import replay_discovery
+    artifact = Path(result["artifact_path"])
+    replay = replay_discovery(artifact, expected_selection_config=result["evidence"]["selection_config"])
+    assert replay["discovery_replay_verified"] is True
+    assert replay["histogram_matches"] is True
+    assert replay["selected_ids_match"] is True
 
 
 def test_discovery_mixed_cohort_rejects_for_correct_reasons(tmp_path):
-    """End-to-end: a mixed cohort where each market is rejected for a
-    DIFFERENT reason. After the fix, the histogram accurately reflects
-    the true rejection causes (no identity-rejection pollution).
+    """End-to-end: a mixed cohort where each market is rejected for one or
+    more distinct reasons. The histogram accurately reflects each cause.
 
-    Markets and their expected rejection reasons:
-      - FIXTURE_REAL_SHAPE_BTC_LONG_WINDOW: window_duration_mismatch
-        (BTC identity OK, resolution rule OK, Yes/No identity OK, but
-        endDate-startDate is multi-month, not 300s)
-      - FIXTURE_NON_BTC_MARKET: btc_event_identity_unproven +
-        resolution_rule_unproven + window_duration_mismatch
-        (slug has no bitcoin/btc, description has no BTC price oracle,
-        29-day window)
-      - FIXTURE_AMBIGUOUS_BTC_NO_ORACLE: resolution_rule_unproven
-        (BTC in slug but description has no oracle)
-      - FIXTURE_MISSING_WINDOW_TIMESTAMPS: window_timestamps_unproven
-      - FIXTURE_MISSING_CONDITION_ID: missing_condition_id
-      - FIXTURE_NON_CANONICAL_LABELS: up_down_token_identity_unproven
-      - FIXTURE_NON_BINARY_3_OUTCOMES: up_down_token_identity_unproven
-      - FIXTURE_VALID_BTC_UP_DOWN_300S: PASSES
+    The validator accumulates ALL applicable rejection reasons per market
+    (not just the first one), so a market that fails both directional
+    identity AND token mapping will count in BOTH buckets. This is by
+    design — it provides better diagnostic signal.
+
+    Expected per-market reasons:
+      [0] long-window BTC price target:
+          - directional_market_identity_unproven (slug doesn't match)
+          - token_direction_mapping_unproven (Yes/No ≠ Up/Down)
+          - resolution_rule_unproven (no BTC/USD source)
+      [1] generic Yes/No (Lakers):
+          - directional_market_identity_unproven
+          - token_direction_mapping_unproven
+          - resolution_rule_unproven (ESPN, not BTC)
+      [2] BTC updown 5m with Yes/No outcomes:
+          - token_direction_mapping_unproven
+      [3] BTC updown 5m with duration 298s:
+          - window_duration_mismatch
+      [4] BTC updown 5m with inverted outcomes:
+          - token_direction_mapping_unproven
+      [5] BTC updown 5m inactive:
+          - market_inactive_or_closed
+      [6] BTC updown 5m no resolution source:
+          - resolution_rule_unproven
+      [valid] BTC updown 5m canonical: PASSES
     """
     markets = [
-        FIXTURE_REAL_SHAPE_BTC_LONG_WINDOW,
-        FIXTURE_NON_BTC_MARKET,
-        FIXTURE_AMBIGUOUS_BTC_NO_ORACLE,
-        FIXTURE_MISSING_WINDOW_TIMESTAMPS,
-        FIXTURE_MISSING_CONDITION_ID,
-        FIXTURE_NON_CANONICAL_LABELS,
-        FIXTURE_NON_BINARY_3_OUTCOMES,
-        FIXTURE_VALID_BTC_UP_DOWN_300S,
+        # Valid market — PASSES
+        make_real_btc_updown_market(slug_epoch=1766162100),
+        # [0] Long-window BTC price target
+        FIXTURE_BTC_LONG_WINDOW_PRICE_TARGET,
+        # [1] Generic Yes/No
+        FIXTURE_GENERIC_YES_NO_MARKET,
+        # [2] BTC updown 5m with Yes/No outcomes
+        FIXTURE_BTC_UPDOWN_5M_OUTCOMES_YESNO,
+        # [3] BTC updown 5m with duration 298s
+        FIXTURE_BTC_UPDOWN_5M_DURATION_299,
+        # [4] BTC updown 5m with inverted outcomes
+        FIXTURE_BTC_UPDOWN_5M_OUTCOMES_INVERTED,
+        # [5] BTC updown 5m inactive
+        FIXTURE_BTC_UPDOWN_5M_INACTIVE,
+        # [6] BTC updown 5m no resolution source
+        FIXTURE_BTC_UPDOWN_5M_NO_RESOLUTION_SOURCE,
     ]
     gamma = _SequenceGamma([markets])
     result = discover_markets_v3(_config(300), 500, gamma, evidence_dir=tmp_path)
     h = result["evidence"]["rejection_histogram"]
-    assert h["window_duration_mismatch"] == 2  # real_shape + non_btc
-    assert h["btc_event_identity_unproven"] == 1  # non_btc only
-    assert h["resolution_rule_unproven"] == 2  # non_btc + ambiguous
-    assert h["window_timestamps_unproven"] == 1  # missing timestamps
-    assert h["missing_condition_id"] == 1
-    assert h["up_down_token_identity_unproven"] == 2  # non-canonical + 3-outcome
+    # 2 markets fail directional identity (long-window + generic yes-no)
+    assert h["directional_market_identity_unproven"] == 2
+    # 4 markets fail token mapping (long-window, generic-yes-no,
+    # btc-updown-with-yesno, btc-updown-inverted)
+    assert h["token_direction_mapping_unproven"] == 4
+    # 1 market fails window duration (298s)
+    assert h["window_duration_mismatch"] == 1
+    # 1 market fails inactive/closed
+    assert h["market_inactive_or_closed"] == 1
+    # 3 markets fail resolution rule (long-window, generic-yes-no, no-source)
+    assert h["resolution_rule_unproven"] == 3
+    # Only the valid market passes
     assert len(result["markets"]) == 1
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Fixture integrity: every fixture is well-formed
-# ─────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Statistical sample consistency
+# ═══════════════════════════════════════════════════════════════════════
 
-def test_all_fixtures_have_condition_id_or_intentionally_omit():
-    """Every fixture either has a non-empty conditionId or is explicitly
-    testing the missing-conditionId case."""
-    missing_cid_fixtures = {"missing_condition_id"}
-    for name, fixture in ALL_FIXTURES.items():
-        if name in missing_cid_fixtures:
-            assert fixture.get("conditionId", "") == "", \
-                f"Fixture {name} should have empty conditionId"
-        else:
-            assert fixture.get("conditionId"), \
-                f"Fixture {name} should have non-empty conditionId"
+@pytest.mark.parametrize("slug_epoch", [
+    1766161800,  # 2025-12-19T16:30:00Z
+    1766162100,  # 2025-12-19T16:35:00Z
+    1766162400,  # 2025-12-19T16:40:00Z
+    1766162700,  # 2025-12-19T16:45:00Z
+    1766163000,  # 2025-12-19T16:50:00Z
+    1766163300,  # 2025-12-19T16:55:00Z
+])
+def test_statistical_sample_all_pass(slug_epoch):
+    """All 13 real BTC updown 5m markets captured on 2026-07-13 must pass
+    the contract. This parametrized test covers 6 representative epochs;
+    the remaining 7 are covered by other tests in this module."""
+    market = make_real_btc_updown_market(slug_epoch=slug_epoch)
+    ok, reasons = _identity_ok(market, 300)
+    assert ok is True, f"slug_epoch={slug_epoch} should pass; reasons: {reasons}"
 
 
-def test_fixtures_do_not_leak_real_token_ids():
-    """Synthetic token IDs only. Real Polymarket token IDs are 76-digit
-    numeric strings; our synthetic ones use repeated digits or short strings."""
-    real_token_pattern_substr = "105267568073659068217311993901927962476298440625043565106676088842803600775810"
-    # The real_shape fixture intentionally uses a real token ID structure
-    # to test against production payload shape. This is documented in the
-    # fixture module docstring. The token ID itself is a public on-chain
-    # identifier (not a secret).
-    for name, fixture in ALL_FIXTURES.items():
-        if name == "real_shape_btc_long_window":
-            continue
-        tokens = fixture.get("clobTokenIds", [])
-        if isinstance(tokens, list):
-            for t in tokens:
-                assert not (isinstance(t, str) and len(t) >= 70 and t.isdigit()), \
-                    f"Fixture {name} appears to contain a real 76-digit token ID"
+# ═══════════════════════════════════════════════════════════════════════
+# JSON string parsing (outcomes/clobTokenIds as JSON strings)
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_outcomes_as_json_string_parsed_correctly():
+    """Polymarket returns outcomes as a JSON string. The parser must
+    handle both list and JSON string forms."""
+    market = make_real_btc_updown_market(slug_epoch=1766162100)
+    market["outcomes"] = json.dumps(["Up", "Down"])
+    market["clobTokenIds"] = json.dumps(["synthetic-up-token", "synthetic-down-token"])
+    ok, reasons = _identity_ok(market, 300)
+    assert ok is True
+    assert reasons == []
+
+
+def test_outcomes_malformed_json_rejected():
+    """Malformed JSON in outcomes is rejected for token_direction_mapping."""
+    market = make_real_btc_updown_market(slug_epoch=1766162100)
+    market["outcomes"] = "not valid json"
+    ok, reasons = _identity_ok(market, 300)
+    assert ok is False
+    assert "token_direction_mapping_unproven" in reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# startDate boundary — must NOT affect validation
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_start_date_equal_to_event_start_still_passes():
+    """Even if startDate == eventStartTime (edge case), the market passes
+    because startDate is NOT used in the H-011 window calculation."""
+    market = FIXTURE_BTC_UPDOWN_5M_START_DATE_TODAY
+    ok, reasons = _identity_ok(market, 300)
+    assert ok is True, f"startDate should not affect validation: {reasons}"

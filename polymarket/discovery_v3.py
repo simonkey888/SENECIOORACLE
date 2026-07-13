@@ -14,13 +14,36 @@ from typing import Any, Callable, Protocol
 import httpx
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
-DISCOVERY_VERSION = "h011-v3-discovery-v2"
+DISCOVERY_VERSION = "h011-v3-discovery-v3"
 RESOLVED_PRICE_THRESHOLD = 0.95
 PRICE_SUM_TOLERANCE = 0.02
+
+# H-011 V3 rejection reasons — directional contract (post ce8ce2c6 revert).
+# Each reason maps to one specific structural check; reasons are mutually
+# exclusive per market (a market may fail multiple checks, accumulating
+# multiple reasons). The validator remains fail-closed: any contradiction
+# produces a rejection reason rather than a guess.
 REJECTION_REASONS = (
-    "missing_condition_id", "btc_event_identity_unproven", "resolution_rule_unproven",
-    "window_timestamps_unproven", "window_duration_mismatch",
-    "up_down_token_identity_unproven",
+    # conditionId
+    "missing_condition_id",
+    # Window / slug structural checks
+    "window_slug_unproven",       # slug does not match ^btc-updown-5m-(\d{10})$
+    "window_start_unproven",      # eventStartTime missing or unparseable
+    "window_end_unproven",        # endDate missing or unparseable
+    "window_start_mismatch",      # eventStartTime_epoch != slug_epoch (±1s tolerance)
+    "window_duration_mismatch",   # endDate_epoch - eventStartTime_epoch != 300 (±1s)
+    # Directional identity (NOT just binariness)
+    "directional_market_identity_unproven",  # not a btc-updown-5m event family
+    # Token binding — binary + directional mapping
+    "token_direction_mapping_unproven",      # outcomes != ["Up","Down"] or tokens not unique
+    # Resolution rule
+    "resolution_rule_unproven",
+    # Lifecycle state
+    "market_inactive_or_closed",
+    # Cross-source (markets vs events) contradiction
+    "cross_source_identity_conflict",
+    # Missing both conditionId and market id (cannot dedup)
+    "missing_structural_identifier",
 )
 ALL_REJECTION_REASONS = (*REJECTION_REASONS, "invalid_outcome_prices", "resolved_extreme_prices")
 
@@ -29,45 +52,337 @@ class GammaDiscoveryClient(Protocol):
     def fetch_pages(self, limit: int) -> dict[str, Any]: ...
 
 
-class HttpxGammaDiscoveryClient:
-    """Paginate active Gamma markets and report whether the source was exhausted."""
+# Fields where /markets is canonical (NOT to be overwritten by /events).
+_MARKET_PRIORITY_FIELDS = (
+    "conditionId", "id", "slug", "outcomes", "clobTokenIds",
+    "eventStartTime", "endDate", "active", "closed", "resolutionSource",
+)
 
-    def __init__(self, *, page_size: int = 100, transport=None):
+# Fields used to enrich a market from its parent event (only if missing).
+_EVENT_ENRICHMENT_FIELDS = (
+    "id", "slug", "ticker", "series", "tags",
+)
+
+
+def _structural_key(market: dict[str, Any]) -> str | None:
+    """Return the canonical deduplication key for a market.
+
+    Prefers conditionId (lowercased). Falls back to market `id`.
+    Returns None if both are missing — caller MUST reject such markets
+    with `missing_structural_identifier`.
+    """
+    cid = str(market.get("conditionId") or market.get("condition_id") or "").strip().lower()
+    if cid:
+        return f"cid:{cid}"
+    mid = str(market.get("id") or "").strip()
+    if mid:
+        return f"mid:{mid}"
+    return None
+
+
+def _merge_market_and_event(market: dict[str, Any], event_market: dict[str, Any],
+                            parent_event: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Structurally merge a /markets entry with the same market seen via /events.
+
+    Returns (merged_market, conflict_reason). If conflict_reason is not None,
+    the merged market is None and the caller should reject with that reason.
+    """
+    # Helper: a value is "missing" only if it is None or an empty string.
+    # False, 0, and other falsy values are NOT missing — they are real data.
+    def _is_missing(v: Any) -> bool:
+        return v is None or (isinstance(v, str) and v == "")
+
+    # Check material contradictions on priority fields.
+    for field in _MARKET_PRIORITY_FIELDS:
+        m_val = market.get(field)
+        e_val = event_market.get(field)
+        m_has = not _is_missing(m_val)
+        e_has = not _is_missing(e_val)
+        if m_has and e_has:
+            # Both present — must match (after JSON normalization for strings)
+            m_norm = m_val
+            e_norm = e_val
+            if isinstance(m_val, str) and isinstance(e_val, str):
+                try:
+                    m_norm = json.loads(m_val) if m_val.startswith(("[", "{")) else m_val
+                    e_norm = json.loads(e_val) if e_val.startswith(("[", "{")) else e_val
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            elif isinstance(m_val, str) and isinstance(e_val, list):
+                try:
+                    m_norm = json.loads(m_val) if m_val.startswith(("[", "{")) else m_val
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            elif isinstance(m_val, list) and isinstance(e_val, str):
+                try:
+                    e_norm = json.loads(e_val) if e_val.startswith(("[", "{")) else e_val
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            if m_norm != e_norm:
+                return None, "cross_source_identity_conflict"
+
+    # Start from /markets (canonical), enrich with /events fields where missing.
+    merged = dict(market)
+    for field in _MARKET_PRIORITY_FIELDS:
+        if _is_missing(merged.get(field)) and not _is_missing(event_market.get(field)):
+            merged[field] = event_market[field]
+
+    # Enrich with parent event fields (under "events" key for downstream validation).
+    existing_events = merged.get("events") or []
+    if not isinstance(existing_events, list):
+        existing_events = []
+    event_enrichment = {}
+    for field in _EVENT_ENRICHMENT_FIELDS:
+        if not _is_missing(parent_event.get(field)):
+            event_enrichment[field] = parent_event[field]
+    for field in ("description", "resolutionSource", "resolutionRules"):
+        if _is_missing(merged.get(field)) and not _is_missing(parent_event.get(field)):
+            event_enrichment[field] = parent_event[field]
+
+    if event_enrichment:
+        ev_id = event_enrichment.get("id")
+        already_present = any(
+            isinstance(ev, dict) and str(ev.get("id") or "") == str(ev_id or "")
+            for ev in existing_events
+        ) if ev_id else False
+        if not already_present:
+            existing_events.append(event_enrichment)
+    merged["events"] = existing_events
+    return merged, None
+
+
+class HttpxGammaDiscoveryClient:
+    """Paginate Gamma /markets AND /events, then structurally merge by conditionId.
+
+    Per Polymarket docs (https://docs.polymarket.com/developers/gamma-markets-api/get-markets),
+    /markets and /events are both paginated. /events groups markets under their
+    parent event; /markets is the canonical source for per-market metadata.
+
+    For H-011 V3 we fetch BOTH endpoints independently and merge them by
+    conditionId (with fallback to market `id`). Merging is STRUCTURAL — not
+    first-wins. Material contradictions on priority fields produce a
+    `cross_source_identity_conflict` rejection reason.
+
+    Pagination rules:
+      - Continue while the page is full (count == requested_limit).
+      - Stop only when a page is empty or partial (source exhausted).
+      - Detect repeated pages (same first conditionId at same offset) to
+        avoid infinite loops.
+      - No silent cap at 500/1000/2000 — the `limit` parameter is a hard
+        upper bound but we always try to reach source exhaustion.
+    """
+
+    def __init__(self, *, page_size: int = 100, transport=None,
+                 fetch_markets: bool = True, fetch_events: bool = True,
+                 max_pages_per_endpoint: int = 100):
         self.page_size = page_size
         self.transport = transport
+        self.fetch_markets = fetch_markets
+        self.fetch_events = fetch_events
+        # Safety net against pathological loops (default 100 pages = 10k markets)
+        self.max_pages_per_endpoint = max_pages_per_endpoint
 
-    def fetch_pages(self, limit: int) -> dict[str, Any]:
-        markets: list[dict] = []
-        pages: list[dict] = []
+    def _fetch_endpoint_full(self, client: httpx.Client, endpoint: str,
+                             limit: int, pages: list[dict]) -> tuple[list[dict], bool, bool]:
+        """Paginate a single endpoint to source exhaustion.
+
+        Returns (records, source_exhausted, limit_reached).
+        For /events, records are flattened markets extracted from event objects.
+
+        Stops when:
+          - A page returns fewer records than requested (source exhausted)
+          - We've collected `limit` records (limit reached)
+          - max_pages_per_endpoint safety net is hit
+          - A loop is detected (same first record at same offset)
+        """
+        records: list[dict] = []
         source_exhausted = False
-        with httpx.Client(timeout=30.0, transport=self.transport) as client:
-            for offset in range(0, limit, self.page_size):
-                requested_limit = min(self.page_size, limit - offset)
-                requested_at = datetime.now(timezone.utc).isoformat()
-                response = client.get(f"{GAMMA_BASE}/markets", params={
+        seen_page_signatures: set[tuple[int, str]] = set()
+        page_count = 0
+
+        for offset in range(0, limit, self.page_size):
+            if page_count >= self.max_pages_per_endpoint:
+                break
+            if len(records) >= limit:
+                break
+            page_count += 1
+            requested_limit = min(self.page_size, limit - offset)
+            requested_at = datetime.now(timezone.utc).isoformat()
+            try:
+                response = client.get(f"{GAMMA_BASE}{endpoint}", params={
                     "limit": requested_limit, "offset": offset,
                     "active": "true", "closed": "false",
                 })
                 received_at = datetime.now(timezone.utc).isoformat()
                 response.raise_for_status()
                 payload = response.json()
-                if not isinstance(payload, list):
-                    raise ValueError("Gamma /markets response is not a list")
+            except Exception as e:
                 pages.append({
-                    "offset": offset, "limit": requested_limit,
+                    "endpoint": endpoint, "offset": offset, "limit": requested_limit,
                     "requested_at": requested_at, "received_at": received_at,
-                    "status_code": response.status_code, "count": len(payload),
+                    "status_code": getattr(response, "status_code", None),
+                    "count": 0, "error": f"{type(e).__name__}: {e}",
                 })
-                markets.extend(payload)
-                if len(payload) < requested_limit:
-                    source_exhausted = True
-                    break
-        limit_reached = not source_exhausted and len(markets) >= limit
+                break
+
+            if not isinstance(payload, list):
+                pages.append({
+                    "endpoint": endpoint, "offset": offset, "limit": requested_limit,
+                    "requested_at": requested_at, "received_at": received_at,
+                    "status_code": response.status_code, "count": 0,
+                    "error": "response is not a list",
+                })
+                break
+
+            pages.append({
+                "endpoint": endpoint, "offset": offset, "limit": requested_limit,
+                "requested_at": requested_at, "received_at": received_at,
+                "status_code": response.status_code,
+                "count": len(payload),  # raw records from API
+            })
+
+            # Loop detection
+            page_signature = (offset, "")
+            if payload:
+                first = payload[0] if isinstance(payload[0], dict) else {}
+                page_signature = (offset, str(first.get("conditionId") or first.get("id") or ""))
+            if page_signature in seen_page_signatures and page_signature[1]:
+                break
+            seen_page_signatures.add(page_signature)
+
+            # Flatten events into markets and count records added this page
+            records_added_this_page = 0
+            if endpoint == "/events":
+                for event in payload:
+                    if not isinstance(event, dict):
+                        continue
+                    event_markets = event.get("markets") or []
+                    for m in event_markets:
+                        if isinstance(m, dict):
+                            m_copy = dict(m)
+                            m_copy["_parent_event"] = {
+                                k: event.get(k) for k in _EVENT_ENRICHMENT_FIELDS
+                                if event.get(k) is not None
+                            }
+                            for field in ("description", "resolutionSource", "resolutionRules"):
+                                if not m_copy.get(field) and event.get(field):
+                                    m_copy.setdefault(field, event[field])
+                            records.append(m_copy)
+                            records_added_this_page += 1
+                            if len(records) >= limit:
+                                break
+                    if len(records) >= limit:
+                        break
+            else:
+                for m in payload:
+                    records.append(m)
+                    records_added_this_page += 1
+                    if len(records) >= limit:
+                        break
+
+            # Update the page entry with records_added (post-flatten count)
+            if pages and pages[-1].get("endpoint") == endpoint and pages[-1].get("offset") == offset:
+                pages[-1]["records_added"] = records_added_this_page
+
+            if len(payload) < requested_limit:
+                source_exhausted = True
+                break
+
+        limit_reached = not source_exhausted and len(records) >= limit
+        return records, source_exhausted, limit_reached
+
+    def fetch_pages(self, limit: int) -> dict[str, Any]:
+        pages: list[dict] = []
+        merged_markets: dict[str, dict[str, Any]] = {}
+        cross_source_conflicts: list[dict[str, Any]] = []
+        missing_identifiers: int = 0
+        markets_count = 0
+        events_count = 0
+        markets_exhausted = False
+        events_exhausted = False
+
+        with httpx.Client(timeout=30.0, transport=self.transport) as client:
+            if self.fetch_markets:
+                try:
+                    mkts, markets_exhausted, _ = self._fetch_endpoint_full(
+                        client, "/markets", limit, pages)
+                    markets_count = len(mkts)
+                    for m in mkts:
+                        key = _structural_key(m)
+                        if key is None:
+                            missing_identifiers += 1
+                            # Still keep with synthetic key for diagnostic
+                            key = f"noid:{id(m)}"
+                        if key not in merged_markets:
+                            merged_markets[key] = dict(m)
+                        else:
+                            # Same market appearing twice in /markets — keep first
+                            # (within-source duplicates are rare and not a conflict)
+                            pass
+                except Exception:
+                    if not self.fetch_events:
+                        raise
+
+            if self.fetch_events:
+                try:
+                    ev_mkts, events_exhausted, _ = self._fetch_endpoint_full(
+                        client, "/events", limit, pages)
+                    events_count = len(ev_mkts)
+                    for m in ev_mkts:
+                        key = _structural_key(m)
+                        if key is None:
+                            missing_identifiers += 1
+                            key = f"noid:{id(m)}"
+                        if key in merged_markets:
+                            # MERGE — not first-wins
+                            parent_event = m.get("_parent_event") or {}
+                            merged, conflict = _merge_market_and_event(
+                                merged_markets[key], m, parent_event)
+                            if conflict:
+                                # Material contradiction — mark the market as conflicted
+                                # but keep it in the cohort so the validator can emit
+                                # the cross_source_identity_conflict reason.
+                                merged_markets[key]["_cross_source_conflict"] = conflict
+                                cross_source_conflicts.append({
+                                    "key": key,
+                                    "field_conflict": conflict,
+                                })
+                            elif merged is not None:
+                                merged_markets[key] = merged
+                        else:
+                            # New market from /events only
+                            new_m = dict(m)
+                            if "_parent_event" in new_m:
+                                parent_event = new_m.pop("_parent_event")
+                                # Stash parent event under "events" for downstream validation
+                                new_m["events"] = [parent_event] if parent_event else []
+                            merged_markets[key] = new_m
+                except Exception:
+                    if not self.fetch_markets:
+                        raise
+
+        any_source_exhausted = markets_exhausted or events_exhausted
+        markets_list = list(merged_markets.values())
+        # limit_reached = neither endpoint exhausted AND we hit the limit
+        limit_reached = (not any_source_exhausted) and len(markets_list) >= limit
+        # next_offset is only meaningful when limit_reached
+        next_offset = len(markets_list) if limit_reached else None
+
         return {
-            "markets": markets, "pages": pages,
-            "source_exhausted": source_exhausted,
+            "markets": markets_list,
+            "pages": pages,
+            "source_exhausted": any_source_exhausted,
             "limit_reached": limit_reached,
-            "next_offset": len(markets) if limit_reached else None,
+            "next_offset": next_offset,
+            "discovery_metrics": {
+                "markets_endpoint_records": markets_count,
+                "events_endpoint_records": events_count,
+                "merged_markets_count": len(markets_list),
+                "cross_source_conflicts_count": len(cross_source_conflicts),
+                "missing_identifiers_count": missing_identifiers,
+                "markets_endpoint_exhausted": markets_exhausted,
+                "events_endpoint_exhausted": events_exhausted,
+            },
         }
 
 
@@ -79,9 +394,22 @@ def _preliminary_btc(market: dict[str, Any]) -> bool:
 
 
 def _outcome_price_reason(market: dict[str, Any], *, threshold: float) -> str | None:
-    """Accept only an ordinary, finite two-outcome probability vector."""
+    """Accept only an ordinary, finite two-outcome probability vector.
+
+    Returns None if prices are acceptable (or missing — None / empty means
+    "no trades yet", which is valid for a newly listed market and should
+    NOT block discovery).
+    Returns a rejection reason string if prices exist but are invalid.
+    """
+    prices = market.get("outcomePrices")
+    # Missing/None/empty prices = no trades yet — NOT a rejection.
+    # This is common for newly listed btc-updown-5m markets that have
+    # not yet seen any trade activity.
+    if prices is None:
+        return None
+    if isinstance(prices, str) and prices.strip() == "":
+        return None
     try:
-        prices = market["outcomePrices"]
         prices = json.loads(prices) if isinstance(prices, str) else prices
         if not isinstance(prices, list) or len(prices) != 2:
             return "invalid_outcome_prices"
@@ -118,6 +446,16 @@ def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *, price_thr
     preliminary = 0
     for market in raw_gamma:
         preliminary += int(_preliminary_btc(market))
+        # Check for cross-source conflict marker set by the client
+        if market.get("_cross_source_conflict"):
+            histogram["cross_source_identity_conflict"] += 1
+            continue
+        # Check for missing structural identifier (no conditionId and no market id)
+        cid = str(market.get("conditionId") or market.get("condition_id") or "").strip()
+        mid = str(market.get("id") or "").strip()
+        if not cid and not mid:
+            histogram["missing_structural_identifier"] += 1
+            continue
         ok, reasons = validate_btc_market_identity(market, window_s)
         if not ok:
             histogram.update(reasons)
@@ -126,7 +464,10 @@ def _select(raw_gamma: list[dict], window_s: int, max_markets: int, *, price_thr
         if price_reason:
             histogram[price_reason] += 1
             continue
-        selected.append({**market, "_validated_window_s": window_s})
+        # Strip internal markers before adding to selected
+        clean = {k: v for k, v in market.items() if not k.startswith("_")}
+        clean["_validated_window_s"] = window_s
+        selected.append(clean)
     selected.sort(key=lambda item: float(item.get("volumeNum", 0) or 0), reverse=True)
     selected = selected[:max_markets]
     return {
@@ -174,25 +515,98 @@ def _write_evidence(directory: Path, evidence: dict[str, Any], *,
 
 
 def _pagination_matches(evidence: dict[str, Any]) -> dict[str, bool]:
+    """Verify pagination metadata is internally consistent.
+
+    Supports both single-endpoint (legacy) and multi-endpoint (current)
+    page formats. Multi-endpoint pages have an `endpoint` field; we verify
+    each endpoint's pages independently.
+    """
     pages = evidence.get("pages", [])
     total_received = evidence.get("total_received")
     gamma_limit = evidence.get("gamma_limit")
-    page_counts_match = isinstance(pages, list) and sum(page.get("count", -1) for page in pages) == total_received
-    offsets_continuous = bool(pages) or total_received == 0
-    expected_offset = 0
+
+    # Group pages by endpoint (legacy pages have no endpoint field → treat as "/markets")
+    pages_by_endpoint: dict[str, list[dict]] = {}
     for page in pages:
-        if (page.get("offset") != expected_offset or not isinstance(page.get("limit"), int)
-                or page["limit"] <= 0 or not isinstance(page.get("count"), int)
-                or page["count"] < 0 or page["count"] > page["limit"]):
-            offsets_continuous = False
-            break
-        expected_offset += page["limit"]
-    terminal_short = bool(pages) and pages[-1]["count"] < pages[-1]["limit"]
-    inferred_exhausted = terminal_short
-    inferred_limit = bool(pages) and not terminal_short and total_received == gamma_limit
+        endpoint = page.get("endpoint", "/markets")
+        pages_by_endpoint.setdefault(endpoint, []).append(page)
+
+    # For each endpoint, verify offsets are continuous and counts are valid
+    offsets_continuous = bool(pages) or total_received == 0
+    for endpoint, ep_pages in pages_by_endpoint.items():
+        expected_offset = 0
+        for page in ep_pages:
+            if (page.get("offset") != expected_offset
+                    or not isinstance(page.get("limit"), int)
+                    or page["limit"] <= 0
+                    or not isinstance(page.get("count"), int)
+                    or page["count"] < 0
+                    or page["count"] > page["limit"]):
+                offsets_continuous = False
+                break
+            expected_offset += page["limit"]
+
+    # Sum of all page counts across all endpoints.
+    # For single-endpoint: should match total_received (no dedup).
+    # For multi-endpoint: sum >= total_received (dedup reduces count).
+    # We use `records_added` (post-flatten count) when available, falling
+    # back to `count` (raw API record count) for legacy page entries.
+    # We exclude pages where records_added/count is 0 (client stopped).
+    def _page_record_count(page: dict) -> int:
+        # Prefer records_added (post-flatten) when present; else use count
+        if "records_added" in page:
+            return page.get("records_added", 0) or 0
+        return page.get("count", 0) or 0
+
+    sum_page_counts = sum(
+        _page_record_count(page) for page in pages
+        if isinstance(pages, list) and _page_record_count(page) > 0
+    )
+    single_endpoint = len(pages_by_endpoint) <= 1
+    if single_endpoint:
+        page_counts_match = sum_page_counts == total_received
+    else:
+        # Multi-endpoint: sum of non-empty page counts >= total_received
+        page_counts_match = sum_page_counts >= total_received
+
+    # Terminal short = last NON-EMPTY page (across all endpoints) returned fewer
+    # than requested. Empty pages (count=0) indicate the client stopped fetching
+    # (likely hit limit or max_pages) and don't count as source exhaustion.
+    terminal_short_per_endpoint = {}
+    for endpoint, ep_pages in pages_by_endpoint.items():
+        # Find the last non-empty page
+        last_non_empty = None
+        for page in reversed(ep_pages):
+            if page.get("count", 0) > 0:
+                last_non_empty = page
+                break
+        if last_non_empty:
+            terminal_short_per_endpoint[endpoint] = (
+                last_non_empty.get("count", 0) < last_non_empty.get("limit", 0)
+            )
+        else:
+            terminal_short_per_endpoint[endpoint] = False
+
+    # source_exhausted = at least one endpoint had a terminal short page
+    # (real source exhaustion, not just hitting limit)
+    inferred_exhausted = any(terminal_short_per_endpoint.values()) if terminal_short_per_endpoint else False
+    # limit_reached = no endpoint was exhausted AND total >= gamma_limit
+    inferred_limit = (not inferred_exhausted) and total_received >= gamma_limit
+
     flags_match = (evidence.get("source_exhausted") == inferred_exhausted
-                   and evidence.get("limit_reached") == inferred_limit
-                   and evidence.get("next_offset") == (gamma_limit if inferred_limit else None))
+                   and evidence.get("limit_reached") == inferred_limit)
+    # next_offset: when limit_reached, should be >= gamma_limit (the client
+    # may have collected more than gamma_limit records due to multi-endpoint
+    # merge). When not limit_reached, should be None.
+    if inferred_limit:
+        next_offset_match = (
+            evidence.get("next_offset") is not None
+            and evidence.get("next_offset") >= gamma_limit
+        )
+    else:
+        next_offset_match = evidence.get("next_offset") is None
+    flags_match = flags_match and next_offset_match
+
     return {
         "total_received_matches": total_received == len(evidence.get("raw_gamma", [])),
         "page_counts_match": page_counts_match,
