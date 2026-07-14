@@ -11,10 +11,8 @@ Implements the foundational layer of the E1-E7 design with F1-F9 + G1-G7 hardeni
   G6: Evidence location state machine (PENDING_ONLY/LINKED/QUARANTINE_ONLY)
   G7: Evidence always read-only via fchmod before publishing
 
-NOT implemented (Phase II+):
-  - publish_raw_scan() full pipeline
+NOT implemented (later Phase II work):
   - recovery state machine
-  - real artifact/sidecar/manifest publication
   - integration with run_scan_v3
 """
 from __future__ import annotations
@@ -120,7 +118,7 @@ MarkerStatus = Literal[
     "COMMITTED",
 ]
 
-MarkerResolution = Literal["ACTIVE", "BLOCKED", "QUARANTINED"]
+MarkerResolution = Literal["ACTIVE", "BLOCKED", "QUARANTINED", "COMMITTED"]
 
 StagerState = Literal[
     "OPEN",
@@ -150,7 +148,7 @@ MARKER_STATUSES: Final[frozenset[str]] = frozenset({
     "MANIFEST_PUBLISHED", "COMMITTED",
 })
 MARKER_RESOLUTIONS: Final[frozenset[str]] = frozenset({
-    "ACTIVE", "BLOCKED", "QUARANTINED",
+    "ACTIVE", "BLOCKED", "QUARANTINED", "COMMITTED",
 })
 STAGER_STATES: Final[frozenset[str]] = frozenset({
     "OPEN", "SEALED", "TRANSFERRED",
@@ -172,6 +170,43 @@ class RawEventPersistenceError(RawTransactionError):
 
 class RawArtifactTransactionError(RawTransactionError):
     """Raised inside the publish pipeline (Phase II)."""
+
+
+class RecoveryRequiredError(RawArtifactTransactionError):
+    """A durable transaction marker requires recovery before publishing."""
+
+
+class PublishTransactionFailure(RawArtifactTransactionError):
+    """A publisher failure with explicit ownership and filesystem semantics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_stage: str,
+        durable_marker_status: str | None,
+        marker_filename: str | None,
+        transfer_consumed: bool,
+        committed: bool,
+        cleanup_pending: bool,
+        filesystem_snapshot: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.failure_stage = failure_stage
+        self.durable_marker_status = durable_marker_status
+        self.marker_filename = marker_filename
+        self.transfer_consumed = transfer_consumed
+        self.committed = committed
+        self.cleanup_pending = cleanup_pending
+        self.filesystem_snapshot = filesystem_snapshot
+
+
+class PublishCleanupPending(PublishTransactionFailure):
+    """The manifest committed, but durable transaction cleanup is incomplete."""
+
+
+class PublishPostCommitNotificationError(PublishTransactionFailure):
+    """A test/observer hook failed after the transaction became committed-clean."""
 
 
 class IdentityCollisionError(RawTransactionError):
@@ -948,6 +983,25 @@ FAULT_QUARANTINE_AFTER_MKDIR_BEFORE_PARENT_FSYNC: Final[str] = (
     "QUARANTINE_AFTER_MKDIR_BEFORE_PARENT_FSYNC"
 )
 FAULT_BEFORE_EXCHANGE: Final[str] = "BEFORE_EXCHANGE"
+
+# Phase II-A publisher durable-boundary fault points.
+FAULT_PUBLISH_BEFORE_STAGED_MARKER: Final[str] = "PUBLISH_BEFORE_STAGED_MARKER"
+FAULT_PUBLISH_AFTER_STAGED_MARKER: Final[str] = "PUBLISH_AFTER_STAGED_MARKER"
+FAULT_PUBLISH_AFTER_ARTIFACT_LINK: Final[str] = "PUBLISH_AFTER_ARTIFACT_LINK"
+FAULT_PUBLISH_AFTER_ARTIFACT_DIR_FSYNC: Final[str] = "PUBLISH_AFTER_ARTIFACT_DIR_FSYNC"
+FAULT_PUBLISH_AFTER_ARTIFACT_MARKER_UPDATE: Final[str] = "PUBLISH_AFTER_ARTIFACT_MARKER_UPDATE"
+FAULT_PUBLISH_AFTER_SIDECAR_LINK: Final[str] = "PUBLISH_AFTER_SIDECAR_LINK"
+FAULT_PUBLISH_AFTER_SIDECAR_DIR_FSYNC: Final[str] = "PUBLISH_AFTER_SIDECAR_DIR_FSYNC"
+FAULT_PUBLISH_AFTER_SIDECAR_MARKER_UPDATE: Final[str] = "PUBLISH_AFTER_SIDECAR_MARKER_UPDATE"
+FAULT_PUBLISH_AFTER_MANIFEST_LINK: Final[str] = "PUBLISH_AFTER_MANIFEST_LINK"
+FAULT_PUBLISH_AFTER_MANIFEST_DIR_FSYNC: Final[str] = "PUBLISH_AFTER_MANIFEST_DIR_FSYNC"
+FAULT_PUBLISH_AFTER_MANIFEST_MARKER_UPDATE: Final[str] = "PUBLISH_AFTER_MANIFEST_MARKER_UPDATE"
+FAULT_PUBLISH_AFTER_COMMITTED_MARKER: Final[str] = "PUBLISH_AFTER_COMMITTED_MARKER"
+FAULT_PUBLISH_AFTER_STAGING_UNLINK: Final[str] = "PUBLISH_AFTER_STAGING_UNLINK"
+FAULT_PUBLISH_AFTER_PENDING_DIR_FSYNC: Final[str] = "PUBLISH_AFTER_PENDING_DIR_FSYNC"
+FAULT_PUBLISH_AFTER_TRANSFER_CLOSE: Final[str] = "PUBLISH_AFTER_TRANSFER_CLOSE"
+FAULT_PUBLISH_AFTER_MARKER_UNLINK: Final[str] = "PUBLISH_AFTER_MARKER_UNLINK"
+FAULT_PUBLISH_AFTER_FINAL_ROOT_FSYNC: Final[str] = "PUBLISH_AFTER_FINAL_ROOT_FSYNC"
 
 # Global fault injection hook (for testing). Set to a callable that takes
 # the fault point name and raises if it matches the desired fault.
@@ -2189,6 +2243,703 @@ def _compute_sha256_from_fd(fd: int) -> str:
             break
         h.update(chunk)
     return h.hexdigest()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Section 8 — Phase II-A transactional raw publisher
+# ═══════════════════════════════════════════════════════════════════════
+
+_MANIFEST_FILE_FIELDS: Final[frozenset[str]] = frozenset(
+    REQUIRED_CANDIDATE_MANIFEST_FIELDS
+)
+
+
+def _read_all_fd(fd: int) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _open_regular_readonly_under_directory(
+    dir_fd: int,
+    name: str,
+) -> tuple[int, os.stat_result]:
+    validate_bare_filename(name)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PathSafetyError(f"symlink forbidden: {name}") from exc
+        raise
+    try:
+        entry_stat = os.fstat(fd)
+        if not statmod.S_ISREG(entry_stat.st_mode):
+            raise PathSafetyError(f"published entry is not a regular file: {name}")
+        return fd, entry_stat
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_validated_manifest_chain_under_lock(
+    *,
+    guard: RawChainLockGuard,
+    raw_directory: Path,
+    policy: MarkerValidationPolicy,
+) -> list[dict[str, Any]]:
+    """Read and validate the complete canonical manifest chain via root dir_fd."""
+    assert_guard_valid(guard, raw_directory, policy.manifest_prefix)
+    prefix = policy.manifest_prefix
+    manifest_re = re.compile(rf"^{re.escape(prefix)}_(\d{{6}})\.json$")
+    marker_re = re.compile(
+        rf"^{re.escape(prefix)}_txn_(\d{{6}})_"
+        rf"([0-9a-f]{{8}}-[0-9a-f]{{4}}-4[0-9a-f]{{3}}-"
+        rf"[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}})\.marker$"
+    )
+    manifest_names: list[tuple[int, str]] = []
+    marker_names: list[str] = []
+    for name in os.listdir(guard.trusted.fd):
+        manifest_match = manifest_re.fullmatch(name)
+        if manifest_match is not None:
+            manifest_names.append((int(manifest_match.group(1)), name))
+            continue
+        if name.startswith(f"{prefix}_") and name.endswith(".json"):
+            raise MarkerValidationError(f"non-canonical manifest filename: {name}")
+        marker_match = marker_re.fullmatch(name)
+        if marker_match is not None:
+            marker_names.append(name)
+            continue
+        if name.startswith(f"{prefix}_txn_") and name.endswith(".marker"):
+            raise MarkerValidationError(f"non-canonical transaction marker filename: {name}")
+
+    active_markers: list[tuple[str, str]] = []
+    for name in sorted(marker_names):
+        fd, _ = _open_regular_readonly_under_directory(guard.trusted.fd, name)
+        try:
+            raw = _read_all_fd(fd)
+        finally:
+            os.close(fd)
+        marker = parse_marker(raw)
+        validate_marker(marker, policy)
+        expected_name = marker_filename(
+            prefix, marker["sequence"], marker["transaction_uuid"]
+        )
+        if name != expected_name:
+            raise MarkerValidationError(
+                f"transaction marker filename/body mismatch: {name} != {expected_name}"
+            )
+        active_markers.append((name, marker["status"]))
+    if active_markers:
+        raise RecoveryRequiredError(
+            f"transaction markers require recovery: {active_markers}"
+        )
+
+    if not manifest_names:
+        return []
+    manifest_names.sort()
+    observed_sequences = [sequence for sequence, _ in manifest_names]
+    expected_sequences = list(range(len(manifest_names)))
+    if observed_sequences != expected_sequences:
+        raise MarkerValidationError(
+            f"manifest chain is not contiguous: observed={observed_sequences} "
+            f"expected={expected_sequences}"
+        )
+
+    entries: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    previous_hash: str | None = None
+    for sequence, name in manifest_names:
+        fd, _ = _open_regular_readonly_under_directory(guard.trusted.fd, name)
+        try:
+            raw = _read_all_fd(fd)
+        finally:
+            os.close(fd)
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MarkerValidationError(f"manifest {name} is not valid JSON: {exc}") from exc
+        if not isinstance(entry, dict):
+            raise MarkerValidationError(f"manifest {name} root must be an object")
+        if set(entry) != _MANIFEST_FILE_FIELDS:
+            raise MarkerValidationError(
+                f"manifest {name} fields differ from schema: {sorted(entry)}"
+            )
+        _validate_candidate_manifest_fields(entry)
+        if canonical_manifest_file_bytes(entry) != raw:
+            raise MarkerValidationError(f"manifest {name} bytes are not canonical")
+        if entry["sequence"] != sequence:
+            raise MarkerValidationError(
+                f"manifest filename/sequence mismatch: {name} vs {entry['sequence']}"
+            )
+        expected_hash = compute_manifest_hash(entry)
+        if entry["manifest_hash"] != expected_hash:
+            raise MarkerValidationError(
+                f"manifest {name} hash mismatch: expected={expected_hash} "
+                f"stored={entry['manifest_hash']}"
+            )
+        if entry["previous_manifest_hash"] != previous_hash:
+            raise MarkerValidationError(
+                f"manifest {name} previous hash mismatch: "
+                f"expected={previous_hash!r} stored={entry['previous_manifest_hash']!r}"
+            )
+        if entry["condition_ids"] != sorted(set(entry["condition_ids"])):
+            raise MarkerValidationError(f"manifest {name} condition_ids are not canonical")
+        identity = (entry["run_id"], entry["scan_id"])
+        if identity in identities:
+            raise IdentityCollisionError(f"duplicate run_id/scan_id in manifest chain: {identity}")
+        identities.add(identity)
+        entries.append(entry)
+        previous_hash = entry["manifest_hash"]
+    return entries
+
+
+def _validate_transfer_for_publish(
+    *,
+    transfer: RawArtifactTransfer,
+    guard: RawChainLockGuard,
+    policy: MarkerValidationPolicy,
+) -> list[dict[str, Any]]:
+    if not isinstance(transfer, RawArtifactTransfer):
+        raise RawArtifactTransactionError(
+            f"transfer must be RawArtifactTransfer, got {type(transfer).__name__}"
+        )
+    if transfer._closed:
+        raise RawArtifactTransactionError("transfer is already closed")
+    if transfer.staging_fd < 0:
+        raise RawArtifactTransactionError("transfer staging fd is invalid")
+    if transfer.pending_directory._closed:
+        raise RawArtifactTransactionError("transfer pending directory is closed")
+    sealed = transfer.sealed
+    if not isinstance(sealed, SealedRawArtifact):
+        raise RawArtifactTransactionError("transfer sealed descriptor is invalid")
+    if transfer.staging_filename != sealed.staging_filename:
+        raise RawArtifactTransactionError("transfer staging filename differs from sealed descriptor")
+    validate_bare_filename(transfer.staging_filename)
+    validate_bare_filename(sealed.final_name)
+    if policy.artifact_filename_pattern.fullmatch(sealed.final_name) is None:
+        raise RawArtifactTransactionError(
+            f"sealed final name does not match artifact policy: {sealed.final_name}"
+        )
+    try:
+        access_mode = fcntl.fcntl(transfer.staging_fd, fcntl.F_GETFL) & os.O_ACCMODE
+    except OSError as exc:
+        raise RawArtifactTransactionError(f"cannot inspect staging fd flags: {exc}") from exc
+    if access_mode != os.O_RDONLY:
+        raise RawArtifactTransactionError("transfer staging fd is not O_RDONLY")
+
+    pending_root_stat = os.stat(".pending", dir_fd=guard.trusted.fd, follow_symlinks=False)
+    if not statmod.S_ISDIR(pending_root_stat.st_mode):
+        raise PathSafetyError(".pending under raw root is not a directory")
+    pending_fd_stat = os.fstat(transfer.pending_directory.fd)
+    if ((pending_root_stat.st_dev, pending_root_stat.st_ino) !=
+            (pending_fd_stat.st_dev, pending_fd_stat.st_ino)):
+        raise PathSafetyError("transfer pending directory does not belong to guarded raw root")
+
+    fd_stat = os.fstat(transfer.staging_fd)
+    if not statmod.S_ISREG(fd_stat.st_mode):
+        raise RawArtifactTransactionError("transfer staging fd is not a regular file")
+    name_stat = os.stat(
+        transfer.staging_filename,
+        dir_fd=transfer.pending_directory.fd,
+        follow_symlinks=False,
+    )
+    expected_identity = (sealed.device_id, sealed.inode, sealed.size_bytes)
+    if (fd_stat.st_dev, fd_stat.st_ino, fd_stat.st_size) != expected_identity:
+        raise RawArtifactTransactionError("staging fd identity/size differs from sealed descriptor")
+    if (name_stat.st_dev, name_stat.st_ino, name_stat.st_size) != expected_identity:
+        raise RawArtifactTransactionError("staging name identity/size differs from sealed descriptor")
+    if statmod.S_IMODE(fd_stat.st_mode) != 0o444:
+        raise RawArtifactTransactionError(
+            f"sealed staging mode must be 0444, got {oct(statmod.S_IMODE(fd_stat.st_mode))}"
+        )
+    if _compute_sha256_from_fd(transfer.staging_fd) != sealed.file_sha256:
+        raise RawArtifactTransactionError("sealed file_sha256 does not match staging bytes")
+    reread_fd = os.dup(transfer.staging_fd)
+    try:
+        events = load_raw_events_strict_fd(reread_fd)
+    finally:
+        os.close(reread_fd)
+    if canonical_events_sha256(events) != sealed.canonical_events_sha256:
+        raise RawArtifactTransactionError("canonical_events_sha256 mismatch")
+    if len(events) != sealed.event_count:
+        raise RawArtifactTransactionError("event_count mismatch")
+    condition_id_set: set[str] = set()
+    for event in events:
+        condition_id = event.get("requested_condition_id", "")
+        if condition_id and not isinstance(condition_id, str):
+            raise RawArtifactTransactionError(
+                "requested_condition_id must be a string when present"
+            )
+        if condition_id:
+            condition_id_set.add(condition_id)
+    condition_ids = sorted(condition_id_set)
+    if tuple(condition_ids) != sealed.condition_ids:
+        raise RawArtifactTransactionError("condition_ids mismatch")
+    return events
+
+
+def _write_all_fd(fd: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(fd, payload[offset:])
+        if written <= 0:
+            raise OSError(errno.EIO, "short write while publishing")
+        offset += written
+
+
+def _verify_published_file_fd(
+    *,
+    dir_fd: int,
+    name: str,
+    expected_bytes: bytes | None = None,
+    expected_sha256: str | None = None,
+    expected_identity: tuple[int, int, int] | None = None,
+) -> os.stat_result:
+    fd, entry_stat = _open_regular_readonly_under_directory(dir_fd, name)
+    try:
+        actual = _read_all_fd(fd)
+    finally:
+        os.close(fd)
+    if expected_bytes is not None and actual != expected_bytes:
+        raise RawArtifactTransactionError(f"published bytes mismatch for {name}")
+    if expected_sha256 is not None:
+        actual_hash = hashlib.sha256(actual).hexdigest()
+        if actual_hash != expected_sha256:
+            raise RawArtifactTransactionError(
+                f"published sha256 mismatch for {name}: {actual_hash} != {expected_sha256}"
+            )
+    if expected_identity is not None:
+        identity = (entry_stat.st_dev, entry_stat.st_ino, entry_stat.st_size)
+        if identity != expected_identity:
+            raise RawArtifactTransactionError(
+                f"published inode/dev/size mismatch for {name}: {identity} != {expected_identity}"
+            )
+    return entry_stat
+
+
+def _publish_bytes_no_replace_under_lock(
+    *,
+    dir_fd: int,
+    final_name: str,
+    payload: bytes,
+    after_link_fault: str,
+    after_dir_fsync_fault: str,
+) -> None:
+    validate_bare_filename(final_name)
+    temp_name = f".{final_name}.tmp.{uuid.uuid4().hex}"
+    temp_fd = -1
+    final_created = False
+    try:
+        temp_fd = os.open(
+            temp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=dir_fd,
+        )
+        _write_all_fd(temp_fd, payload)
+        os.fchmod(temp_fd, 0o444)
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = -1
+        os.link(
+            temp_name,
+            final_name,
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+            follow_symlinks=False,
+        )
+        final_created = True
+        _inject_fault(after_link_fault)
+        os.fsync(dir_fd)
+        _inject_fault(after_dir_fsync_fault)
+        os.unlink(temp_name, dir_fd=dir_fd)
+        os.fsync(dir_fd)
+        _verify_published_file_fd(
+            dir_fd=dir_fd,
+            name=final_name,
+            expected_bytes=payload,
+            expected_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+    except BaseException:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        # Before a final link exists, cleanup is safe only when its absence is
+        # durably recorded.  Once linked, retain the temp as recovery evidence.
+        if not final_created:
+            temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+                dir_fd, temp_name)
+            if not confirmed:
+                raise RawArtifactTransactionError(
+                    f"pre-link temp cleanup not durable for {final_name}: "
+                    f"temp_unlinked={temp_unlinked} error={cleanup_error}"
+                )
+        raise
+
+
+def _publisher_filesystem_snapshot(
+    *,
+    root_fd: int,
+    pending_fd: int,
+    marker_name: str | None,
+    staging_name: str,
+    final_name: str,
+    sidecar_name: str,
+    manifest_name: str,
+) -> dict[str, Any]:
+    def snapshot(fd: int, name: str) -> dict[str, Any]:
+        if fd < 0:
+            return {"name": name, "exists": None, "error": "directory fd closed"}
+        return _snapshot_dir_entry(fd, name)
+
+    root_names = os.listdir(root_fd) if root_fd >= 0 else []
+    return {
+        "marker": snapshot(root_fd, marker_name) if marker_name else None,
+        "staging": snapshot(pending_fd, staging_name),
+        "artifact": snapshot(root_fd, final_name),
+        "sidecar": snapshot(root_fd, sidecar_name),
+        "manifest": snapshot(root_fd, manifest_name),
+        "temporary_names": sorted(
+            name for name in root_names if ".tmp." in name
+        ),
+    }
+
+
+def _marker_body_for_candidate(
+    *,
+    transfer: RawArtifactTransfer,
+    candidate: dict[str, Any],
+    manifest_name: str,
+    transaction_uuid: str,
+    status: MarkerStatus,
+    resolution: MarkerResolution,
+    recoverable: bool,
+) -> dict[str, Any]:
+    sealed = transfer.sealed
+    manifest_bytes = canonical_manifest_file_bytes(candidate)
+    body = {
+        "transaction_version": MARKER_VERSION,
+        "transaction_uuid": transaction_uuid,
+        "ownership_token": transfer.ownership_token,
+        "status": status,
+        "resolution": resolution,
+        "sequence": candidate["sequence"],
+        "run_id": sealed.run_id,
+        "scan_id": sealed.scan_id,
+        "staging_filename": sealed.staging_filename,
+        "final_name": sealed.final_name,
+        "sidecar_name": sealed.final_name + ".sha256",
+        "manifest_name": manifest_name,
+        "device_id": sealed.device_id,
+        "inode": sealed.inode,
+        "size_bytes": sealed.size_bytes,
+        "file_sha256": sealed.file_sha256,
+        "canonical_events_sha256": sealed.canonical_events_sha256,
+        "event_count": sealed.event_count,
+        "condition_ids": list(sealed.condition_ids),
+        "previous_manifest_hash": candidate["previous_manifest_hash"],
+        "candidate_manifest": candidate,
+        "candidate_manifest_bytes_base64": base64.b64encode(manifest_bytes).decode("ascii"),
+        "candidate_manifest_bytes_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "manifest_created_at": candidate["created_at"],
+        "recoverable": recoverable,
+    }
+    return body
+
+
+def _update_transaction_marker_status(
+    *,
+    guard: RawChainLockGuard,
+    raw_directory: Path,
+    policy: MarkerValidationPolicy,
+    marker_name: str,
+    marker_body: dict[str, Any],
+    status: MarkerStatus,
+) -> dict[str, Any]:
+    updated = dict(marker_body)
+    updated["status"] = status
+    updated["resolution"] = "COMMITTED" if status == "COMMITTED" else "ACTIVE"
+    updated["recoverable"] = status != "COMMITTED"
+    updated.pop("marker_integrity_sha256", None)
+    try:
+        update_existing_marker_atomic_under_lock(
+            guard, raw_directory, marker_name, updated, policy)
+    except BaseException as exc:
+        if (isinstance(exc, MarkerPostCommitNotificationError) or
+                isinstance(exc, MarkerUpdateCleanupPending) and exc.committed):
+            setattr(exc, "durable_marker_status", status)
+        raise
+    marker_bytes = prepare_validated_marker_bytes(updated, policy)
+    return parse_marker(marker_bytes)
+
+
+def publish_raw_scan(
+    *,
+    transfer: RawArtifactTransfer,
+    guard: RawChainLockGuard,
+    raw_directory: Path,
+    policy: MarkerValidationPolicy,
+    manifest_created_at: str,
+) -> PublishResult:
+    """Publish one sealed raw scan as an ordered, durable transaction.
+
+    Ownership remains with the caller until the STAGED marker exists.  Once
+    that marker is durable (or potentially durable), the publisher consumes
+    and closes the transfer on every path.  Recovery is intentionally out of
+    scope: any pre-existing marker blocks publication.
+    """
+    assert_guard_valid(guard, raw_directory, policy.manifest_prefix)
+    _validate_iso8601_utc_strict(manifest_created_at, "manifest_created_at")
+    _validate_transfer_for_publish(transfer=transfer, guard=guard, policy=policy)
+    chain = _read_validated_manifest_chain_under_lock(
+        guard=guard, raw_directory=raw_directory, policy=policy)
+    sealed = transfer.sealed
+    if any((entry["run_id"], entry["scan_id"]) == (sealed.run_id, sealed.scan_id)
+           for entry in chain):
+        raise IdentityCollisionError(
+            f"run_id/scan_id already published: {(sealed.run_id, sealed.scan_id)}"
+        )
+    sequence = len(chain)
+    previous_hash = chain[-1]["manifest_hash"] if chain else None
+    candidate: dict[str, Any] = {
+        "sequence": sequence,
+        "run_id": sealed.run_id,
+        "scan_id": sealed.scan_id,
+        "filename": sealed.final_name,
+        "file_sha256": sealed.file_sha256,
+        "canonical_events_sha256": sealed.canonical_events_sha256,
+        "event_count": sealed.event_count,
+        "condition_ids": list(sealed.condition_ids),
+        "previous_manifest_hash": previous_hash,
+        "created_at": manifest_created_at,
+    }
+    candidate["manifest_hash"] = compute_manifest_hash(candidate)
+    manifest_bytes = canonical_manifest_file_bytes(candidate)
+    sidecar_name = sealed.final_name + ".sha256"
+    sidecar_bytes = f"{sealed.file_sha256}  {sealed.final_name}\n".encode("ascii")
+    manifest_name = f"{policy.manifest_prefix}_{sequence:06d}.json"
+    transaction_uuid = str(uuid.uuid4())
+    marker_name = marker_filename(policy.manifest_prefix, sequence, transaction_uuid)
+    marker_body = _marker_body_for_candidate(
+        transfer=transfer,
+        candidate=candidate,
+        manifest_name=manifest_name,
+        transaction_uuid=transaction_uuid,
+        status="STAGED",
+        resolution="ACTIVE",
+        recoverable=True,
+    )
+    # Validate the entire marker/candidate binding before any publication.
+    marker_body = parse_marker(prepare_validated_marker_bytes(marker_body, policy))
+
+    try:
+        _inject_fault(FAULT_PUBLISH_BEFORE_STAGED_MARKER)
+    except BaseException as exc:
+        snapshot = _publisher_filesystem_snapshot(
+            root_fd=guard.trusted.fd,
+            pending_fd=transfer.pending_directory.fd,
+            marker_name=None,
+            staging_name=sealed.staging_filename,
+            final_name=sealed.final_name,
+            sidecar_name=sidecar_name,
+            manifest_name=manifest_name,
+        )
+        raise PublishTransactionFailure(
+            f"publish failed before STAGED marker: {exc}",
+            failure_stage="P0_CANDIDATE",
+            durable_marker_status=None,
+            marker_filename=None,
+            transfer_consumed=False,
+            committed=False,
+            cleanup_pending=False,
+            filesystem_snapshot=snapshot,
+        ) from exc
+    consumed = False
+    durable_status: str | None = None
+    committed = False
+    stage = "P1_STAGED_MARKER"
+    try:
+        try:
+            create_marker_no_replace_under_lock(
+                guard, raw_directory, marker_name, marker_body, policy)
+            consumed = True
+            durable_status = "STAGED"
+        except MarkerCreateCleanupPending as exc:
+            consumed = exc.final_created
+            durable_status = "STAGED" if exc.final_created else None
+            raise
+        except MarkerPostCommitNotificationError:
+            consumed = True
+            durable_status = "STAGED"
+            raise
+        _inject_fault(FAULT_PUBLISH_AFTER_STAGED_MARKER)
+
+        stage = "P2_ARTIFACT"
+        os.link(
+            sealed.staging_filename,
+            sealed.final_name,
+            src_dir_fd=transfer.pending_directory.fd,
+            dst_dir_fd=guard.trusted.fd,
+            follow_symlinks=False,
+        )
+        _inject_fault(FAULT_PUBLISH_AFTER_ARTIFACT_LINK)
+        _verify_published_file_fd(
+            dir_fd=guard.trusted.fd,
+            name=sealed.final_name,
+            expected_sha256=sealed.file_sha256,
+            expected_identity=(sealed.device_id, sealed.inode, sealed.size_bytes),
+        )
+        os.fsync(guard.trusted.fd)
+        _inject_fault(FAULT_PUBLISH_AFTER_ARTIFACT_DIR_FSYNC)
+        marker_body = _update_transaction_marker_status(
+            guard=guard,
+            raw_directory=raw_directory,
+            policy=policy,
+            marker_name=marker_name,
+            marker_body=marker_body,
+            status="ARTIFACT_PUBLISHED",
+        )
+        durable_status = "ARTIFACT_PUBLISHED"
+        _inject_fault(FAULT_PUBLISH_AFTER_ARTIFACT_MARKER_UPDATE)
+
+        stage = "P3_SIDECAR"
+        _publish_bytes_no_replace_under_lock(
+            dir_fd=guard.trusted.fd,
+            final_name=sidecar_name,
+            payload=sidecar_bytes,
+            after_link_fault=FAULT_PUBLISH_AFTER_SIDECAR_LINK,
+            after_dir_fsync_fault=FAULT_PUBLISH_AFTER_SIDECAR_DIR_FSYNC,
+        )
+        marker_body = _update_transaction_marker_status(
+            guard=guard,
+            raw_directory=raw_directory,
+            policy=policy,
+            marker_name=marker_name,
+            marker_body=marker_body,
+            status="SIDECAR_PUBLISHED",
+        )
+        durable_status = "SIDECAR_PUBLISHED"
+        _inject_fault(FAULT_PUBLISH_AFTER_SIDECAR_MARKER_UPDATE)
+
+        stage = "P4_MANIFEST"
+        _publish_bytes_no_replace_under_lock(
+            dir_fd=guard.trusted.fd,
+            final_name=manifest_name,
+            payload=manifest_bytes,
+            after_link_fault=FAULT_PUBLISH_AFTER_MANIFEST_LINK,
+            after_dir_fsync_fault=FAULT_PUBLISH_AFTER_MANIFEST_DIR_FSYNC,
+        )
+        published_manifest = json.loads(manifest_bytes)
+        if published_manifest != candidate or compute_manifest_hash(published_manifest) != candidate["manifest_hash"]:
+            raise RawArtifactTransactionError("published manifest validation failed")
+        marker_body = _update_transaction_marker_status(
+            guard=guard,
+            raw_directory=raw_directory,
+            policy=policy,
+            marker_name=marker_name,
+            marker_body=marker_body,
+            status="MANIFEST_PUBLISHED",
+        )
+        durable_status = "MANIFEST_PUBLISHED"
+        _inject_fault(FAULT_PUBLISH_AFTER_MANIFEST_MARKER_UPDATE)
+
+        stage = "P5_COMMITTED_MARKER"
+        marker_body = _update_transaction_marker_status(
+            guard=guard,
+            raw_directory=raw_directory,
+            policy=policy,
+            marker_name=marker_name,
+            marker_body=marker_body,
+            status="COMMITTED",
+        )
+        durable_status = "COMMITTED"
+        committed = True
+        _inject_fault(FAULT_PUBLISH_AFTER_COMMITTED_MARKER)
+
+        stage = "P6_PENDING_CLEANUP"
+        os.unlink(sealed.staging_filename, dir_fd=transfer.pending_directory.fd)
+        _inject_fault(FAULT_PUBLISH_AFTER_STAGING_UNLINK)
+        os.fsync(transfer.pending_directory.fd)
+        _inject_fault(FAULT_PUBLISH_AFTER_PENDING_DIR_FSYNC)
+        transfer.close()
+        _inject_fault(FAULT_PUBLISH_AFTER_TRANSFER_CLOSE)
+
+        stage = "P7_MARKER_CLEANUP"
+        os.unlink(marker_name, dir_fd=guard.trusted.fd)
+        _inject_fault(FAULT_PUBLISH_AFTER_MARKER_UNLINK)
+        os.fsync(guard.trusted.fd)
+        try:
+            os.stat(marker_name, dir_fd=guard.trusted.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RawArtifactTransactionError("transaction marker still exists after cleanup")
+        try:
+            _inject_fault(FAULT_PUBLISH_AFTER_FINAL_ROOT_FSYNC)
+        except BaseException as exc:
+            snapshot = _publisher_filesystem_snapshot(
+                root_fd=guard.trusted.fd,
+                pending_fd=-1,
+                marker_name=marker_name,
+                staging_name=sealed.staging_filename,
+                final_name=sealed.final_name,
+                sidecar_name=sidecar_name,
+                manifest_name=manifest_name,
+            )
+            raise PublishPostCommitNotificationError(
+                f"publisher committed-clean; post-commit hook failed: {exc}",
+                failure_stage=stage,
+                durable_marker_status="COMMITTED",
+                marker_filename=marker_name,
+                transfer_consumed=True,
+                committed=True,
+                cleanup_pending=False,
+                filesystem_snapshot=snapshot,
+            ) from exc
+        return PublishResult(status="PUBLISHED", manifest_entry=candidate)
+    except PublishPostCommitNotificationError:
+        raise
+    except BaseException as exc:
+        if getattr(exc, "durable_marker_status", None) is not None:
+            durable_status = exc.durable_marker_status
+            committed = durable_status == "COMMITTED"
+        close_error: BaseException | None = None
+        if consumed and not transfer._closed:
+            try:
+                transfer.close()
+            except BaseException as inner_exc:
+                close_error = inner_exc
+        pending_fd = (
+            transfer.pending_directory.fd
+            if not transfer.pending_directory._closed else -1
+        )
+        snapshot = _publisher_filesystem_snapshot(
+            root_fd=guard.trusted.fd,
+            pending_fd=pending_fd,
+            marker_name=marker_name if consumed else None,
+            staging_name=sealed.staging_filename,
+            final_name=sealed.final_name,
+            sidecar_name=sidecar_name,
+            manifest_name=manifest_name,
+        )
+        cleanup_pending = committed or close_error is not None
+        error_type = PublishCleanupPending if committed else PublishTransactionFailure
+        detail = f"{exc}"
+        if close_error is not None:
+            detail += f"; transfer close failed: {close_error}"
+        raise error_type(
+            f"publish failed at {stage}: {detail}",
+            failure_stage=stage,
+            durable_marker_status=durable_status,
+            marker_filename=marker_name if consumed else None,
+            transfer_consumed=consumed,
+            committed=committed,
+            cleanup_pending=cleanup_pending,
+            filesystem_snapshot=snapshot,
+        ) from exc
 
 
 @dataclass
