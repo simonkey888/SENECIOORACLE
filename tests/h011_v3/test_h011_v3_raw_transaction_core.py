@@ -9,13 +9,16 @@ dependencies.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import errno
+import fcntl
 import gzip
 import hashlib
 import json
 import os
 import multiprocessing
 import re
+import stat
 import sys
 import threading
 import uuid
@@ -29,11 +32,13 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "polymarket"))
 
 import h011_v3_raw_transaction as rt
 from h011_v3_raw_transaction import (
+    AtomicMarkerTargetChangedError,
+    AtomicMarkerUpdateError,
     AtomicMarkerUpdateUnsupportedError,
     AtomicMarkerRollbackFailed,
     CandidateManifestMismatchError,
     DEFAULT_MARKER_POLICY,
-    DiagnosticEvidence,
+    DirectoryCreationDurabilityError,
     DiagnosticPersistenceError,
     EligibilityCorruptionError,
     EligibilityState,
@@ -43,6 +48,7 @@ from h011_v3_raw_transaction import (
     MarkerCandidateBindingError,
     MarkerIntegrityError,
     MarkerCreateCleanupPending,
+    MarkerPostCommitNotificationError,
     MarkerUpdateCleanupPending,
     MarkerValidationPolicy,
     MarkerValidationError,
@@ -814,28 +820,6 @@ def test_atomic_update_leaves_no_temp_residue(raw_dir: Path, policy):
     body2 = _make_valid_marker_body(policy, status="COMMITTED")
     with lock.acquire() as guard:
         update_existing_marker_atomic_under_lock(guard, raw_dir, "test.marker", body2, policy)
-    temps = list(raw_dir.glob("test.marker.tmp.*"))
-    assert temps == []
-
-
-def test_update_target_removed_before_exchange_fails(raw_dir: Path, policy):
-    """F3 — If target marker is removed before RENAME_EXCHANGE, the update
-    must fail without creating the target."""
-    body1 = _make_valid_marker_body(policy)
-    lock = RawChainLock(raw_dir, policy.manifest_prefix)
-    with lock.acquire() as guard:
-        create_marker_no_replace_under_lock(guard, raw_dir, "test.marker", body1, policy)
-    body2 = _make_valid_marker_body(policy, status="COMMITTED")
-    with lock.acquire() as guard:
-        # We can't easily remove the target between open and exchange in
-        # the same thread. Instead, test that a missing target is caught.
-        # Remove the marker before update.
-        (raw_dir / "test.marker").unlink()
-        with pytest.raises(FileNotFoundError):
-            update_existing_marker_atomic_under_lock(
-                guard, raw_dir, "test.marker", body2, policy
-            )
-    # No temp files left
     temps = list(raw_dir.glob("test.marker.tmp.*"))
     assert temps == []
 
@@ -1612,27 +1596,97 @@ def test_trusted_directory_close_failure_is_visible_and_retryable(raw_dir: Path,
     trusted.close()
 
 
-def test_guard_aggregates_trusted_directory_close_failure(raw_dir: Path, monkeypatch):
+@pytest.mark.parametrize(
+    ("fail_unlock", "fail_lock_close", "fail_trusted_close"),
+    [
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+        (True, False, True),
+    ],
+)
+def test_guard_release_retry_resumes_only_incomplete_operations(
+        raw_dir: Path, monkeypatch, fail_unlock: bool,
+        fail_lock_close: bool, fail_trusted_close: bool):
     guard = RawChainLock(raw_dir, "manifest").acquire()
+    real_flock = fcntl.flock
     real_close = os.close
-    failed = False
-    def fail_trusted_once(fd):
-        nonlocal failed
-        if fd == guard.trusted.fd and not failed:
-            failed = True
-            raise OSError(errno.EIO, "trusted close fault")
+    attempts = {"unlock": 0, "lock_close": 0, "trusted_close": 0}
+    remaining = {
+        "unlock": int(fail_unlock),
+        "lock_close": int(fail_lock_close),
+        "trusted_close": int(fail_trusted_close),
+    }
+
+    def flaky_flock(fd, operation):
+        if fd == guard.lock_fd and operation == fcntl.LOCK_UN:
+            attempts["unlock"] += 1
+            if remaining["unlock"]:
+                remaining["unlock"] -= 1
+                raise OSError(errno.EIO, "unlock fault")
+        return real_flock(fd, operation)
+
+    def flaky_close(fd):
+        key = None
+        if fd == guard.lock_fd:
+            key = "lock_close"
+        elif fd == guard.trusted.fd:
+            key = "trusted_close"
+        if key is not None:
+            attempts[key] += 1
+            if remaining[key]:
+                remaining[key] -= 1
+                raise OSError(errno.EIO, f"{key} fault")
         return real_close(fd)
-    monkeypatch.setattr(os, "close", fail_trusted_once)
-    with pytest.raises(rt.LockReleaseError, match="trusted fd"):
+
+    monkeypatch.setattr(fcntl, "flock", flaky_flock)
+    monkeypatch.setattr(os, "close", flaky_close)
+    with pytest.raises(rt.LockReleaseError):
         guard.close()
+    first_attempts = dict(attempts)
+    first_state = dataclasses.asdict(guard._release_state)
     assert guard._health == "BROKEN"
     assert guard._closed is False
     assert rt._ACTIVE_GUARDS[guard.token].health == "BROKEN"
-    monkeypatch.setattr(os, "close", real_close)
-    guard.trusted.close()
-    object.__setattr__(guard, "_closed", True)
-    with rt._ACTIVE_GUARDS_LOCK:
-        rt._ACTIVE_GUARDS.pop(guard.token)
+
+    guard.close()
+    assert guard._closed is True
+    assert guard._health == "CLOSED"
+    assert guard.token not in rt._ACTIVE_GUARDS
+    assert dataclasses.asdict(guard._release_state) == {
+        "flock_released": True,
+        "lock_fd_closed": True,
+        "trusted_fd_closed": True,
+    }
+    if first_state["flock_released"]:
+        assert attempts["unlock"] == first_attempts["unlock"]
+    if first_state["lock_fd_closed"]:
+        assert attempts["lock_close"] == first_attempts["lock_close"]
+    if first_state["trusted_fd_closed"]:
+        assert attempts["trusted_close"] == first_attempts["trusted_close"]
+
+
+def test_broken_guard_blocks_new_chain_owner_until_retry_succeeds(
+        raw_dir: Path, monkeypatch):
+    guard = RawChainLock(raw_dir, "manifest").acquire()
+    real_flock = fcntl.flock
+    failed = False
+
+    def fail_unlock_once(fd, operation):
+        nonlocal failed
+        if fd == guard.lock_fd and operation == fcntl.LOCK_UN and not failed:
+            failed = True
+            raise OSError(errno.EIO, "unlock fault")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_unlock_once)
+    with pytest.raises(rt.LockReleaseError):
+        guard.close()
+    with pytest.raises(NestedLockingError):
+        RawChainLock(raw_dir, "manifest").acquire()
+    guard.close()
+    with RawChainLock(raw_dir, "manifest").acquire():
+        pass
 
 
 @pytest.mark.parametrize("point", [
@@ -1739,15 +1793,38 @@ def test_diagnostic_collision_is_real_and_never_overwrites(raw_dir: Path, monkey
     rt.FAULT_CREATE_AFTER_TEMP_UNLINK,
     rt.FAULT_CREATE_AFTER_DIR_FSYNC,
 ])
-def test_marker_create_fault_points_report_committed_cleanup_pending(
+def test_marker_create_fault_points_match_real_filesystem_state(
         raw_dir: Path, policy, point: str):
     body = _make_valid_marker_body(policy)
     rt.set_fault_injection_hook(
         lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
+    expected_error = (
+        MarkerPostCommitNotificationError
+        if point == rt.FAULT_CREATE_AFTER_DIR_FSYNC
+        else MarkerCreateCleanupPending
+    )
     with RawChainLock(raw_dir, "manifest").acquire() as guard:
-        with pytest.raises(MarkerCreateCleanupPending):
+        with pytest.raises(expected_error) as raised:
             create_marker_no_replace_under_lock(guard, raw_dir, "fault.marker", body, policy)
-    assert (raw_dir / "fault.marker").exists()
+    final_path = raw_dir / "fault.marker"
+    assert final_path.exists()
+    temps = list(raw_dir.glob("fault.marker.tmp.*"))
+    if point == rt.FAULT_CREATE_AFTER_FINAL_LINK:
+        assert len(temps) == 1
+        assert temps[0].stat().st_ino == final_path.stat().st_ino
+        assert temps[0].read_bytes() == final_path.read_bytes()
+        assert raised.value.filesystem_state == "COMMITTED_OLD_TEMP_PRESENT"
+        assert raised.value.final_created is True
+        assert raised.value.temp_unlinked is False
+    elif point == rt.FAULT_CREATE_AFTER_TEMP_UNLINK:
+        assert temps == []
+        assert raised.value.filesystem_state == (
+            "COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED")
+        assert raised.value.temp_unlinked is True
+    else:
+        assert temps == []
+        assert raised.value.filesystem_state == "COMMITTED_CLEAN"
+        assert raised.value.operation == "create"
 
 
 @pytest.mark.parametrize("point", [
@@ -1764,9 +1841,11 @@ def test_marker_update_precommit_faults_prove_rollback(raw_dir: Path, policy, po
     rt.set_fault_injection_hook(
         lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
     with RawChainLock(raw_dir, "manifest").acquire() as guard:
-        with pytest.raises(rt.AtomicMarkerUpdateError):
+        with pytest.raises(rt.AtomicMarkerUpdateError) as raised:
             update_existing_marker_atomic_under_lock(
                 guard, raw_dir, "rollback.marker", new, policy)
+    assert raised.value.filesystem_state == "PRE_COMMIT_FAILED_CLEAN"
+    assert raised.value.cleanup_durability_confirmed is True
     assert (raw_dir / "rollback.marker").read_bytes() == old_bytes
     assert not list(raw_dir.glob("rollback.marker.tmp.*"))
 
@@ -1776,20 +1855,41 @@ def test_marker_update_precommit_faults_prove_rollback(raw_dir: Path, policy, po
     rt.FAULT_AFTER_OLD_MARKER_UNLINK,
     rt.FAULT_AFTER_SECOND_DIR_FSYNC,
 ])
-def test_marker_update_postcommit_faults_report_cleanup_pending(
+def test_marker_update_postcommit_faults_match_real_filesystem_state(
         raw_dir: Path, policy, point: str):
     old = _make_valid_marker_body(policy, status="STAGED")
     new = _make_valid_marker_body(policy, status="COMMITTED")
     with RawChainLock(raw_dir, "manifest").acquire() as guard:
         create_marker_no_replace_under_lock(guard, raw_dir, "commit.marker", old, policy)
+    old_bytes = (raw_dir / "commit.marker").read_bytes()
+    old_inode = (raw_dir / "commit.marker").stat().st_ino
     rt.set_fault_injection_hook(
         lambda current: (_ for _ in ()).throw(RuntimeError(point)) if current == point else None)
+    expected_error = (
+        MarkerPostCommitNotificationError
+        if point == rt.FAULT_AFTER_SECOND_DIR_FSYNC
+        else MarkerUpdateCleanupPending
+    )
     with RawChainLock(raw_dir, "manifest").acquire() as guard:
-        with pytest.raises(MarkerUpdateCleanupPending):
+        with pytest.raises(expected_error) as raised:
             update_existing_marker_atomic_under_lock(
                 guard, raw_dir, "commit.marker", new, policy)
     parsed = parse_marker((raw_dir / "commit.marker").read_bytes())
     assert parsed["status"] == "COMMITTED"
+    temps = list(raw_dir.glob("commit.marker.tmp.*"))
+    if point == rt.FAULT_AFTER_FIRST_DIR_FSYNC:
+        assert len(temps) == 1
+        assert temps[0].read_bytes() == old_bytes
+        assert temps[0].stat().st_ino == old_inode
+        assert raised.value.filesystem_state == "COMMITTED_OLD_TEMP_PRESENT"
+    elif point == rt.FAULT_AFTER_OLD_MARKER_UNLINK:
+        assert temps == []
+        assert raised.value.filesystem_state == (
+            "COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED")
+    else:
+        assert temps == []
+        assert raised.value.filesystem_state == "COMMITTED_CLEAN"
+        assert raised.value.operation == "update"
 
 
 @pytest.mark.parametrize("rollback_point", [
@@ -1803,14 +1903,41 @@ def test_marker_rollback_faults_raise_explicit_ambiguity(
     new = _make_valid_marker_body(policy, status="COMMITTED")
     with RawChainLock(raw_dir, "manifest").acquire() as guard:
         create_marker_no_replace_under_lock(guard, raw_dir, "ambiguous.marker", old, policy)
+    old_bytes = (raw_dir / "ambiguous.marker").read_bytes()
+    old_inode = (raw_dir / "ambiguous.marker").stat().st_ino
+    new_bytes = prepare_validated_marker_bytes(new, policy)
     def hook(point):
         if point in (rt.FAULT_AFTER_EXCHANGE, rollback_point):
             raise RuntimeError(point)
     rt.set_fault_injection_hook(hook)
     with RawChainLock(raw_dir, "manifest").acquire() as guard:
-        with pytest.raises(AtomicMarkerRollbackFailed, match="rollback failed"):
+        with pytest.raises(AtomicMarkerRollbackFailed, match="rollback failed") as raised:
             update_existing_marker_atomic_under_lock(
                 guard, raw_dir, "ambiguous.marker", new, policy)
+    error = raised.value
+    expected_phase = {
+        rt.FAULT_ROLLBACK_EXCHANGE_FAILURE: "exchange",
+        rt.FAULT_ROLLBACK_FSYNC_FAILURE: "directory fsync",
+        rt.FAULT_ROLLBACK_TEMP_UNLINK_FAILURE: "new temp unlink",
+    }[rollback_point]
+    assert error.failed_operation == expected_phase
+    marker_path = raw_dir / "ambiguous.marker"
+    assert error.marker_snapshot["exists"] is True
+    assert error.marker_snapshot["bytes"] == marker_path.read_bytes()
+    assert error.marker_snapshot["ino"] == marker_path.stat().st_ino
+    assert error.temp_snapshot["exists"] is True
+    temp_path = raw_dir / error.temp_snapshot["name"]
+    assert temp_path.exists()
+    assert error.temp_snapshot["bytes"] == temp_path.read_bytes()
+    assert error.temp_snapshot["ino"] == temp_path.stat().st_ino
+    if rollback_point == rt.FAULT_ROLLBACK_EXCHANGE_FAILURE:
+        assert marker_path.read_bytes() == new_bytes
+        assert temp_path.read_bytes() == old_bytes
+        assert temp_path.stat().st_ino == old_inode
+    else:
+        assert marker_path.read_bytes() == old_bytes
+        assert marker_path.stat().st_ino == old_inode
+        assert temp_path.read_bytes() == new_bytes
 
 
 @pytest.mark.parametrize("timestamp", [
@@ -1899,6 +2026,293 @@ def test_fd_leaks_zero_across_100_lifecycle_cycles(raw_dir: Path, monkeypatch):
             RawScanStager("r", f"enter-fault-{index}", raw_dir).__enter__()
         rt.set_fault_injection_hook(None)
     assert len(os.listdir("/proc/self/fd")) == baseline
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# I1-I6 — residual durability and cleanup semantics
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_legacy_path_based_diagnostic_writer_is_removed():
+    assert not hasattr(rt, "write_diagnostic_evidence")
+
+
+def test_pending_and_quarantine_creation_fsync_the_raw_root(
+        raw_dir: Path, monkeypatch):
+    raw_identity = (raw_dir.stat().st_dev, raw_dir.stat().st_ino)
+    real_fsync = os.fsync
+    synced_identities = []
+
+    def recording_fsync(fd):
+        current = os.fstat(fd)
+        synced_identities.append((current.st_dev, current.st_ino))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    with RawScanStager("run", "scan", raw_dir) as stager:
+        stager.append_event(_make_event())
+        with pytest.raises(RawEventPersistenceError):
+            stager._fail_with_diagnostic("PARENT_FSYNC", RuntimeError("trigger"))
+    # One parent fsync durably creates .pending; another creates .quarantine.
+    assert synced_identities.count(raw_identity) >= 2
+
+
+def test_pending_mkdir_fileexists_race_opens_and_validates_winner(
+        raw_dir: Path, monkeypatch):
+    real_mkdir = os.mkdir
+    raced = False
+
+    def racing_mkdir(path, *args, **kwargs):
+        nonlocal raced
+        if path == ".pending" and not raced:
+            raced = True
+            real_mkdir(path, *args, **kwargs)
+            raise FileExistsError(errno.EEXIST, "concurrent creator")
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+    with RawScanStager("run", "scan", raw_dir) as stager:
+        assert stat.S_ISDIR(os.fstat(stager._pending_dir_fd).st_mode)
+    assert raced is True
+
+
+def test_quarantine_mkdir_fileexists_race_opens_and_validates_winner(
+        raw_dir: Path, monkeypatch):
+    real_mkdir = os.mkdir
+    raced = False
+    with RawScanStager("run", "scan", raw_dir) as stager:
+        def racing_mkdir(path, *args, **kwargs):
+            nonlocal raced
+            if path == ".quarantine" and not raced:
+                raced = True
+                real_mkdir(path, *args, **kwargs)
+                raise FileExistsError(errno.EEXIST, "concurrent creator")
+            return real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", racing_mkdir)
+        stager.append_event(_make_event())
+        with pytest.raises(RawEventPersistenceError):
+            stager._fail_with_diagnostic("Q_RACE", RuntimeError("trigger"))
+    assert raced is True
+    assert (raw_dir / ".quarantine").is_dir()
+
+
+@pytest.mark.parametrize("directory_name,point", [
+    (".pending", rt.FAULT_PENDING_AFTER_MKDIR_BEFORE_PARENT_FSYNC),
+    (".quarantine", rt.FAULT_QUARANTINE_AFTER_MKDIR_BEFORE_PARENT_FSYNC),
+])
+def test_directory_creation_fault_before_parent_fsync_is_explicit_and_leak_free(
+        raw_dir: Path, directory_name: str, point: str):
+    baseline = len(os.listdir("/proc/self/fd"))
+    if directory_name == ".pending":
+        rt.set_fault_injection_hook(
+            lambda current: (_ for _ in ()).throw(RuntimeError(point))
+            if current == point else None)
+        stager = RawScanStager("run", "scan", raw_dir)
+        with pytest.raises(DirectoryCreationDurabilityError) as raised:
+            stager.__enter__()
+        assert raised.value.directory_name == directory_name
+        assert raised.value.created is True
+        assert raised.value.parent_fsync_confirmed is False
+        assert stager._entered is False
+    else:
+        with RawScanStager("run", "scan", raw_dir) as stager:
+            stager.append_event(_make_event())
+            rt.set_fault_injection_hook(
+                lambda current: (_ for _ in ()).throw(RuntimeError(point))
+                if current == point else None)
+            with pytest.raises(DiagnosticPersistenceError, match="parent-directory"):
+                stager._fail_with_diagnostic("Q_PARENT_FSYNC", RuntimeError("trigger"))
+            rt.set_fault_injection_hook(None)
+    assert (raw_dir / directory_name).is_dir()
+    assert len(os.listdir("/proc/self/fd")) == baseline
+
+
+@pytest.mark.parametrize("directory_name", [".pending", ".quarantine"])
+def test_actual_parent_fsync_failure_is_specific_and_closes_resources(
+        raw_dir: Path, monkeypatch, directory_name: str):
+    baseline = len(os.listdir("/proc/self/fd"))
+    raw_identity = (raw_dir.stat().st_dev, raw_dir.stat().st_ino)
+    real_fsync = os.fsync
+    fail_parent = False
+
+    def failing_parent_fsync(fd):
+        current = os.fstat(fd)
+        if fail_parent and (current.st_dev, current.st_ino) == raw_identity:
+            raise OSError(errno.EIO, "raw root fsync fault")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", failing_parent_fsync)
+    if directory_name == ".pending":
+        fail_parent = True
+        with pytest.raises(DirectoryCreationDurabilityError, match="parent-directory fsync"):
+            RawScanStager("run", "scan", raw_dir).__enter__()
+    else:
+        with RawScanStager("run", "scan", raw_dir) as stager:
+            stager.append_event(_make_event())
+            fail_parent = True
+            with pytest.raises(DiagnosticPersistenceError, match="parent-directory fsync"):
+                stager._fail_with_diagnostic("Q_FSYNC", RuntimeError("trigger"))
+            fail_parent = False
+    assert (raw_dir / directory_name).is_dir()
+    assert len(os.listdir("/proc/self/fd")) == baseline
+
+
+def test_create_precommit_cleanup_unlink_without_fsync_is_reported(
+        raw_dir: Path, policy, monkeypatch):
+    body = _make_valid_marker_body(policy)
+    monkeypatch.setattr(
+        os, "link", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(errno.EIO, "final link fault")))
+    monkeypatch.setattr(
+        rt, "_dir_fsync_via_fd", lambda fd: (_ for _ in ()).throw(
+            OSError(errno.EIO, "cleanup fsync fault")))
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(MarkerCreateCleanupPending) as raised:
+            create_marker_no_replace_under_lock(
+                guard, raw_dir, "precommit.marker", body, policy)
+    error = raised.value
+    assert error.final_created is False
+    assert error.temp_unlinked is True
+    assert error.cleanup_durability_confirmed is False
+    assert error.filesystem_state == "PRE_COMMIT_CLEANUP_UNCONFIRMED"
+    assert not (raw_dir / "precommit.marker").exists()
+    assert not list(raw_dir.glob("precommit.marker.tmp.*"))
+
+
+def test_create_precommit_failure_with_durable_cleanup_is_classified_clean(
+        raw_dir: Path, policy, monkeypatch):
+    body = _make_valid_marker_body(policy)
+    monkeypatch.setattr(
+        os, "link", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(errno.EIO, "final link fault")))
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(OSError, match="final link fault") as raised:
+            create_marker_no_replace_under_lock(
+                guard, raw_dir, "clean-precommit.marker", body, policy)
+    assert raised.value.filesystem_state == "PRE_COMMIT_FAILED_CLEAN"
+    assert raised.value.cleanup_durability_confirmed is True
+    assert raised.value.temp_unlinked is True
+    assert raised.value.committed is False
+    assert not (raw_dir / "clean-precommit.marker").exists()
+    assert not list(raw_dir.glob("clean-precommit.marker.tmp.*"))
+
+
+def test_update_temp_write_cleanup_without_fsync_is_reported(
+        raw_dir: Path, policy, monkeypatch):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(
+            guard, raw_dir, "precommit-update.marker", old, policy)
+    old_bytes = (raw_dir / "precommit-update.marker").read_bytes()
+    monkeypatch.setattr(
+        os, "fdopen", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(errno.EIO, "temp write fault")))
+    monkeypatch.setattr(
+        rt, "_dir_fsync_via_fd", lambda fd: (_ for _ in ()).throw(
+            OSError(errno.EIO, "cleanup fsync fault")))
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(MarkerUpdateCleanupPending) as raised:
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "precommit-update.marker", new, policy)
+    error = raised.value
+    assert error.committed is False
+    assert error.temp_unlinked is True
+    assert error.cleanup_durability_confirmed is False
+    assert error.filesystem_state == "PRE_COMMIT_CLEANUP_UNCONFIRMED"
+    assert (raw_dir / "precommit-update.marker").read_bytes() == old_bytes
+    assert not list(raw_dir.glob("precommit-update.marker.tmp.*"))
+
+
+@pytest.mark.parametrize("exchange_errno,expected_type", [
+    (errno.ENOSYS, AtomicMarkerUpdateUnsupportedError),
+    (errno.EINVAL, AtomicMarkerUpdateUnsupportedError),
+    (errno.ENOENT, AtomicMarkerTargetChangedError),
+    (errno.ELOOP, PathSafetyError),
+    (errno.EACCES, AtomicMarkerUpdateError),
+    (errno.EPERM, AtomicMarkerUpdateError),
+    (errno.EIO, AtomicMarkerUpdateError),
+])
+def test_rename_exchange_errno_classification_and_durable_temp_cleanup(
+        raw_dir: Path, policy, monkeypatch, exchange_errno: int,
+        expected_type: type[BaseException]):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(
+            guard, raw_dir, "classification.marker", old, policy)
+    old_bytes = (raw_dir / "classification.marker").read_bytes()
+    monkeypatch.setattr(
+        rt, "_renameat2_exchange", lambda *args: (_ for _ in ()).throw(
+            OSError(exchange_errno, os.strerror(exchange_errno))))
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(expected_type) as raised:
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "classification.marker", new, policy)
+    assert type(raised.value) is expected_type
+    assert raised.value.filesystem_state == "PRE_COMMIT_FAILED_CLEAN"
+    assert raised.value.cleanup_durability_confirmed is True
+    assert (raw_dir / "classification.marker").read_bytes() == old_bytes
+    assert not list(raw_dir.glob("classification.marker.tmp.*"))
+
+
+def test_target_removed_between_capture_and_exchange_is_classified(
+        raw_dir: Path, policy):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(
+            guard, raw_dir, "target-race.marker", old, policy)
+
+    def remove_at_barrier(point):
+        if point == rt.FAULT_BEFORE_EXCHANGE:
+            os.unlink(raw_dir / "target-race.marker")
+
+    rt.set_fault_injection_hook(remove_at_barrier)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(AtomicMarkerTargetChangedError):
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "target-race.marker", new, policy)
+    assert not (raw_dir / "target-race.marker").exists()
+    assert not list(raw_dir.glob("target-race.marker.tmp.*"))
+
+
+def test_target_replacement_between_capture_and_exchange_reports_ambiguity(
+        raw_dir: Path, policy):
+    old = _make_valid_marker_body(policy, status="STAGED")
+    new = _make_valid_marker_body(policy, status="COMMITTED")
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        create_marker_no_replace_under_lock(
+            guard, raw_dir, "replace-race.marker", old, policy)
+    replacement_bytes = b"concurrent replacement"
+    replacement_inode = None
+
+    def replace_at_barrier(point):
+        nonlocal replacement_inode
+        if point == rt.FAULT_BEFORE_EXCHANGE:
+            # Keep the captured inode alive so the replacement cannot reuse it.
+            os.link(
+                raw_dir / "replace-race.marker",
+                raw_dir / "captured-original.keep",
+            )
+            os.unlink(raw_dir / "replace-race.marker")
+            (raw_dir / "replace-race.marker").write_bytes(replacement_bytes)
+            replacement_inode = (raw_dir / "replace-race.marker").stat().st_ino
+
+    rt.set_fault_injection_hook(replace_at_barrier)
+    with RawChainLock(raw_dir, "manifest").acquire() as guard:
+        with pytest.raises(AtomicMarkerRollbackFailed) as raised:
+            update_existing_marker_atomic_under_lock(
+                guard, raw_dir, "replace-race.marker", new, policy)
+    assert raised.value.failed_operation == "original verification"
+    assert (raw_dir / "replace-race.marker").read_bytes() == replacement_bytes
+    assert (raw_dir / "replace-race.marker").stat().st_ino == replacement_inode
+    assert raised.value.marker_snapshot["bytes"] == replacement_bytes
+    assert raised.value.marker_snapshot["ino"] == replacement_inode
+    assert raised.value.temp_snapshot["exists"] is True
+    temp_path = raw_dir / raised.value.temp_snapshot["name"]
+    assert temp_path.exists()
+    assert temp_path.read_bytes() == prepare_validated_marker_bytes(new, policy)
 
 
 # ═══════════════════════════════════════════════════════════════════════

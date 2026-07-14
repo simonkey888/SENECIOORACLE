@@ -135,7 +135,15 @@ PublishResultStatus = Literal["PUBLISHED", "RECOVERABLE_ERROR", "BLOCKED"]
 
 EvidenceLocation = Literal["PENDING", "QUARANTINE"]
 
-GuardHealth = Literal["ACTIVE", "BROKEN"]
+GuardHealth = Literal["ACTIVE", "BROKEN", "CLOSED"]
+
+MarkerFilesystemState = Literal[
+    "PRE_COMMIT_FAILED_CLEAN",
+    "PRE_COMMIT_CLEANUP_UNCONFIRMED",
+    "COMMITTED_OLD_TEMP_PRESENT",
+    "COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED",
+    "COMMITTED_CLEAN",
+]
 
 MARKER_STATUSES: Final[frozenset[str]] = frozenset({
     "STAGED", "ARTIFACT_PUBLISHED", "SIDECAR_PUBLISHED",
@@ -226,16 +234,82 @@ class AtomicMarkerUpdateError(RawTransactionError):
     """Raised when a transactional marker update fails and rollback was attempted (G3)."""
 
 
+class AtomicMarkerTargetChangedError(AtomicMarkerUpdateError):
+    """The marker target disappeared between validation and RENAME_EXCHANGE."""
+
+
 class AtomicMarkerRollbackFailed(RawTransactionError):
     """Rollback could not prove restoration of the pre-update marker."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failed_operation: str,
+        marker_snapshot: dict[str, Any],
+        temp_snapshot: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.failed_operation = failed_operation
+        self.marker_snapshot = marker_snapshot
+        self.temp_snapshot = temp_snapshot
+
 
 class MarkerCreateCleanupPending(RawTransactionError):
-    """Marker creation committed but temp cleanup/durability is incomplete."""
+    """Marker creation cleanup is incomplete or not durably confirmed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        final_created: bool,
+        temp_unlinked: bool,
+        cleanup_durability_confirmed: bool,
+        filesystem_state: MarkerFilesystemState,
+    ) -> None:
+        super().__init__(message)
+        self.final_created = final_created
+        self.temp_unlinked = temp_unlinked
+        self.cleanup_durability_confirmed = cleanup_durability_confirmed
+        self.filesystem_state = filesystem_state
 
 
 class MarkerUpdateCleanupPending(RawTransactionError):
     """Marker update committed but old marker cleanup/durability is incomplete."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        committed: bool,
+        temp_unlinked: bool,
+        cleanup_durability_confirmed: bool,
+        filesystem_state: MarkerFilesystemState,
+    ) -> None:
+        super().__init__(message)
+        self.committed = committed
+        self.temp_unlinked = temp_unlinked
+        self.cleanup_durability_confirmed = cleanup_durability_confirmed
+        self.filesystem_state = filesystem_state
+
+
+class MarkerPostCommitNotificationError(RawTransactionError):
+    """A test/observer hook failed after the operation became committed-clean."""
+
+    def __init__(self, message: str, *, operation: str) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.filesystem_state: MarkerFilesystemState = "COMMITTED_CLEAN"
+
+
+class DirectoryCreationDurabilityError(RawTransactionError):
+    """A child directory was created but its parent fsync was not confirmed."""
+
+    def __init__(self, message: str, *, directory_name: str, created: bool) -> None:
+        super().__init__(message)
+        self.directory_name = directory_name
+        self.created = created
+        self.parent_fsync_confirmed = False
 
 
 class DiagnosticPersistenceError(RawTransactionError):
@@ -867,6 +941,13 @@ FAULT_ENTER_AFTER_PENDING_OPEN: Final[str] = "ENTER_AFTER_PENDING_OPEN"
 FAULT_ENTER_AFTER_STAGING_CREATE: Final[str] = "ENTER_AFTER_STAGING_CREATE"
 FAULT_ENTER_AFTER_DUP: Final[str] = "ENTER_AFTER_DUP"
 FAULT_ENTER_AFTER_GZIP_CREATE: Final[str] = "ENTER_AFTER_GZIP_CREATE"
+FAULT_PENDING_AFTER_MKDIR_BEFORE_PARENT_FSYNC: Final[str] = (
+    "PENDING_AFTER_MKDIR_BEFORE_PARENT_FSYNC"
+)
+FAULT_QUARANTINE_AFTER_MKDIR_BEFORE_PARENT_FSYNC: Final[str] = (
+    "QUARANTINE_AFTER_MKDIR_BEFORE_PARENT_FSYNC"
+)
+FAULT_BEFORE_EXCHANGE: Final[str] = "BEFORE_EXCHANGE"
 
 # Global fault injection hook (for testing). Set to a callable that takes
 # the fault point name and raises if it matches the desired fault.
@@ -934,6 +1015,78 @@ def _dir_fsync_via_fd(dir_fd: int) -> None:
     os.fsync(dir_fd)
 
 
+def _open_or_create_trusted_child_directory(
+    parent: TrustedDirectory,
+    child_name: str,
+    *,
+    creation_fault_point: str,
+) -> TrustedDirectory:
+    """Open a trusted child directory and durably record any creation.
+
+    The child name is always resolved relative to ``parent.fd``.  If the
+    initial open observes ENOENT, mkdir races are accepted, but the parent
+    directory is fsynced before the child is opened and returned.
+    """
+    validate_bare_filename(child_name)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        child_fd = os.open(child_name, flags, dir_fd=parent.fd)
+    except FileNotFoundError:
+        created = False
+        try:
+            os.mkdir(child_name, dir_fd=parent.fd, mode=0o755)
+            created = True
+        except FileExistsError:
+            # A concurrent creator won.  Its directory is still validated
+            # below and the parent is fsynced before we trust it.
+            pass
+        if created:
+            try:
+                _inject_fault(creation_fault_point)
+            except BaseException as exc:
+                raise DirectoryCreationDurabilityError(
+                    f"{child_name} created but parent-directory durability "
+                    f"was not confirmed before {creation_fault_point}: {exc}",
+                    directory_name=child_name,
+                    created=True,
+                ) from exc
+        try:
+            os.fsync(parent.fd)
+        except OSError as exc:
+            raise DirectoryCreationDurabilityError(
+                f"{child_name} creation observed but parent-directory fsync failed: {exc}",
+                directory_name=child_name,
+                created=created,
+            ) from exc
+        try:
+            child_fd = os.open(child_name, flags, dir_fd=parent.fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise PathSafetyError(
+                    f"{child_name} is a symlink or not a directory"
+                ) from exc
+            raise
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise PathSafetyError(
+                f"{child_name} is a symlink or not a directory"
+            ) from exc
+        raise
+    try:
+        child_stat = os.fstat(child_fd)
+        if not statmod.S_ISDIR(child_stat.st_mode):
+            raise PathSafetyError(f"{child_name} is not a directory")
+    except BaseException:
+        os.close(child_fd)
+        raise
+    return TrustedDirectory(
+        path=parent.path / child_name,
+        fd=child_fd,
+        st_dev=child_stat.st_dev,
+        st_ino=child_stat.st_ino,
+    )
+
+
 def prepare_validated_marker_bytes(
     marker_body: dict[str, Any],
     policy: MarkerValidationPolicy,
@@ -944,6 +1097,39 @@ def prepare_validated_marker_bytes(
     body["marker_integrity_sha256"] = compute_marker_integrity_sha256(body)
     validate_marker(body, policy=policy)
     return canonical_json_bytes(body)
+
+
+def _cleanup_temp_durably(
+    dir_fd: int,
+    temp_name: str,
+) -> tuple[bool, bool, str | None]:
+    """Unlink a pre-commit temp and durably record its absence."""
+    errors: list[str] = []
+    temp_unlinked = False
+    try:
+        os.unlink(temp_name, dir_fd=dir_fd)
+        temp_unlinked = True
+    except FileNotFoundError:
+        temp_unlinked = True
+    except OSError as exc:
+        errors.append(f"temp unlink failed: {exc}")
+    parent_fsynced = False
+    try:
+        _dir_fsync_via_fd(dir_fd)
+        parent_fsynced = True
+    except OSError as exc:
+        errors.append(f"directory fsync after temp cleanup failed: {exc}")
+    confirmed = temp_unlinked and parent_fsynced
+    return temp_unlinked, confirmed, "; ".join(errors) or None
+
+
+def _mark_precommit_failed_clean(exc: BaseException) -> BaseException:
+    """Attach the proved filesystem state without erasing error classification."""
+    setattr(exc, "filesystem_state", "PRE_COMMIT_FAILED_CLEAN")
+    setattr(exc, "committed", False)
+    setattr(exc, "temp_unlinked", True)
+    setattr(exc, "cleanup_durability_confirmed", True)
+    return exc
 
 
 def create_marker_no_replace_under_lock(
@@ -982,35 +1168,143 @@ def create_marker_no_replace_under_lock(
         0o644,
         dir_fd=dir_fd,
     )
-    committed = False
-    temp_present = True
+    file_obj = None
     try:
-        with os.fdopen(temp_fd, "wb") as f:
-            f.write(canonical_bytes)
-            f.flush()
-            os.fsync(f.fileno())
+        file_obj = os.fdopen(temp_fd, "wb")
+        temp_fd = -1
+        with file_obj:
+            file_obj.write(canonical_bytes)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+    except BaseException as exc:
+        if temp_fd >= 0:
+            try:
+                os.close(temp_fd)
+            except OSError as close_exc:
+                temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+                    dir_fd, temp_name)
+                raise MarkerCreateCleanupPending(
+                    f"marker creation failed before final link ({exc}); temp fd close "
+                    f"also failed ({close_exc}); cleanup={cleanup_error}",
+                    final_created=False,
+                    temp_unlinked=temp_unlinked,
+                    cleanup_durability_confirmed=confirmed,
+                    filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+                ) from exc
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name)
+        if not confirmed:
+            raise MarkerCreateCleanupPending(
+                f"marker creation failed before final link ({exc}); "
+                f"pre-commit cleanup not confirmed: {cleanup_error}",
+                final_created=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from exc
+        _mark_precommit_failed_clean(exc)
+        raise
+
+    try:
         os.link(temp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        committed = True
+    except BaseException as exc:
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name)
+        if not confirmed:
+            raise MarkerCreateCleanupPending(
+                f"marker final link failed ({exc}); pre-commit cleanup not "
+                f"confirmed: {cleanup_error}",
+                final_created=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from exc
+        _mark_precommit_failed_clean(exc)
+        raise
+
+    try:
         _inject_fault(FAULT_CREATE_AFTER_FINAL_LINK)
-        os.unlink(temp_name, dir_fd=dir_fd)
-        temp_present = False
-        _inject_fault(FAULT_CREATE_AFTER_TEMP_UNLINK)
-        _dir_fsync_via_fd(dir_fd)
-        _inject_fault(FAULT_CREATE_AFTER_DIR_FSYNC)
-    except Exception as exc:
-        if not committed:
-            if temp_present:
-                try:
-                    os.unlink(temp_name, dir_fd=dir_fd)
-                    _dir_fsync_via_fd(dir_fd)
-                except FileNotFoundError:
-                    pass
-            raise
+    except BaseException as exc:
         raise MarkerCreateCleanupPending(
-            f"marker creation committed; cleanup/durability pending: "
-            f"marker={marker_name} temp={temp_name if temp_present else None} phase={exc}"
+            f"final marker link exists but temp link remains and directory "
+            f"durability is not confirmed: {exc}",
+            final_created=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
+        ) from exc
+
+    try:
+        os.unlink(temp_name, dir_fd=dir_fd)
+    except OSError as exc:
+        raise MarkerCreateCleanupPending(
+            f"final marker link exists but temp unlink failed: {exc}",
+            final_created=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
+        ) from exc
+
+    try:
+        _inject_fault(FAULT_CREATE_AFTER_TEMP_UNLINK)
+    except BaseException as exc:
+        raise MarkerCreateCleanupPending(
+            f"final marker exists and temp is absent, but directory fsync is pending: {exc}",
+            final_created=True,
+            temp_unlinked=True,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED",
+        ) from exc
+
+    try:
+        _dir_fsync_via_fd(dir_fd)
+    except OSError as exc:
+        raise MarkerCreateCleanupPending(
+            f"final marker exists and temp is absent, but directory fsync failed: {exc}",
+            final_created=True,
+            temp_unlinked=True,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED",
+        ) from exc
+
+    try:
+        _inject_fault(FAULT_CREATE_AFTER_DIR_FSYNC)
+    except BaseException as exc:
+        raise MarkerPostCommitNotificationError(
+            f"marker creation is committed-clean; post-commit hook failed: {exc}",
+            operation="create",
         ) from exc
     return directory / marker_name
+
+
+def _snapshot_dir_entry(dir_fd: int, name: str) -> dict[str, Any]:
+    """Capture existence, identity and bytes for rollback ambiguity evidence."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return {"exists": False, "name": name}
+    except OSError as exc:
+        return {"exists": None, "name": name, "error": str(exc)}
+    try:
+        entry_stat = os.fstat(fd)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        entry_bytes = b"".join(chunks)
+        return {
+            "exists": True,
+            "name": name,
+            "dev": entry_stat.st_dev,
+            "ino": entry_stat.st_ino,
+            "size": entry_stat.st_size,
+            "bytes": entry_bytes,
+            "sha256": hashlib.sha256(entry_bytes).hexdigest(),
+        }
+    finally:
+        os.close(fd)
 
 
 def _rollback_marker_update(
@@ -1056,14 +1350,22 @@ def _rollback_marker_update(
         else:
             raise OSError("rollback temp still exists")
     except Exception as rollback_exc:
+        marker_snapshot = _snapshot_dir_entry(dir_fd, marker_name)
+        temp_snapshot = _snapshot_dir_entry(dir_fd, temp_name)
         raise AtomicMarkerRollbackFailed(
             f"marker rollback failed at {phase}; marker={marker_name} temp={temp_name}; "
             f"original_dev={original_stat.st_dev} original_ino={original_stat.st_ino}; "
-            f"cause={cause}; rollback_error={rollback_exc}"
+            f"cause={cause}; rollback_error={rollback_exc}; "
+            f"marker_snapshot={marker_snapshot}; temp_snapshot={temp_snapshot}",
+            failed_operation=phase,
+            marker_snapshot=marker_snapshot,
+            temp_snapshot=temp_snapshot,
         ) from rollback_exc
-    raise AtomicMarkerUpdateError(
+    restored_error = AtomicMarkerUpdateError(
         f"marker update failed before commit and original marker was restored: {cause}"
-    ) from cause
+    )
+    _mark_precommit_failed_clean(restored_error)
+    raise restored_error from cause
 
 
 def update_existing_marker_atomic_under_lock(
@@ -1134,35 +1436,86 @@ def update_existing_marker_atomic_under_lock(
         0o644,
         dir_fd=dir_fd,
     )
+    file_obj = None
     try:
-        with os.fdopen(temp_fd, "wb") as f:
-            f.write(canonical_bytes)
-            f.flush()
-            os.fsync(f.fileno())
-    except Exception:
-        try:
-            os.unlink(temp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
+        file_obj = os.fdopen(temp_fd, "wb")
+        temp_fd = -1
+        with file_obj:
+            file_obj.write(canonical_bytes)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+    except BaseException as exc:
+        close_error: OSError | None = None
+        if temp_fd >= 0:
+            try:
+                os.close(temp_fd)
+            except OSError as inner_exc:
+                close_error = inner_exc
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name)
+        if close_error is not None or not confirmed:
+            raise MarkerUpdateCleanupPending(
+                f"marker update temp preparation failed ({exc}); close_error={close_error}; "
+                f"pre-commit cleanup not confirmed: {cleanup_error}",
+                committed=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from exc
+        _mark_precommit_failed_clean(exc)
         raise
 
     # 5. RENAME_EXCHANGE temp <-> marker
     try:
+        _inject_fault(FAULT_BEFORE_EXCHANGE)
+    except BaseException as exc:
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name)
+        if not confirmed:
+            raise MarkerUpdateCleanupPending(
+                f"pre-exchange hook failed ({exc}); cleanup not confirmed: {cleanup_error}",
+                committed=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from exc
+        clean_error = AtomicMarkerUpdateError(
+            f"marker update failed before exchange and temp cleanup was durable: {exc}"
+        )
+        _mark_precommit_failed_clean(clean_error)
+        raise clean_error from exc
+    try:
         _renameat2_exchange(dir_fd, temp_name, marker_name)
-    except AtomicMarkerUpdateUnsupportedError:
-        try:
-            os.unlink(temp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        raise
+    except AtomicMarkerUpdateUnsupportedError as exc:
+        classified: BaseException = exc
     except OSError as exc:
-        try:
-            os.unlink(temp_name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        raise AtomicMarkerUpdateUnsupportedError(
-            f"renameat2 RENAME_EXCHANGE failed: {exc}. Temp cleaned up."
-        ) from exc
+        if exc.errno in (errno.ENOSYS, errno.EINVAL):
+            classified = AtomicMarkerUpdateUnsupportedError(
+                f"RENAME_EXCHANGE is unsupported: {exc}")
+        elif exc.errno == errno.ENOENT:
+            classified = AtomicMarkerTargetChangedError(
+                f"marker target changed or disappeared before RENAME_EXCHANGE: {exc}")
+        elif exc.errno == errno.ELOOP:
+            classified = PathSafetyError(
+                f"symlink encountered during RENAME_EXCHANGE: {exc}")
+        else:
+            classified = AtomicMarkerUpdateError(
+                f"RENAME_EXCHANGE operational failure: {exc}")
+    else:
+        classified = None
+    if classified is not None:
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name)
+        if not confirmed:
+            raise MarkerUpdateCleanupPending(
+                f"{classified}; pre-commit temp cleanup not confirmed: {cleanup_error}",
+                committed=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from classified
+        _mark_precommit_failed_clean(classified)
+        raise classified
 
     # FAULT_AFTER_EXCHANGE
     try:
@@ -1239,7 +1592,11 @@ def update_existing_marker_atomic_under_lock(
         raise MarkerUpdateCleanupPending(
             f"fault after first dir fsync (commit point reached). "
             f"New marker is authoritative. Old marker in {temp_name} pending cleanup. "
-            f"Original fault: {exc}"
+            f"Original fault: {exc}",
+            committed=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
         ) from exc
 
     # 9. unlink temp (old marker)
@@ -1250,7 +1607,11 @@ def update_existing_marker_atomic_under_lock(
     except OSError as exc:
         raise MarkerUpdateCleanupPending(
             f"cannot unlink old marker temp {temp_name}: {exc}. "
-            f"New marker is authoritative."
+            f"New marker is authoritative.",
+            committed=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
         ) from exc
 
     # FAULT_AFTER_OLD_MARKER_UNLINK
@@ -1260,7 +1621,11 @@ def update_existing_marker_atomic_under_lock(
         raise MarkerUpdateCleanupPending(
             f"fault after old marker unlink. "
             f"New marker is authoritative. "
-            f"Original fault: {exc}"
+            f"Original fault: {exc}",
+            committed=True,
+            temp_unlinked=True,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED",
         ) from exc
 
     # 10. fsync directory
@@ -1268,17 +1633,20 @@ def update_existing_marker_atomic_under_lock(
         _dir_fsync_via_fd(dir_fd)
     except OSError as exc:
         raise MarkerUpdateCleanupPending(
-            f"new marker committed and old marker unlinked; second directory fsync failed: {exc}"
+            f"new marker committed and old marker unlinked; second directory fsync failed: {exc}",
+            committed=True,
+            temp_unlinked=True,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED",
         ) from exc
 
     # FAULT_AFTER_SECOND_DIR_FSYNC
     try:
         _inject_fault(FAULT_AFTER_SECOND_DIR_FSYNC)
     except Exception as exc:
-        raise MarkerUpdateCleanupPending(
-            f"fault after second dir fsync. "
-            f"New marker is authoritative, old marker unlinked. "
-            f"Original fault: {exc}"
+        raise MarkerPostCommitNotificationError(
+            f"marker update is committed-clean; post-commit hook failed: {exc}",
+            operation="update",
         ) from exc
 
     return directory / marker_name
@@ -1310,6 +1678,15 @@ class GuardRecord:
     health: GuardHealth
 
 
+@dataclass
+class GuardReleaseState:
+    """Monotonic release progress for a retryable BROKEN guard."""
+
+    flock_released: bool = False
+    lock_fd_closed: bool = False
+    trusted_fd_closed: bool = False
+
+
 @dataclass(frozen=True)
 class RawChainLockGuard:
     """G2 — Proof that the caller holds the raw chain flock.
@@ -1325,6 +1702,7 @@ class RawChainLockGuard:
     trusted: TrustedDirectory
     _closed: bool = False
     _health: GuardHealth = "ACTIVE"
+    _release_state: GuardReleaseState = field(default_factory=GuardReleaseState)
 
     def __enter__(self) -> "RawChainLockGuard":
         return self
@@ -1341,37 +1719,50 @@ class RawChainLockGuard:
         if getattr(self, "_closed", False):
             return
         release_errors: list[str] = []
-        # Unlock flock
-        try:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
-        except OSError as exc:
-            release_errors.append(f"flock unlock failed: {exc}")
-            object.__setattr__(self, "_health", "BROKEN")
-        # Close lock fd
-        try:
-            os.close(self.lock_fd)
-        except OSError as exc:
-            release_errors.append(f"close lock_fd failed: {exc}")
-            object.__setattr__(self, "_health", "BROKEN")
-        # Close trusted directory fd. TrustedDirectory does not mark itself
-        # closed when close(2) fails, so the BROKEN registry remains truthful.
-        try:
-            self.trusted.close()
-        except OSError as exc:
-            release_errors.append(f"close trusted fd failed: {exc}")
-            object.__setattr__(self, "_health", "BROKEN")
-        object.__setattr__(self, "_closed", not release_errors)
-        # Remove from registry only after successful release
+        state = self._release_state
+        if not state.flock_released:
+            try:
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            except OSError as exc:
+                release_errors.append(f"flock unlock failed: {exc}")
+            else:
+                state.flock_released = True
+        # If unlock failed, retain the lock fd so a retry can unlock it.
+        if state.flock_released and not state.lock_fd_closed:
+            try:
+                os.close(self.lock_fd)
+            except OSError as exc:
+                release_errors.append(f"close lock_fd failed: {exc}")
+            else:
+                state.lock_fd_closed = True
+        if not state.trusted_fd_closed:
+            try:
+                self.trusted.close()
+            except OSError as exc:
+                release_errors.append(f"close trusted fd failed: {exc}")
+            else:
+                state.trusted_fd_closed = True
+
+        all_released = (
+            state.flock_released
+            and state.lock_fd_closed
+            and state.trusted_fd_closed
+        )
+        object.__setattr__(self, "_closed", all_released)
+        object.__setattr__(self, "_health", "CLOSED" if all_released else "BROKEN")
         with _ACTIVE_GUARDS_LOCK:
             record = _ACTIVE_GUARDS.get(self.token)
             if record is not None:
-                if self._health == "BROKEN":
-                    # Keep record as BROKEN
-                    object.__setattr__(record, "health", "BROKEN")
-                else:
+                if all_released:
                     _ACTIVE_GUARDS.pop(self.token, None)
+                else:
+                    object.__setattr__(record, "health", "BROKEN")
         if release_errors:
             raise LockReleaseError("; ".join(release_errors))
+        if not all_released:
+            raise LockReleaseError(
+                "guard release incomplete without an operating-system error"
+            )
 
 
 def _release_unregistered_lock_strict(lock_fd: int, trusted: TrustedDirectory) -> None:
@@ -1440,7 +1831,7 @@ class RawChainLock:
                 if (record.trusted_dev == trusted.st_dev and
                     record.trusted_ino == trusted.st_ino and
                     record.prefix == self.prefix and
-                    record.health == "ACTIVE"):
+                    record.health in ("ACTIVE", "BROKEN")):
                     os.close(lock_fd)
                     trusted.close()
                     raise NestedLockingError(
@@ -1475,7 +1866,7 @@ class RawChainLock:
                 if (record.trusted_dev == trusted.st_dev and
                     record.trusted_ino == trusted.st_ino and
                     record.prefix == self.prefix and
-                    record.health == "ACTIVE"):
+                    record.health in ("ACTIVE", "BROKEN")):
                     # Another thread acquired between our check and flock
                     _release_unregistered_lock_strict(lock_fd, trusted)
                     raise NestedLockingError(
@@ -1852,28 +2243,10 @@ class RawScanStager:
         try:
             trusted_raw = open_trusted_directory(self.raw_dir)
             _inject_fault(FAULT_ENTER_AFTER_RAW_DIR_OPEN)
-            try:
-                pending_fd = os.open(
-                    ".pending", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=trusted_raw.fd,
-                )
-            except FileNotFoundError:
-                try:
-                    os.mkdir(".pending", dir_fd=trusted_raw.fd, mode=0o755)
-                except FileExistsError:
-                    pass
-                pending_fd = os.open(
-                    ".pending", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=trusted_raw.fd,
-                )
-            except OSError as pending_exc:
-                if pending_exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise PathSafetyError(".pending is a symlink or not a directory") from pending_exc
-                raise
-            pending_stat = os.fstat(pending_fd)
-            pending_trusted = TrustedDirectory(
-                path=self.raw_dir / ".pending", fd=pending_fd,
-                st_dev=pending_stat.st_dev, st_ino=pending_stat.st_ino,
+            pending_trusted = _open_or_create_trusted_child_directory(
+                trusted_raw,
+                ".pending",
+                creation_fault_point=FAULT_PENDING_AFTER_MKDIR_BEFORE_PARENT_FSYNC,
             )
             _inject_fault(FAULT_ENTER_AFTER_PENDING_OPEN)
             safe_id = _safe_scan_id(self.scan_id)
@@ -2334,28 +2707,16 @@ class RawScanStager:
 
         try:
             # Create .quarantine relative to raw_dir_fd
-            try:
-                quarantine_dir_fd = os.open(
-                    ".quarantine",
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=self._raw_dir_fd,
-                )
-            except FileNotFoundError:
-                os.mkdir(".quarantine", dir_fd=self._raw_dir_fd, mode=0o755)
-                quarantine_dir_fd = os.open(
-                    ".quarantine",
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=self._raw_dir_fd,
-                )
-            except OSError as inner_exc:
-                if inner_exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise PathSafetyError(".quarantine is a symlink") from inner_exc
-                raise
-            quarantine_stat = os.fstat(quarantine_dir_fd)
-            self._quarantine_trusted = TrustedDirectory(
-                path=self.raw_dir / ".quarantine", fd=quarantine_dir_fd,
-                st_dev=quarantine_stat.st_dev, st_ino=quarantine_stat.st_ino,
+            if self._raw_trusted is None:
+                raise DiagnosticPersistenceError("trusted raw directory unavailable")
+            self._quarantine_trusted = _open_or_create_trusted_child_directory(
+                self._raw_trusted,
+                ".quarantine",
+                creation_fault_point=(
+                    FAULT_QUARANTINE_AFTER_MKDIR_BEFORE_PARENT_FSYNC
+                ),
             )
+            quarantine_dir_fd = self._quarantine_trusted.fd
 
             # G6: hardlink staging → quarantine (no-replace)
             quarantine_name = f"{base_name}.{uuid.uuid4().hex[:8]}.quarantined"
@@ -2508,16 +2869,39 @@ class RawScanStager:
                 0o644,
                 dir_fd=diag_dir_fd,
             )
+            temp_file = None
             try:
-                with os.fdopen(temp_fd, "wb") as f:
-                    f.write(diag_bytes)
-                    f.flush()
-                    os.fsync(f.fileno())
-            except Exception:
+                temp_file = os.fdopen(temp_fd, "wb")
+                temp_fd = -1
+                with temp_file:
+                    written = temp_file.write(diag_bytes)
+                    if written != len(diag_bytes):
+                        raise OSError(
+                            f"short diagnostic write: {written}/{len(diag_bytes)}")
+                    temp_file.flush()
+                    os.fsync(temp_file.fileno())
+            except Exception as write_exc:
+                cleanup_errors: list[str] = []
+                if temp_fd >= 0:
+                    try:
+                        os.close(temp_fd)
+                    except OSError as close_exc:
+                        cleanup_errors.append(f"temp close failed: {close_exc}")
                 try:
                     os.unlink(temp_name, dir_fd=diag_dir_fd)
                 except FileNotFoundError:
                     pass
+                except OSError as unlink_exc:
+                    cleanup_errors.append(f"temp unlink failed: {unlink_exc}")
+                try:
+                    os.fsync(diag_dir_fd)
+                except OSError as fsync_exc:
+                    cleanup_errors.append(f"directory fsync failed: {fsync_exc}")
+                if cleanup_errors:
+                    raise DiagnosticPersistenceError(
+                        f"diagnostic temp write failed ({write_exc}); cleanup: "
+                        f"{'; '.join(cleanup_errors)}"
+                    ) from write_exc
                 raise
             final_diag_name = diag_name
             try:
@@ -2533,6 +2917,10 @@ class RawScanStager:
             final_fd = os.open(
                 final_diag_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=diag_dir_fd)
             try:
+                final_stat = os.fstat(final_fd)
+                if not statmod.S_ISREG(final_stat.st_mode):
+                    raise DiagnosticPersistenceError(
+                        "persisted diagnostic is not a regular file")
                 final_bytes = b""
                 while True:
                     chunk = os.read(final_fd, 65536)
@@ -2541,6 +2929,9 @@ class RawScanStager:
                     final_bytes += chunk
             finally:
                 os.close(final_fd)
+            if final_bytes != diag_bytes:
+                raise DiagnosticPersistenceError(
+                    "persisted diagnostic bytes differ from canonical bytes")
             parsed_diag = json.loads(final_bytes.decode("utf-8"))
             if compute_diagnostic_integrity_sha256(parsed_diag) != parsed_diag.get(
                     "diagnostic_integrity_sha256"):
@@ -2748,7 +3139,11 @@ def mark_first_eligible_scan_seen_under_lock(
             pass
         except OSError as cleanup_exc:
             raise MarkerCreateCleanupPending(
-                f"eligibility temp write failed and cleanup is pending: {cleanup_exc}"
+                f"eligibility temp write failed and cleanup is pending: {cleanup_exc}",
+                final_created=False,
+                temp_unlinked=False,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
             ) from cleanup_exc
         raise exc
     final_created = False
@@ -2774,7 +3169,11 @@ def mark_first_eligible_scan_seen_under_lock(
             pass
         except OSError as cleanup_exc:
             raise MarkerCreateCleanupPending(
-                f"eligibility hardlink failed and temp cleanup is pending: {cleanup_exc}"
+                f"eligibility hardlink failed and temp cleanup is pending: {cleanup_exc}",
+                final_created=False,
+                temp_unlinked=False,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
             ) from cleanup_exc
         raise exc
     if final_created:
@@ -2782,8 +3181,17 @@ def mark_first_eligible_scan_seen_under_lock(
             os.unlink(temp_name, dir_fd=dir_fd)
             os.fsync(dir_fd)
         except OSError as exc:
+            temp_unlinked = _snapshot_dir_entry(
+                dir_fd, temp_name).get("exists") is False
             raise MarkerCreateCleanupPending(
-                f"eligibility committed; cleanup/durability pending: {exc}"
+                f"eligibility committed; cleanup/durability pending: {exc}",
+                final_created=True,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state=(
+                    "COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED"
+                    if temp_unlinked else "COMMITTED_OLD_TEMP_PRESENT"
+                ),
             ) from exc
     return EligibilityState(
         schema_version=body["schema_version"],
@@ -2810,61 +3218,6 @@ def marker_filename(prefix: str, sequence: int, transaction_uuid: str) -> str:
     if u.version != 4:
         raise ValueError(f"transaction_uuid must be UUID version 4, got version {u.version}")
     return f"{prefix}_txn_{sequence:06d}_{transaction_uuid}.marker"
-
-
-def write_diagnostic_evidence(
-    quarantine_dir: Path,
-    diagnostic: DiagnosticEvidence,
-) -> Path:
-    """E4 — Write a DiagnosticEvidence record to .quarantine/ atomically."""
-    quarantine_dir.mkdir(parents=True, exist_ok=True)
-    validate_real_directory(quarantine_dir)
-    diag_dict = {
-        "diagnostic_version": diagnostic.diagnostic_version,
-        "transaction_uuid": diagnostic.transaction_uuid,
-        "ownership_token": diagnostic.ownership_token,
-        "diagnostic_created_at": diagnostic.diagnostic_created_at,
-        "triggering_state": diagnostic.triggering_state,
-        "failure_stage": diagnostic.failure_stage,
-        "failure_type": diagnostic.failure_type,
-        "failure_message": diagnostic.failure_message,
-        "staging_filename": diagnostic.staging_filename,
-        "staging_sha256": diagnostic.staging_sha256,
-        "staging_size_bytes": diagnostic.staging_size_bytes,
-        "marker_filename": diagnostic.marker_filename,
-        "marker_integrity_sha256": diagnostic.marker_integrity_sha256,
-        "events_appended_before_failure": diagnostic.events_appended_before_failure,
-        "events_appended_total_expected": diagnostic.events_appended_total_expected,
-        "recoverable": diagnostic.recoverable,
-        "evidence_location": diagnostic.evidence_location,
-        "evidence_filename": diagnostic.evidence_filename,
-        "secondary_evidence_location": diagnostic.secondary_evidence_location,
-        "secondary_evidence_filename": diagnostic.secondary_evidence_filename,
-    }
-    canonical_bytes = _canonical_diagnostic_bytes(diag_dict)
-    base_name = f"diagnostic_{diagnostic.transaction_uuid}.{uuid.uuid4().hex[:8]}.json"
-    final_path = quarantine_dir / base_name
-    while final_path.exists():
-        final_path = quarantine_dir / (
-            f"diagnostic_{diagnostic.transaction_uuid}.{uuid.uuid4().hex[:8]}.json"
-        )
-    temp_name = f"{final_path.name}.tmp.{uuid.uuid4().hex}"
-    temp_path = quarantine_dir / temp_name
-    fd = os.open(str(temp_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(canonical_bytes)
-            f.flush()
-            os.fsync(f.fileno())
-    except Exception:
-        try:
-            os.unlink(temp_path)
-        except FileNotFoundError:
-            pass
-        raise
-    os.rename(temp_path, final_path)
-    _dir_fsync(quarantine_dir)
-    return final_path
 
 
 def _canonical_diagnostic_bytes(diag_body: dict[str, Any]) -> bytes:
