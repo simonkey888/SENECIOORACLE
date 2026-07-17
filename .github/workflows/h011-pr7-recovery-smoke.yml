@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   remediate-independent-audit:
-    if: github.event.pull_request.head.ref == 'audit/h011-v3-recovery-v2-audit-fix-trigger-2'
+    if: github.event.pull_request.head.ref == 'audit/h011-v3-recovery-v2-commit-diagnostic'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -47,10 +47,15 @@ jobs:
           echo "f1a3a8e71f3e8f700e8e0f29742e7e5e58ad9c7eb93a6f612dcb7ef14631dd87  tests/h011_v3/test_h011_v3_recover_raw_transaction.py" | sha256sum -c -
           test -f tools/apply_h011_recovery_v2_audit_fix.py
           python tools/apply_h011_recovery_v2_audit_fix.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tests/h011_v3/test_h011_v3_recover_raw_transaction.py")
+          path.write_text(path.read_text(encoding="utf-8").rstrip() + "\n", encoding="utf-8")
+          PY
           python -m compileall -q polymarket/h011_v3_raw_recovery.py tests/h011_v3/test_h011_v3_recover_raw_transaction.py
           python -m pytest tests/h011_v3/test_h011_v3_recover_raw_transaction.py -q
           echo "ed5126ef2f7993b58307d45494b212314e4a1f369b7821e87fc677739bae8eb0  polymarket/h011_v3_raw_recovery.py" | sha256sum -c -
-          echo "04fe3c9223698b0245a1d2230f0f3b3df18e7497fee8755a1fb4304ae354e0b3  tests/h011_v3/test_h011_v3_recover_raw_transaction.py" | sha256sum -c -
+          echo "de1d8237e2874055771a3e273e7c225662a00bcb9e0a55f505bf620a3456f5d7  tests/h011_v3/test_h011_v3_recover_raw_transaction.py" | sha256sum -c -
 
       - name: Commit product-only remediation
         shell: bash
