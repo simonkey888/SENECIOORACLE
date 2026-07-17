@@ -51,3 +51,8 @@ Permanent limits:
 - `orders_enabled=false`
 - `live_capital_locked=true`
 - Draft only; no merge or deployment authorized.
+
+Temporary merged-head validation trigger:
+
+- base head: `08af8c6ca6c3ee15671a1e66d42a8c52ae5b5e3b`;
+- validation-only branch; never merge this documentation-only commit.
