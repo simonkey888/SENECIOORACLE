@@ -39,51 +39,34 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r polymarket/requirements-h011-v3.txt
 
-      - name: Verify exact product state
+      - name: Verify and apply audit corrections
         shell: bash
         run: |
           set -euo pipefail
           echo "f61caba5cf419b9571be80fa09df85000879074c429d54cc8f2f0f78374abee1  polymarket/h011_v3_raw_recovery.py" | sha256sum -c -
           echo "f1a3a8e71f3e8f700e8e0f29742e7e5e58ad9c7eb93a6f612dcb7ef14631dd87  tests/h011_v3/test_h011_v3_recover_raw_transaction.py" | sha256sum -c -
           test -f tools/apply_h011_recovery_v2_audit_fix.py
+          test -f tools/h011-pr7-recovery-smoke-authoritative.yml
+          python tools/apply_h011_recovery_v2_audit_fix.py
+          python -m compileall -q polymarket/h011_v3_raw_recovery.py tests/h011_v3/test_h011_v3_recover_raw_transaction.py
+          python -m pytest tests/h011_v3/test_h011_v3_recover_raw_transaction.py -q
+          echo "ed5126ef2f7993b58307d45494b212314e4a1f369b7821e87fc677739bae8eb0  polymarket/h011_v3_raw_recovery.py" | sha256sum -c -
+          echo "04fe3c9223698b0245a1d2230f0f3b3df18e7497fee8755a1fb4304ae354e0b3  tests/h011_v3/test_h011_v3_recover_raw_transaction.py" | sha256sum -c -
 
-      - name: Apply and validate independent-audit corrections
-        id: audit_fix
-        continue-on-error: true
+      - name: Materialize clean recovery commit
         shell: bash
         run: |
-          set +e
-          python -u tools/apply_h011_recovery_v2_audit_fix.py > /tmp/h011-audit-patcher.log 2>&1
-          patch_status=$?
-          echo "patch_status=$patch_status" | tee /tmp/h011-audit-status.log
-          if [ "$patch_status" -ne 0 ]; then exit "$patch_status"; fi
-          python -m compileall -q polymarket/h011_v3_raw_recovery.py tests/h011_v3/test_h011_v3_recover_raw_transaction.py > /tmp/h011-audit-compile.log 2>&1
-          compile_status=$?
-          echo "compile_status=$compile_status" | tee -a /tmp/h011-audit-status.log
-          if [ "$compile_status" -ne 0 ]; then exit "$compile_status"; fi
-          python -m pytest tests/h011_v3/test_h011_v3_recover_raw_transaction.py -q > /tmp/h011-audit-focused.log 2>&1
-          test_status=$?
-          echo "test_status=$test_status" | tee -a /tmp/h011-audit-status.log
-          cat /tmp/h011-audit-focused.log
-          sha256sum polymarket/h011_v3_raw_recovery.py tests/h011_v3/test_h011_v3_recover_raw_transaction.py > /tmp/h011-audit-patched-sha256.txt
-          exit "$test_status"
-
-      - name: Upload patched files and diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: h011-recovery-v2-patched-${{ github.event.pull_request.head.sha }}
-          path: |
-            polymarket/h011_v3_raw_recovery.py
-            tests/h011_v3/test_h011_v3_recover_raw_transaction.py
-            /tmp/h011-audit-status.log
-            /tmp/h011-audit-patcher.log
-            /tmp/h011-audit-compile.log
-            /tmp/h011-audit-focused.log
-            /tmp/h011-audit-patched-sha256.txt
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Fail job if remediation failed
-        if: steps.audit_fix.outcome != 'success'
-        run: exit 1
+          set -euo pipefail
+          cp tools/h011-pr7-recovery-smoke-authoritative.yml .github/workflows/h011-pr7-recovery-smoke.yml
+          git rm -f \
+            .github/workflows/h011-recovery-v2-audit-fix.yml \
+            .github/workflows/h011-recovery-v2-audit-fix-push.yml \
+            tools/apply_h011_recovery_v2_audit_fix.py \
+            tools/h011-pr7-recovery-smoke-authoritative.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/h011-pr7-recovery-smoke.yml polymarket/h011_v3_raw_recovery.py tests/h011_v3/test_h011_v3_recover_raw_transaction.py
+          git status --short
+          git commit -m "fix(h011-v3): harden recovery marker discovery"
+          git push origin HEAD:feat/h011-v3-transaction-recovery-v2
