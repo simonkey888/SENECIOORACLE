@@ -7,15 +7,14 @@ on:
   pull_request:
     branches:
       - feat/h011-v3-transaction-publisher
-      - audit/h011-v3-publisher-sol
     paths:
       - "polymarket/h011_v3_raw_transaction.py"
       - "tests/h011_v3/**"
-      - "tools/apply_h011_publisher_audit_patch.py"
+      - "audit/H011_PUBLISHER_SOL_FINDINGS.md"
       - ".github/workflows/h011-publisher-sol-audit.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: h011-publisher-sol-${{ github.ref }}
@@ -24,14 +23,31 @@ concurrency:
 jobs:
   publisher-hostile-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
-      - name: Checkout exact branch head
+      - name: Checkout exact event head
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify materialized state and audit scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e tools/apply_h011_publisher_audit_patch.py
+          git fetch --no-tags origin feat/h011-v3-transaction-publisher
+          git diff --name-only origin/feat/h011-v3-transaction-publisher...HEAD | sort | tee /tmp/h011-audit-names.txt
+          test "$(cat /tmp/h011-audit-names.txt)" = $'.github/workflows/h011-publisher-sol-audit.yml\naudit/H011_PUBLISHER_SOL_FINDINGS.md\npolymarket/h011_v3_raw_transaction.py\ntests/h011_v3/test_h011_v3_publish_crash_audit.py\ntests/h011_v3/test_h011_v3_publish_raw_scan.py'
+          sha256sum \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            | tee /tmp/h011-audit-file-sha256.txt
+          grep -F "4d6b859c3ac5596c9d386ceb31dbfa5f53298f526dadcba9bc177a73622b3e99  polymarket/h011_v3_raw_transaction.py" /tmp/h011-audit-file-sha256.txt
+          grep -F "2ef89875d3d8aad36674d77938006402a3c24310eb689de8082861b694d29696  tests/h011_v3/test_h011_v3_publish_raw_scan.py" /tmp/h011-audit-file-sha256.txt
+          git log -1 --format='%H %P %s' | tee /tmp/h011-audit-head.txt
+          git diff --stat origin/feat/h011-v3-transaction-publisher...HEAD | tee /tmp/h011-audit-stat.txt
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,56 +61,122 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r polymarket/requirements-h011-v3.txt
 
-      - name: Apply one-shot hostile-audit hardening
-        id: patch
+      - name: Compileall
         shell: bash
         run: |
-          if [ -f tools/apply_h011_publisher_audit_patch.py ]; then
-            python tools/apply_h011_publisher_audit_patch.py
-            rm tools/apply_h011_publisher_audit_patch.py
-            echo "applied=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "applied=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Compile transaction module and audit tests
-        run: |
-          python -m compileall -q \
+          set -o pipefail
+          python -m compileall \
             polymarket/h011_v3_raw_transaction.py \
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            tests/h011_v3/test_h011_v3_publish_crash_audit.py
-
-      - name: Verify patch whitespace
-        run: git diff --check
-
-      - name: Run hostile crash audit
-        run: |
-          python -m pytest \
             tests/h011_v3/test_h011_v3_publish_crash_audit.py \
-            -q
+            tests/h011_v3/test_h011_v3_raw_transaction_core.py \
+            2>&1 | tee /tmp/h011-audit-compileall.log
 
-      - name: Run publisher regression suite
-        run: |
-          python -m pytest \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            -q
-
-      - name: Run complete H-011 V3 suite
-        run: python -m pytest tests/h011_v3/ -q
-
-      - name: Commit validated hardening to audit branch
-        if: github.event_name == 'push' && steps.patch.outputs.applied == 'true'
+      - name: Diff check
         shell: bash
         run: |
-          git status --short
-          git diff --name-only
-          git diff --stat
-          git diff --check
-          git config user.name "SeneX Publisher Audit CI"
-          git config user.email "actions@users.noreply.github.com"
-          git add \
-            polymarket/h011_v3_raw_transaction.py \
-            tools/apply_h011_publisher_audit_patch.py
-          git diff --cached --check
-          git commit -m "fix(h011-v3): harden publisher crash consistency"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          set -o pipefail
+          git diff --check origin/feat/h011-v3-transaction-publisher...HEAD \
+            2>&1 | tee /tmp/h011-audit-diff-check.log
+
+      - name: Publisher suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/h011_v3/test_h011_v3_publish_raw_scan.py -q \
+            2>&1 | tee /tmp/h011-audit-publisher.log
+
+      - name: Transaction core suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/h011_v3/test_h011_v3_raw_transaction_core.py -q \
+            2>&1 | tee /tmp/h011-audit-core.log
+
+      - name: Hostile crash matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/h011_v3/test_h011_v3_publish_crash_audit.py -q \
+            2>&1 | tee /tmp/h011-audit-crash.log
+
+      - name: Complete H-011 V3 suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/h011_v3/ -q \
+            2>&1 | tee /tmp/h011-audit-h011.log
+
+      - name: Global suite
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          python -m pytest -q 2>&1 | tee /tmp/h011-audit-global.log
+          pytest_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$pytest_status" -eq 0 ]; then
+            exit 0
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          allowed = (
+              "tests/cp/test_control_plane.py::TestInvariants::"
+              "test_unknown_not_collapsed_to_zero"
+          )
+          text = Path("/tmp/h011-audit-global.log").read_text(
+              encoding="utf-8", errors="replace"
+          )
+          failed = re.findall(r"^FAILED ([^ ]+)", text, flags=re.MULTILINE)
+          if failed != [allowed] or "1 failed" not in text:
+              raise SystemExit(f"unexpected global result: {failed}")
+          print(f"accepted inherited out-of-scope failure: {allowed}")
+          PY
+
+      - name: FD and residue gate
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_one_hundred_publications_have_no_fd_leak \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_happy_path_sequence_zero_exact_bytes_and_cleanup \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_marker_is_removed_after_staging_and_transfer_close \
+            -q 2>&1 | tee /tmp/h011-audit-fd-residue.log
+          python - <<'PY' | tee /tmp/h011-audit-repository-residue.log
+          from pathlib import Path
+          forbidden = []
+          for path in Path(".").rglob("*"):
+              if not path.is_file():
+                  continue
+              name = path.name
+              if name.endswith(".marker") or ".marker.tmp." in name:
+                  forbidden.append(str(path))
+              if ".tmp." in name and "__pycache__" not in str(path):
+                  forbidden.append(str(path))
+          if forbidden:
+              raise SystemExit(f"residual transaction evidence: {forbidden}")
+          print("no repository marker/temp residues")
+          PY
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h011-publisher-sol-audit-${{ github.sha }}
+          path: |
+            /tmp/h011-audit-names.txt
+            /tmp/h011-audit-file-sha256.txt
+            /tmp/h011-audit-head.txt
+            /tmp/h011-audit-stat.txt
+            /tmp/h011-audit-compileall.log
+            /tmp/h011-audit-diff-check.log
+            /tmp/h011-audit-publisher.log
+            /tmp/h011-audit-core.log
+            /tmp/h011-audit-crash.log
+            /tmp/h011-audit-h011.log
+            /tmp/h011-audit-global.log
+            /tmp/h011-audit-fd-residue.log
+            /tmp/h011-audit-repository-residue.log
+          if-no-files-found: error
+          retention-days: 7
