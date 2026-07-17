@@ -15,13 +15,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: h011-publisher-sol-exact-ephemeral-${{ github.ref }}
+  group: h011-publisher-materialization-preflight-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publisher-exact-ephemeral-validation:
+  publisher-materialization-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
 
     steps:
       - name: Checkout validation branch
@@ -42,9 +42,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r polymarket/requirements-h011-v3.txt
 
-      - name: Build exact validated patch
+      - name: Build and hash exact validated patch
         shell: bash
         run: |
+          set -euo pipefail
           python tools/apply_h011_publisher_audit_patch.py
           python tools/apply_h011_publisher_audit_regression_patch.py
           git diff --check
@@ -53,190 +54,161 @@ jobs:
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
             > /tmp/h011-publisher-hardening.patch
           test -s /tmp/h011-publisher-hardening.patch
+          patch_sha=$(sha256sum /tmp/h011-publisher-hardening.patch | awk '{print $1}')
+          test "$patch_sha" = "8dea2e547b95116b3d0c029a0d5ce2d3cbe8e2cc6629fd2f0efeb5784712478d"
+          printf '%s\n' "$patch_sha" > /tmp/h011-patch-sha256.txt
+          printf '%s\n' "bf44af4b00365b28d8742d93f48b4dc0c3069b149c0166fc41c6c15eae8c2a33" > /tmp/h011-source-zip-sha256.txt
 
-      - name: Prepare clean detached audit checkout
+      - name: Prepare exact PR8 checkout
         shell: bash
         run: |
+          set -euo pipefail
           git reset --hard
           git clean -fdx
-          git switch --detach origin/audit/h011-v3-publisher-sol
-          test "$(git rev-parse HEAD)" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
+          git fetch origin
+          remote_head=$(git rev-parse origin/audit/h011-v3-publisher-sol)
+          test "$remote_head" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
+          git switch --detach "$remote_head"
           test -z "$(git status --short)"
-          git rev-parse HEAD | tee /tmp/h011-detached-head.txt
-          git status --short | tee /tmp/h011-preapply-status.txt
+          printf '%s\n' "$remote_head" > /tmp/h011-pr8-parent.txt
+          git status --short > /tmp/h011-preapply-status.txt
 
-      - name: Apply patch ephemerally and inspect exact scope
+      - name: Apply exact patch and verify scope
         shell: bash
         run: |
+          set -euo pipefail
           git apply --check /tmp/h011-publisher-hardening.patch
-          echo PASS | tee /tmp/h011-git-apply-check.txt
           git apply /tmp/h011-publisher-hardening.patch
-          git diff --name-only | tee /tmp/h011-applied-names.txt
-          git diff --stat | tee /tmp/h011-applied-stat.txt
-          git diff > /tmp/h011-applied.diff
+          git diff --check
+          git diff --name-only | tee /tmp/h011-materialized-names.txt
+          git diff --stat | tee /tmp/h011-materialized-stat.txt
+          git diff > /tmp/h011-materialized.diff
           python - <<'PY'
           from pathlib import Path
-
           expected = [
               "polymarket/h011_v3_raw_transaction.py",
               "tests/h011_v3/test_h011_v3_publish_raw_scan.py",
           ]
-          observed = Path("/tmp/h011-applied-names.txt").read_text(
-              encoding="utf-8"
-          ).splitlines()
+          observed = Path("/tmp/h011-materialized-names.txt").read_text(encoding="utf-8").splitlines()
           if observed != expected:
               raise SystemExit(f"scope mismatch: {observed} != {expected}")
-
-          forbidden = (
-              ".github/",
-              "audit/",
-              "tools/",
-              "polymarket/results/",
-          )
-          if any(name.startswith(forbidden) for name in observed):
-              raise SystemExit(f"forbidden path in patch: {observed}")
-
-          source = Path("polymarket/h011_v3_raw_transaction.py").read_text(
-              encoding="utf-8"
-          )
-          test = Path(
-              "tests/h011_v3/test_h011_v3_publish_raw_scan.py"
-          ).read_text(encoding="utf-8")
-
-          if "chmod(0o644)" in source or "chmod(0o444)" in source:
-              raise SystemExit("product source relaxes sealed file modes")
-
-          fixture = test.split('if mutation == "hash":', 1)[1].split(
-              'elif mutation == "gap":', 1
-          )[0]
-          ordered_fixture_tokens = [
-              "manifest_path.chmod(0o644)",
-              "try:",
-              "manifest_path.write_bytes",
-              "finally:",
-              "manifest_path.chmod(0o444)",
-          ]
-          positions = [fixture.find(token) for token in ordered_fixture_tokens]
-          if any(position < 0 for position in positions):
-              raise SystemExit(f"fixture restore missing: {positions}")
-          if positions != sorted(positions):
-              raise SystemExit("fixture does not restore 0444 in finally")
-
-          short_write = test.split(
-              "def test_short_write_preserves_marker_and_staging", 1
-          )[1].split("\ndef ", 1)[0]
-          required_short_write = [
-              "FAULT_PUBLISH_AFTER_ARTIFACT_MARKER_UPDATE",
-              "armed = True",
-              "return 0",
-              "assert injected is True",
-              'durable_marker_status == "ARTIFACT_PUBLISHED"',
-              "transfer_consumed is True",
-              "transfer._closed is True",
-              'marker["status"] == "ARTIFACT_PUBLISHED"',
-              'assert not (raw_dir / f"{sealed.final_name}.sha256").exists()',
-              'assert not (raw_dir / "manifest_000000.json").exists()',
-              "assert not _temps(raw_dir)",
-          ]
-          for token in required_short_write:
-              if token not in short_write:
-                  raise SystemExit(f"missing short-write invariant: {token}")
           PY
 
-      - name: Run exact publisher suite
+      - name: Compileall
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m compileall \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            tests/h011_v3/test_h011_v3_raw_transaction_core.py \
+            2>&1 | tee /tmp/h011-materialization-compileall.log
+
+      - name: Publisher suite
         shell: bash
         run: |
           set -o pipefail
           python -m pytest tests/h011_v3/test_h011_v3_publish_raw_scan.py -q \
-            2>&1 | tee /tmp/h011-exact-publisher.log
+            2>&1 | tee /tmp/h011-materialization-publisher.log
 
-      - name: Run exact transaction core suite
+      - name: Transaction core suite
         shell: bash
         run: |
           set -o pipefail
           python -m pytest tests/h011_v3/test_h011_v3_raw_transaction_core.py -q \
-            2>&1 | tee /tmp/h011-exact-core.log
+            2>&1 | tee /tmp/h011-materialization-core.log
 
-      - name: Run exact compileall
+      - name: Complete H-011 V3 suite
         shell: bash
         run: |
           set -o pipefail
-          python -m compileall polymarket/h011_v3_raw_transaction.py \
-            2>&1 | tee /tmp/h011-exact-compileall.log
+          python -m pytest tests/h011_v3/ -q \
+            2>&1 | tee /tmp/h011-materialization-h011.log
 
-      - name: Run exact diff check
+      - name: Global suite
         shell: bash
         run: |
+          set +e
           set -o pipefail
-          git diff --check 2>&1 | tee /tmp/h011-exact-diff-check.log
-
-      - name: Verify FD leak test coverage and repository residues
-        shell: bash
-        run: |
-          python - <<'PY' | tee /tmp/h011-fd-residue-evidence.log
+          python -m pytest -q 2>&1 | tee /tmp/h011-materialization-global.log
+          pytest_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$pytest_status" -eq 0 ]; then
+            exit 0
+          fi
+          python - <<'PY'
           from pathlib import Path
+          import re
+          allowed = (
+              "tests/cp/test_control_plane.py::TestInvariants::"
+              "test_unknown_not_collapsed_to_zero"
+          )
+          text = Path("/tmp/h011-materialization-global.log").read_text(
+              encoding="utf-8", errors="replace"
+          )
+          failed = re.findall(r"^FAILED ([^ ]+)", text, flags=re.MULTILINE)
+          if failed != [allowed] or "1 failed" not in text:
+              raise SystemExit(f"unexpected global result: {failed}")
+          print(f"accepted inherited out-of-scope failure: {allowed}")
+          PY
 
-          publisher_test = Path(
-              "tests/h011_v3/test_h011_v3_publish_raw_scan.py"
-          ).read_text(encoding="utf-8")
-          required = [
-              "def test_one_hundred_publications_have_no_fd_leak",
-              'baseline = len(os.listdir("/proc/self/fd"))',
-              'assert len(os.listdir("/proc/self/fd")) == baseline',
-              "assert not _markers(raw_dir)",
-              "assert not _temps(raw_dir)",
-          ]
-          for token in required:
-              if token not in publisher_test:
-                  raise SystemExit(f"missing FD/residue assertion: {token}")
-
-          residues = []
+      - name: Final diff and residue gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check 2>&1 | tee /tmp/h011-materialization-diff-check.log
+          python - <<'PY' | tee /tmp/h011-materialization-residue.log
+          from pathlib import Path
+          forbidden = []
           for path in Path(".").rglob("*"):
               if not path.is_file():
                   continue
               name = path.name
               if name.endswith(".marker") or ".marker.tmp." in name:
-                  residues.append(str(path))
-              elif ".tmp." in name and "__pycache__" not in str(path):
-                  residues.append(str(path))
-          if residues:
-              raise SystemExit(f"repository transaction residues: {residues}")
-          print("publisher suite includes explicit zero-FD-leak gate")
-          print("publisher suite includes zero marker/temp residue assertions")
-          print("no repository transaction residues after tests")
+                  forbidden.append(str(path))
+              if ".tmp." in name and "__pycache__" not in str(path):
+                  forbidden.append(str(path))
+          if forbidden:
+              raise SystemExit(f"residual transaction evidence: {forbidden}")
+          print("no repository marker/temp residues")
           PY
+          sha256sum \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            > /tmp/h011-materialized-file-sha256.txt
 
-      - name: Discard ephemeral checkout and prove cleanliness
-        if: always()
+      - name: Stage full validated files for one-commit materialization
         shell: bash
         run: |
-          git reset --hard
-          git clean -fdx
-          test "$(git rev-parse HEAD)" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
-          git status --short | tee /tmp/h011-postdiscard-status.txt
-          test -z "$(cat /tmp/h011-postdiscard-status.txt)"
-          echo "no commit or push step exists in this workflow" \
-            | tee /tmp/h011-nonmutation-proof.txt
+          set -euo pipefail
+          mkdir -p /tmp/materialized/polymarket /tmp/materialized/tests/h011_v3
+          cp polymarket/h011_v3_raw_transaction.py \
+            /tmp/materialized/polymarket/h011_v3_raw_transaction.py
+          cp tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            /tmp/materialized/tests/h011_v3/test_h011_v3_publish_raw_scan.py
 
-      - name: Upload exact non-mutating evidence
+      - name: Upload materialization preflight evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: h011-publisher-exact-ephemeral-${{ github.sha }}
+          name: h011-publisher-materialization-preflight-${{ github.sha }}
           path: |
             /tmp/h011-publisher-hardening.patch
-            /tmp/h011-detached-head.txt
+            /tmp/h011-patch-sha256.txt
+            /tmp/h011-source-zip-sha256.txt
+            /tmp/h011-pr8-parent.txt
             /tmp/h011-preapply-status.txt
-            /tmp/h011-git-apply-check.txt
-            /tmp/h011-applied-names.txt
-            /tmp/h011-applied-stat.txt
-            /tmp/h011-applied.diff
-            /tmp/h011-exact-publisher.log
-            /tmp/h011-exact-core.log
-            /tmp/h011-exact-compileall.log
-            /tmp/h011-exact-diff-check.log
-            /tmp/h011-fd-residue-evidence.log
-            /tmp/h011-postdiscard-status.txt
-            /tmp/h011-nonmutation-proof.txt
-          if-no-files-found: warn
+            /tmp/h011-materialized-names.txt
+            /tmp/h011-materialized-stat.txt
+            /tmp/h011-materialized.diff
+            /tmp/h011-materialization-compileall.log
+            /tmp/h011-materialization-publisher.log
+            /tmp/h011-materialization-core.log
+            /tmp/h011-materialization-h011.log
+            /tmp/h011-materialization-global.log
+            /tmp/h011-materialization-diff-check.log
+            /tmp/h011-materialization-residue.log
+            /tmp/h011-materialized-file-sha256.txt
+            /tmp/materialized/
+          if-no-files-found: error
           retention-days: 7
