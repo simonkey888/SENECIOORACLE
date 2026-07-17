@@ -1,0 +1,99 @@
+name: H011 Publisher SOL Audit
+
+on:
+  push:
+    branches:
+      - audit/h011-v3-publisher-sol
+  pull_request:
+    branches:
+      - feat/h011-v3-transaction-publisher
+    paths:
+      - "polymarket/h011_v3_raw_transaction.py"
+      - "tests/h011_v3/**"
+      - "tools/apply_h011_publisher_audit_patch.py"
+      - ".github/workflows/h011-publisher-sol-audit.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h011-publisher-sol-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publisher-hostile-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: polymarket/requirements-h011-v3.txt
+
+      - name: Install H-011 dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r polymarket/requirements-h011-v3.txt
+
+      - name: Apply one-shot hostile-audit hardening
+        id: patch
+        shell: bash
+        run: |
+          if [ -f tools/apply_h011_publisher_audit_patch.py ]; then
+            python tools/apply_h011_publisher_audit_patch.py
+            rm tools/apply_h011_publisher_audit_patch.py
+            echo "applied=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compile transaction module and audit tests
+        run: |
+          python -m compileall -q \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            tests/h011_v3/test_h011_v3_publish_crash_audit.py
+
+      - name: Verify patch whitespace
+        run: git diff --check
+
+      - name: Run hostile crash audit
+        run: |
+          python -m pytest \
+            tests/h011_v3/test_h011_v3_publish_crash_audit.py \
+            -q
+
+      - name: Run publisher regression suite
+        run: |
+          python -m pytest \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            -q
+
+      - name: Run complete H-011 V3 suite
+        run: python -m pytest tests/h011_v3/ -q
+
+      - name: Commit validated hardening to audit branch
+        if: github.event_name == 'push' && steps.patch.outputs.applied == 'true'
+        shell: bash
+        run: |
+          git status --short
+          git diff --name-only
+          git diff --stat
+          git diff --check
+          git config user.name "SeneX Publisher Audit CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            polymarket/h011_v3_raw_transaction.py \
+            tools/apply_h011_publisher_audit_patch.py
+          git diff --cached --check
+          git commit -m "fix(h011-v3): harden publisher crash consistency"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
