@@ -27,7 +27,7 @@ concurrency:
 jobs:
   publisher-hostile-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Checkout exact branch head
@@ -65,17 +65,24 @@ jobs:
           done
           echo "applied=$applied" >> "$GITHUB_OUTPUT"
 
-      - name: Compile transaction module and audit tests
+      - name: Compile hardened publisher and tests
+        shell: bash
         run: |
+          set -o pipefail
           python -m compileall -q \
             polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_raw_transaction_core.py \
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            tests/h011_v3/test_h011_v3_publish_crash_audit.py
+            tests/h011_v3/test_h011_v3_publish_crash_audit.py \
+            2>&1 | tee /tmp/h011-compileall.log
 
       - name: Verify patch whitespace
-        run: git diff --check
+        shell: bash
+        run: |
+          set -o pipefail
+          git diff --check 2>&1 | tee /tmp/h011-diff-check.log
 
-      - name: Run hostile crash audit
+      - name: Run hostile crash matrix
         shell: bash
         run: |
           set -o pipefail
@@ -91,6 +98,25 @@ jobs:
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
             -q 2>&1 | tee /tmp/h011-publisher-regression.log
 
+      - name: Run raw transaction core suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/h011_v3/test_h011_v3_raw_transaction_core.py \
+            -q 2>&1 | tee /tmp/h011-raw-transaction-core.log
+
+      - name: Re-run explicit FD leak and residue gate
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_one_hundred_publications_have_no_fd_leak \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_happy_path_sequence_zero_exact_bytes_and_cleanup \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_marker_is_removed_after_staging_and_transfer_close \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_two_processes_compete_and_leave_valid_contiguous_chain \
+            -q 2>&1 | tee /tmp/h011-fd-residue-gate.log
+
       - name: Run complete H-011 V3 suite
         shell: bash
         run: |
@@ -98,15 +124,69 @@ jobs:
           python -m pytest tests/h011_v3/ -q \
             2>&1 | tee /tmp/h011-complete-suite.log
 
+      - name: Run global suite with only inherited failure allowed
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          python -m pytest -q 2>&1 | tee /tmp/h011-global-suite.log
+          pytest_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$pytest_status" -eq 0 ]; then
+            exit 0
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          allowed = (
+              "tests/cp/test_control_plane.py::TestInvariants::"
+              "test_unknown_not_collapsed_to_zero"
+          )
+          text = Path("/tmp/h011-global-suite.log").read_text(
+              encoding="utf-8", errors="replace"
+          )
+          failed = re.findall(r"^FAILED ([^ ]+)", text, flags=re.MULTILINE)
+          if failed != [allowed]:
+              print(f"unexpected global failures: {failed}", file=sys.stderr)
+              raise SystemExit(1)
+          if "1 failed" not in text:
+              print("global failure summary is not exactly one failure", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"accepted inherited out-of-scope failure: {allowed}")
+          PY
+
+      - name: Capture exact materialization diff
+        if: success()
+        shell: bash
+        run: |
+          git diff -- \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            > /tmp/h011-publisher-hardening.patch
+          git diff --name-only > /tmp/h011-all-diff-names.txt
+          git diff --stat > /tmp/h011-all-diff-stat.txt
+          git diff --check
+          test -s /tmp/h011-publisher-hardening.patch
+
       - name: Upload publisher audit evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: h011-publisher-sol-audit-${{ github.sha }}
           path: |
+            /tmp/h011-compileall.log
+            /tmp/h011-diff-check.log
             /tmp/h011-hostile-crash-audit.log
             /tmp/h011-publisher-regression.log
+            /tmp/h011-raw-transaction-core.log
+            /tmp/h011-fd-residue-gate.log
             /tmp/h011-complete-suite.log
+            /tmp/h011-global-suite.log
+            /tmp/h011-publisher-hardening.patch
+            /tmp/h011-all-diff-names.txt
+            /tmp/h011-all-diff-stat.txt
           if-no-files-found: warn
           retention-days: 7
 
@@ -118,12 +198,6 @@ jobs:
           steps.patch.outputs.applied == 'true'
         shell: bash
         run: |
-          git diff -- \
-            polymarket/h011_v3_raw_transaction.py \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            > /tmp/h011-publisher-hardening.patch
-          test -s /tmp/h011-publisher-hardening.patch
-
           git switch --force-create \
             audit/h011-v3-publisher-sol \
             origin/audit/h011-v3-publisher-sol
