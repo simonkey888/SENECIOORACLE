@@ -10,4 +10,9 @@ Confirmed pre-test findings:
 2. The canonical marker is not verified by exact bytes and inode identity before caller ownership is consumed.
 3. A canonical marker-temp residue without a final marker is ignored by manifest-chain inspection, permitting a subsequent publication instead of requiring recovery.
 
-The branch contains a one-shot exact patcher and a real `os._exit()` crash matrix. The patch is committed only after the Linux audit suite passes.
+Linux validation found two regression-harness issues after the hostile crash matrix passed:
+
+- the short-write monkeypatch activated during marker serialization instead of the intended post-STAGED sidecar/manifest write;
+- the corruption fixture attempted to overwrite a sealed `0444` manifest without temporarily enabling and then restoring write permission on that controlled inode.
+
+The validation branch is being corrected before any product patch is materialized here. The audit branch must remain unchanged except for audit evidence until every required Linux suite is green.
