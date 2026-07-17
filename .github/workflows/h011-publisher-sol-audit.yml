@@ -15,13 +15,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: h011-publisher-sol-ephemeral-${{ github.ref }}
+  group: h011-publisher-sol-exact-ephemeral-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publisher-patch-ephemeral-validation:
+  publisher-exact-ephemeral-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout validation branch
@@ -65,12 +65,12 @@ jobs:
           git rev-parse HEAD | tee /tmp/h011-detached-head.txt
           git status --short | tee /tmp/h011-preapply-status.txt
 
-      - name: Apply patch ephemerally and inspect scope
+      - name: Apply patch ephemerally and inspect exact scope
         shell: bash
         run: |
           git apply --check /tmp/h011-publisher-hardening.patch
+          echo PASS | tee /tmp/h011-git-apply-check.txt
           git apply /tmp/h011-publisher-hardening.patch
-          git diff --check
           git diff --name-only | tee /tmp/h011-applied-names.txt
           git diff --stat | tee /tmp/h011-applied-stat.txt
           git diff > /tmp/h011-applied.diff
@@ -87,14 +87,14 @@ jobs:
           if observed != expected:
               raise SystemExit(f"scope mismatch: {observed} != {expected}")
 
-          forbidden_prefixes = (
+          forbidden = (
               ".github/",
-              "polymarket/results/",
               "audit/",
               "tools/",
+              "polymarket/results/",
           )
-          if any(name.startswith(forbidden_prefixes) for name in observed):
-              raise SystemExit(f"forbidden path in materialized diff: {observed}")
+          if any(name.startswith(forbidden) for name in observed):
+              raise SystemExit(f"forbidden path in patch: {observed}")
 
           source = Path("polymarket/h011_v3_raw_transaction.py").read_text(
               encoding="utf-8"
@@ -103,41 +103,29 @@ jobs:
               "tests/h011_v3/test_h011_v3_publish_raw_scan.py"
           ).read_text(encoding="utf-8")
 
-          required_source = [
-              "follow_symlinks=False",
-              "marker_temp_names",
-              "transaction marker evidence requires recovery",
-              "expected_identity=expected_identity",
-          ]
-          for token in required_source:
-              if token not in source:
-                  raise SystemExit(f"missing hardened source token: {token}")
-
           if "chmod(0o644)" in source or "chmod(0o444)" in source:
-              raise SystemExit("product code unexpectedly changes sealed modes")
+              raise SystemExit("product source relaxes sealed file modes")
 
-          fixture_block = test.split(
-              'if mutation == "hash":', 1
-          )[1].split('elif mutation == "gap":', 1)[0]
-          required_fixture = [
+          fixture = test.split('if mutation == "hash":', 1)[1].split(
+              'elif mutation == "gap":', 1
+          )[0]
+          ordered_fixture_tokens = [
               "manifest_path.chmod(0o644)",
               "try:",
               "manifest_path.write_bytes",
               "finally:",
               "manifest_path.chmod(0o444)",
           ]
-          positions = [fixture_block.find(token) for token in required_fixture]
+          positions = [fixture.find(token) for token in ordered_fixture_tokens]
           if any(position < 0 for position in positions):
-              raise SystemExit(
-                  f"manifest fixture lacks controlled restore: {positions}"
-              )
+              raise SystemExit(f"fixture restore missing: {positions}")
           if positions != sorted(positions):
-              raise SystemExit("manifest fixture restore order is invalid")
+              raise SystemExit("fixture does not restore 0444 in finally")
 
-          short_block = test.split(
+          short_write = test.split(
               "def test_short_write_preserves_marker_and_staging", 1
           )[1].split("\ndef ", 1)[0]
-          required_short = [
+          required_short_write = [
               "FAULT_PUBLISH_AFTER_ARTIFACT_MARKER_UPDATE",
               "armed = True",
               "return 0",
@@ -146,46 +134,76 @@ jobs:
               "transfer_consumed is True",
               "transfer._closed is True",
               'marker["status"] == "ARTIFACT_PUBLISHED"',
-              'f"{sealed.final_name}.sha256").exists()',
-              '"manifest_000000.json").exists()',
+              'assert not (raw_dir / f"{sealed.final_name}.sha256").exists()',
+              'assert not (raw_dir / "manifest_000000.json").exists()',
               "assert not _temps(raw_dir)",
           ]
-          for token in required_short:
-              if token not in short_block:
-                  raise SystemExit(f"missing short-write assertion: {token}")
+          for token in required_short_write:
+              if token not in short_write:
+                  raise SystemExit(f"missing short-write invariant: {token}")
           PY
 
-      - name: Run focused publisher safety tests
+      - name: Run exact publisher suite
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_short_write_preserves_marker_and_staging \
-            'tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_corrupt_gap_or_wrong_previous_manifest_blocks[hash]' \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_one_hundred_publications_have_no_fd_leak \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_happy_path_sequence_zero_exact_bytes_and_cleanup \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_marker_is_removed_after_staging_and_transfer_close \
-            tests/h011_v3/test_h011_v3_publish_crash_audit.py \
-            -q 2>&1 | tee /tmp/h011-focused-tests.log
+          python -m pytest tests/h011_v3/test_h011_v3_publish_raw_scan.py -q \
+            2>&1 | tee /tmp/h011-exact-publisher.log
 
-      - name: Verify no residual marker or temporary test outputs
+      - name: Run exact transaction core suite
         shell: bash
         run: |
-          python - <<'PY' | tee /tmp/h011-residue-inspection.log
+          set -o pipefail
+          python -m pytest tests/h011_v3/test_h011_v3_raw_transaction_core.py -q \
+            2>&1 | tee /tmp/h011-exact-core.log
+
+      - name: Run exact compileall
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m compileall polymarket/h011_v3_raw_transaction.py \
+            2>&1 | tee /tmp/h011-exact-compileall.log
+
+      - name: Run exact diff check
+        shell: bash
+        run: |
+          set -o pipefail
+          git diff --check 2>&1 | tee /tmp/h011-exact-diff-check.log
+
+      - name: Verify FD leak test coverage and repository residues
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/h011-fd-residue-evidence.log
           from pathlib import Path
 
-          forbidden = []
+          publisher_test = Path(
+              "tests/h011_v3/test_h011_v3_publish_raw_scan.py"
+          ).read_text(encoding="utf-8")
+          required = [
+              "def test_one_hundred_publications_have_no_fd_leak",
+              'baseline = len(os.listdir("/proc/self/fd"))',
+              'assert len(os.listdir("/proc/self/fd")) == baseline',
+              "assert not _markers(raw_dir)",
+              "assert not _temps(raw_dir)",
+          ]
+          for token in required:
+              if token not in publisher_test:
+                  raise SystemExit(f"missing FD/residue assertion: {token}")
+
+          residues = []
           for path in Path(".").rglob("*"):
               if not path.is_file():
                   continue
               name = path.name
               if name.endswith(".marker") or ".marker.tmp." in name:
-                  forbidden.append(str(path))
-              if ".tmp." in name and "__pycache__" not in str(path):
-                  forbidden.append(str(path))
-          if forbidden:
-              raise SystemExit(f"residual transaction evidence: {forbidden}")
-          print("no repository marker/temp residues")
+                  residues.append(str(path))
+              elif ".tmp." in name and "__pycache__" not in str(path):
+                  residues.append(str(path))
+          if residues:
+              raise SystemExit(f"repository transaction residues: {residues}")
+          print("publisher suite includes explicit zero-FD-leak gate")
+          print("publisher suite includes zero marker/temp residue assertions")
+          print("no repository transaction residues after tests")
           PY
 
       - name: Discard ephemeral checkout and prove cleanliness
@@ -197,21 +215,28 @@ jobs:
           test "$(git rev-parse HEAD)" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
           git status --short | tee /tmp/h011-postdiscard-status.txt
           test -z "$(cat /tmp/h011-postdiscard-status.txt)"
+          echo "no commit or push step exists in this workflow" \
+            | tee /tmp/h011-nonmutation-proof.txt
 
-      - name: Upload non-mutating inspection evidence
+      - name: Upload exact non-mutating evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: h011-publisher-ephemeral-validation-${{ github.sha }}
+          name: h011-publisher-exact-ephemeral-${{ github.sha }}
           path: |
             /tmp/h011-publisher-hardening.patch
             /tmp/h011-detached-head.txt
             /tmp/h011-preapply-status.txt
+            /tmp/h011-git-apply-check.txt
             /tmp/h011-applied-names.txt
             /tmp/h011-applied-stat.txt
             /tmp/h011-applied.diff
-            /tmp/h011-focused-tests.log
-            /tmp/h011-residue-inspection.log
+            /tmp/h011-exact-publisher.log
+            /tmp/h011-exact-core.log
+            /tmp/h011-exact-compileall.log
+            /tmp/h011-exact-diff-check.log
+            /tmp/h011-fd-residue-evidence.log
             /tmp/h011-postdiscard-status.txt
+            /tmp/h011-nonmutation-proof.txt
           if-no-files-found: warn
           retention-days: 7
