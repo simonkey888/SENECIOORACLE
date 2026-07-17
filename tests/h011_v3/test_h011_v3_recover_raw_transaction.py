@@ -239,7 +239,7 @@ def test_no_marker_is_a_durable_noop(
     result = _recover(raw_dir, policy)
     after = sorted(path.name for path in raw_dir.iterdir())
     assert result.status == "NO_RECOVERY_NEEDED"
-    assert after == before + [".manifest.lock"]
+    assert after == before + [f"{policy.manifest_prefix}.lock"]
 
 
 def test_wrong_existing_sidecar_blocks_and_preserves_marker(
