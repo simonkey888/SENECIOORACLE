@@ -22,9 +22,13 @@ Authoritative materialized product commit:
 
 `1eade0149da220843a7bc3fc756c22a1c543bae2`
 
-Native read-only CI at cleanup head `3b445093d3aa7fab7e8cd2769183de456581fa4f`:
+Final audit/CI head:
 
-- workflow run `29603485005`: `completed/success`;
+`492dce452f3c0b70b7a47dc41ac462a26fd4c8e2`
+
+Native read-only CI:
+
+- workflow run `29603620199`: `completed/success`;
 - publisher: 41 passed;
 - transaction core: 173 passed;
 - hostile crash matrix: 24 passed;
@@ -33,6 +37,11 @@ Native read-only CI at cleanup head `3b445093d3aa7fab7e8cd2769183de456581fa4f`:
 - focused FD/residue gate: 3 passed;
 - compileall and diff-check: passed;
 - no repository marker/temp residues.
+
+Evidence artifact:
+
+- artifact ID `8415983473`;
+- digest `sha256:3f43e6834063ce80649a5fa4ef37e231190f9a119ee5d5a4d42e9aab1f0360a7`.
 
 The one-shot patcher has been removed. The audit workflow has `contents: read`, performs no commit or push, and validates the already-materialized head directly.
 
