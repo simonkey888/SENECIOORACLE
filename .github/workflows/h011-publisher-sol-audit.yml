@@ -1,5 +1,6 @@
 name: H011 Publisher SOL Audit
 
+# Validation PR trigger: workflow already exists in the audit base branch.
 on:
   push:
     branches:
