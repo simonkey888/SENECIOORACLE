@@ -15,13 +15,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: h011-publisher-sol-inspection-${{ github.ref }}
+  group: h011-publisher-sol-ephemeral-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publisher-patch-inspection:
+  publisher-patch-ephemeral-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout validation branch
@@ -29,6 +29,18 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.head_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: polymarket/requirements-h011-v3.txt
+
+      - name: Install H-011 dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r polymarket/requirements-h011-v3.txt
 
       - name: Build exact validated patch
         shell: bash
@@ -42,18 +54,26 @@ jobs:
             > /tmp/h011-publisher-hardening.patch
           test -s /tmp/h011-publisher-hardening.patch
 
-      - name: Verify patch applies to current audit head
+      - name: Prepare clean detached audit checkout
         shell: bash
         run: |
           git reset --hard
-          git clean -fd
+          git clean -fdx
           git switch --detach origin/audit/h011-v3-publisher-sol
           test "$(git rev-parse HEAD)" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
+          test -z "$(git status --short)"
+          git rev-parse HEAD | tee /tmp/h011-detached-head.txt
+          git status --short | tee /tmp/h011-preapply-status.txt
+
+      - name: Apply patch ephemerally and inspect scope
+        shell: bash
+        run: |
           git apply --check /tmp/h011-publisher-hardening.patch
           git apply /tmp/h011-publisher-hardening.patch
           git diff --check
-          git diff --name-only > /tmp/h011-applied-names.txt
-          git diff --stat > /tmp/h011-applied-stat.txt
+          git diff --name-only | tee /tmp/h011-applied-names.txt
+          git diff --stat | tee /tmp/h011-applied-stat.txt
+          git diff > /tmp/h011-applied.diff
           python - <<'PY'
           from pathlib import Path
 
@@ -66,6 +86,15 @@ jobs:
           ).splitlines()
           if observed != expected:
               raise SystemExit(f"scope mismatch: {observed} != {expected}")
+
+          forbidden_prefixes = (
+              ".github/",
+              "polymarket/results/",
+              "audit/",
+              "tools/",
+          )
+          if any(name.startswith(forbidden_prefixes) for name in observed):
+              raise SystemExit(f"forbidden path in materialized diff: {observed}")
 
           source = Path("polymarket/h011_v3_raw_transaction.py").read_text(
               encoding="utf-8"
@@ -85,28 +114,104 @@ jobs:
                   raise SystemExit(f"missing hardened source token: {token}")
 
           if "chmod(0o644)" in source or "chmod(0o444)" in source:
-              raise SystemExit("product code unexpectedly changes file modes")
+              raise SystemExit("product code unexpectedly changes sealed modes")
 
-          required_test = [
+          fixture_block = test.split(
+              'if mutation == "hash":', 1
+          )[1].split('elif mutation == "gap":', 1)[0]
+          required_fixture = [
               "manifest_path.chmod(0o644)",
+              "try:",
+              "manifest_path.write_bytes",
+              "finally:",
               "manifest_path.chmod(0o444)",
+          ]
+          positions = [fixture_block.find(token) for token in required_fixture]
+          if any(position < 0 for position in positions):
+              raise SystemExit(
+                  f"manifest fixture lacks controlled restore: {positions}"
+              )
+          if positions != sorted(positions):
+              raise SystemExit("manifest fixture restore order is invalid")
+
+          short_block = test.split(
+              "def test_short_write_preserves_marker_and_staging", 1
+          )[1].split("\ndef ", 1)[0]
+          required_short = [
               "FAULT_PUBLISH_AFTER_ARTIFACT_MARKER_UPDATE",
+              "armed = True",
+              "return 0",
               "assert injected is True",
-              "assert raised.value.durable_marker_status == \"ARTIFACT_PUBLISHED\"",
-              "assert not (raw_dir / f\"{sealed.final_name}.sha256\").exists()",
+              'durable_marker_status == "ARTIFACT_PUBLISHED"',
+              "transfer_consumed is True",
+              "transfer._closed is True",
+              'marker["status"] == "ARTIFACT_PUBLISHED"',
+              'f"{sealed.final_name}.sha256").exists()',
+              '"manifest_000000.json").exists()',
               "assert not _temps(raw_dir)",
           ]
-          for token in required_test:
-              if token not in test:
-                  raise SystemExit(f"missing regression assertion: {token}")
+          for token in required_short:
+              if token not in short_block:
+                  raise SystemExit(f"missing short-write assertion: {token}")
           PY
 
+      - name: Run focused publisher safety tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_short_write_preserves_marker_and_staging \
+            'tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_corrupt_gap_or_wrong_previous_manifest_blocks[hash]' \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_one_hundred_publications_have_no_fd_leak \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_happy_path_sequence_zero_exact_bytes_and_cleanup \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py::test_marker_is_removed_after_staging_and_transfer_close \
+            tests/h011_v3/test_h011_v3_publish_crash_audit.py \
+            -q 2>&1 | tee /tmp/h011-focused-tests.log
+
+      - name: Verify no residual marker or temporary test outputs
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/h011-residue-inspection.log
+          from pathlib import Path
+
+          forbidden = []
+          for path in Path(".").rglob("*"):
+              if not path.is_file():
+                  continue
+              name = path.name
+              if name.endswith(".marker") or ".marker.tmp." in name:
+                  forbidden.append(str(path))
+              if ".tmp." in name and "__pycache__" not in str(path):
+                  forbidden.append(str(path))
+          if forbidden:
+              raise SystemExit(f"residual transaction evidence: {forbidden}")
+          print("no repository marker/temp residues")
+          PY
+
+      - name: Discard ephemeral checkout and prove cleanliness
+        if: always()
+        shell: bash
+        run: |
+          git reset --hard
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
+          git status --short | tee /tmp/h011-postdiscard-status.txt
+          test -z "$(cat /tmp/h011-postdiscard-status.txt)"
+
       - name: Upload non-mutating inspection evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: h011-publisher-patch-inspection-${{ github.sha }}
+          name: h011-publisher-ephemeral-validation-${{ github.sha }}
           path: |
             /tmp/h011-publisher-hardening.patch
+            /tmp/h011-detached-head.txt
+            /tmp/h011-preapply-status.txt
             /tmp/h011-applied-names.txt
             /tmp/h011-applied-stat.txt
+            /tmp/h011-applied.diff
+            /tmp/h011-focused-tests.log
+            /tmp/h011-residue-inspection.log
+            /tmp/h011-postdiscard-status.txt
+          if-no-files-found: warn
           retention-days: 7
