@@ -5,6 +5,7 @@ on:
   pull_request:
     branches:
       - feat/h011-v3-control-plane-coverage
+      - feat/h011-v3-transaction-recovery-v2
     paths:
       - "polymarket/h011_v3_raw_recovery.py"
       - "tests/h011_v3/test_h011_v3_recover_raw_transaction.py"
@@ -33,10 +34,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${{ github.event.pull_request.base.ref }}" = "feat/h011-v3-control-plane-coverage"
-          test "${{ github.event.pull_request.base.sha }}" = "adaf4cdd12662a96000785599cceabb5c60e2c63"
+          base_ref="${{ github.event.pull_request.base.ref }}"
+          case "$base_ref" in
+            feat/h011-v3-control-plane-coverage|feat/h011-v3-transaction-recovery-v2) ;;
+            *) echo "unexpected base: $base_ref" >&2; exit 1 ;;
+          esac
+          if [ "$base_ref" = "feat/h011-v3-control-plane-coverage" ]; then
+            test "${{ github.event.pull_request.base.sha }}" = "adaf4cdd12662a96000785599cceabb5c60e2c63"
+            expected=$'.github/workflows/h011-pr7-recovery-smoke.yml\npolymarket/h011_v3_raw_recovery.py\ntests/h011_v3/test_h011_v3_recover_raw_transaction.py'
+          else
+            expected=$'.github/workflows/h011-pr7-recovery-smoke.yml'
+          fi
           git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" | sort | tee /tmp/h011-recovery-names.txt
-          test "$(cat /tmp/h011-recovery-names.txt)" = $'.github/workflows/h011-pr7-recovery-smoke.yml\npolymarket/h011_v3_raw_recovery.py\ntests/h011_v3/test_h011_v3_recover_raw_transaction.py'
+          test "$(cat /tmp/h011-recovery-names.txt)" = "$expected"
           git diff --stat "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" | tee /tmp/h011-recovery-stat.txt
           git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" | tee /tmp/h011-recovery-diff-check.log
           sha256sum \
