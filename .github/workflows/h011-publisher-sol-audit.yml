@@ -3,7 +3,7 @@ name: H011 Publisher SOL Audit
 on:
   push:
     branches:
-      - audit/h011-v3-publisher-sol
+      - feat/h011-v3-transaction-publisher
   pull_request:
     branches:
       - feat/h011-v3-transaction-publisher
@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout exact event head
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -37,9 +37,18 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e tools/apply_h011_publisher_audit_patch.py
-          git fetch --no-tags origin feat/h011-v3-transaction-publisher
-          git diff --name-only origin/feat/h011-v3-transaction-publisher...HEAD | sort | tee /tmp/h011-audit-names.txt
-          test "$(cat /tmp/h011-audit-names.txt)" = $'.github/workflows/h011-publisher-sol-audit.yml\naudit/H011_PUBLISHER_SOL_FINDINGS.md\npolymarket/h011_v3_raw_transaction.py\ntests/h011_v3/test_h011_v3_publish_crash_audit.py\ntests/h011_v3/test_h011_v3_publish_raw_scan.py'
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin feat/h011-v3-transaction-publisher
+            git diff --name-only origin/feat/h011-v3-transaction-publisher...HEAD | sort | tee /tmp/h011-audit-names.txt
+            test "$(cat /tmp/h011-audit-names.txt)" = $'.github/workflows/h011-publisher-sol-audit.yml\naudit/H011_PUBLISHER_SOL_FINDINGS.md\npolymarket/h011_v3_raw_transaction.py\ntests/h011_v3/test_h011_v3_publish_crash_audit.py\ntests/h011_v3/test_h011_v3_publish_raw_scan.py'
+            git diff --stat origin/feat/h011-v3-transaction-publisher...HEAD | tee /tmp/h011-audit-stat.txt
+            git diff --check origin/feat/h011-v3-transaction-publisher...HEAD
+          else
+            test "$GITHUB_REF_NAME" = "feat/h011-v3-transaction-publisher"
+            git diff --name-only HEAD^..HEAD | sort | tee /tmp/h011-audit-names.txt
+            git diff --stat HEAD^..HEAD | tee /tmp/h011-audit-stat.txt
+            git diff --check HEAD^..HEAD
+          fi
           sha256sum \
             polymarket/h011_v3_raw_transaction.py \
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
@@ -47,10 +56,9 @@ jobs:
           grep -F "4d6b859c3ac5596c9d386ceb31dbfa5f53298f526dadcba9bc177a73622b3e99  polymarket/h011_v3_raw_transaction.py" /tmp/h011-audit-file-sha256.txt
           grep -F "2ef89875d3d8aad36674d77938006402a3c24310eb689de8082861b694d29696  tests/h011_v3/test_h011_v3_publish_raw_scan.py" /tmp/h011-audit-file-sha256.txt
           git log -1 --format='%H %P %s' | tee /tmp/h011-audit-head.txt
-          git diff --stat origin/feat/h011-v3-transaction-publisher...HEAD | tee /tmp/h011-audit-stat.txt
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
           cache: pip
@@ -71,13 +79,6 @@ jobs:
             tests/h011_v3/test_h011_v3_publish_crash_audit.py \
             tests/h011_v3/test_h011_v3_raw_transaction_core.py \
             2>&1 | tee /tmp/h011-audit-compileall.log
-
-      - name: Diff check
-        shell: bash
-        run: |
-          set -o pipefail
-          git diff --check origin/feat/h011-v3-transaction-publisher...HEAD \
-            2>&1 | tee /tmp/h011-audit-diff-check.log
 
       - name: Publisher suite
         shell: bash
@@ -161,7 +162,7 @@ jobs:
 
       - name: Upload audit evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: h011-publisher-sol-audit-${{ github.sha }}
           path: |
@@ -170,7 +171,6 @@ jobs:
             /tmp/h011-audit-head.txt
             /tmp/h011-audit-stat.txt
             /tmp/h011-audit-compileall.log
-            /tmp/h011-audit-diff-check.log
             /tmp/h011-audit-publisher.log
             /tmp/h011-audit-core.log
             /tmp/h011-audit-crash.log
