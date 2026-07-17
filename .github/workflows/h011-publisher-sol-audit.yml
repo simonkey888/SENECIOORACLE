@@ -15,6 +15,7 @@ on:
       - "tests/h011_v3/**"
       - "tools/apply_h011_publisher_audit_patch.py"
       - "tools/apply_h011_publisher_audit_regression_patch.py"
+      - "audit/APPROVE_H011_PUBLISHER_MATERIALIZATION"
       - ".github/workflows/h011-publisher-sol-audit.yml"
 
 permissions:
@@ -157,7 +158,7 @@ jobs:
           print(f"accepted inherited out-of-scope failure: {allowed}")
           PY
 
-      - name: Capture exact materialization diff
+      - name: Capture and validate exact materialization diff
         if: success()
         shell: bash
         run: |
@@ -167,6 +168,25 @@ jobs:
             > /tmp/h011-publisher-hardening.patch
           git diff --name-only > /tmp/h011-all-diff-names.txt
           git diff --stat > /tmp/h011-all-diff-stat.txt
+          git diff --name-only -- \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            > /tmp/h011-materialization-names.txt
+          python - <<'PY'
+          from pathlib import Path
+
+          expected = [
+              "polymarket/h011_v3_raw_transaction.py",
+              "tests/h011_v3/test_h011_v3_publish_raw_scan.py",
+          ]
+          observed = Path("/tmp/h011-materialization-names.txt").read_text(
+              encoding="utf-8"
+          ).splitlines()
+          if observed != expected:
+              raise SystemExit(
+                  f"materialization scope mismatch: {observed} != {expected}"
+              )
+          PY
           git diff --check
           test -s /tmp/h011-publisher-hardening.patch
 
@@ -187,6 +207,7 @@ jobs:
             /tmp/h011-publisher-hardening.patch
             /tmp/h011-all-diff-names.txt
             /tmp/h011-all-diff-stat.txt
+            /tmp/h011-materialization-names.txt
           if-no-files-found: warn
           retention-days: 7
 
@@ -195,7 +216,8 @@ jobs:
           success() &&
           github.event_name == 'pull_request' &&
           github.head_ref == 'audit/h011-v3-publisher-sol-validation' &&
-          steps.patch.outputs.applied == 'true'
+          steps.patch.outputs.applied == 'true' &&
+          hashFiles('audit/APPROVE_H011_PUBLISHER_MATERIALIZATION') != ''
         shell: bash
         run: |
           git switch --force-create \
