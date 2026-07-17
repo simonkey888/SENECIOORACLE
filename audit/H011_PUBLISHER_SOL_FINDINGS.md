@@ -1,18 +1,44 @@
-# H-011 Phase II-A hostile audit
+# H-011 Publisher SOL Audit Findings
 
-Status: implementation and crash validation in progress.
+Confirmed findings:
 
-Scope is limited to `publish_raw_scan()` and its marker-creation dependency at publisher base SHA `e26c79aeb97973bdb1d700c1edb8b47542b15153`.
+1. The marker temp source was hardlinked without explicit `follow_symlinks=False`.
+2. The canonical marker was not verified by exact bytes and inode identity before caller ownership was consumed.
+3. A canonical marker-temp residue without a final marker was ignored by manifest-chain inspection, permitting a subsequent publication instead of requiring recovery.
+4. Existing fault tests injected Python exceptions and then ran cleanup; they did not exercise abrupt real process death.
 
-Confirmed pre-test findings:
+Materialized hardening:
 
-1. The marker temp source is linked without explicitly disabling symlink following.
-2. The canonical marker is not verified by exact bytes and inode identity before caller ownership is consumed.
-3. A canonical marker-temp residue without a final marker is ignored by manifest-chain inspection, permitting a subsequent publication instead of requiring recovery.
+- exact temp and canonical marker byte/hash verification;
+- inode/dev/size identity verification across hardlink publication;
+- `follow_symlinks=False` on the marker hardlink;
+- durable canonical-marker commit point before temporary-link removal;
+- explicit recovery requirement for canonical marker-temp residues;
+- real `multiprocessing` + `os._exit()` crash coverage;
+- short-write ownership regression coverage;
+- controlled `0444` manifest corruption fixture with permission restoration.
 
-Linux validation found two regression-harness issues after the hostile crash matrix passed:
+Authoritative materialized product commit:
 
-- the short-write monkeypatch activated during marker serialization instead of the intended post-STAGED sidecar/manifest write;
-- the corruption fixture attempted to overwrite a sealed `0444` manifest without temporarily enabling and then restoring write permission on that controlled inode.
+`1eade0149da220843a7bc3fc756c22a1c543bae2`
 
-The validation branch is being corrected before any product patch is materialized here. The audit branch must remain unchanged except for audit evidence until every required Linux suite is green.
+Native read-only CI at cleanup head `3b445093d3aa7fab7e8cd2769183de456581fa4f`:
+
+- workflow run `29603485005`: `completed/success`;
+- publisher: 41 passed;
+- transaction core: 173 passed;
+- hostile crash matrix: 24 passed;
+- complete H-011 V3: 485 passed;
+- global: 505 passed plus the single inherited out-of-scope control-plane failure;
+- focused FD/residue gate: 3 passed;
+- compileall and diff-check: passed;
+- no repository marker/temp residues.
+
+The one-shot patcher has been removed. The audit workflow has `contents: read`, performs no commit or push, and validates the already-materialized head directly.
+
+Permanent limits:
+
+- `paper_only=true`
+- `orders_enabled=false`
+- `live_capital_locked=true`
+- Draft only; no merge or deployment authorized.
