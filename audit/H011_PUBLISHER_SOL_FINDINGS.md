@@ -24,11 +24,11 @@ Authoritative materialized product commit:
 
 Final audit/CI head:
 
-`492dce452f3c0b70b7a47dc41ac462a26fd4c8e2`
+`33e2cfa2315a26548775cf0cbcdbe05f84fbda78`
 
 Native read-only CI:
 
-- workflow run `29603620199`: `completed/success`;
+- workflow run `29603704713`: `completed/success`;
 - publisher: 41 passed;
 - transaction core: 173 passed;
 - hostile crash matrix: 24 passed;
@@ -40,8 +40,8 @@ Native read-only CI:
 
 Evidence artifact:
 
-- artifact ID `8415983473`;
-- digest `sha256:3f43e6834063ce80649a5fa4ef37e231190f9a119ee5d5a4d42e9aab1f0360a7`.
+- artifact ID `8416014280`;
+- digest `sha256:32c4000304a40bac570346cc0810a6c177d1a534f05b5f1fdc210bc012c0aa6c`.
 
 The one-shot patcher has been removed. The audit workflow has `contents: read`, performs no commit or push, and validates the already-materialized head directly.
 
