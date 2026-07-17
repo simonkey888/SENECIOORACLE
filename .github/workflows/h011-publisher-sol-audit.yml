@@ -12,14 +12,14 @@ on:
       - ".github/workflows/h011-publisher-sol-audit.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: h011-publisher-materialization-preflight-${{ github.ref }}
+  group: h011-publisher-materialization-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publisher-materialization-preflight:
+  publisher-materialization-candidate:
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -59,7 +59,7 @@ jobs:
           printf '%s\n' "$patch_sha" > /tmp/h011-patch-sha256.txt
           printf '%s\n' "bf44af4b00365b28d8742d93f48b4dc0c3069b149c0166fc41c6c15eae8c2a33" > /tmp/h011-source-zip-sha256.txt
 
-      - name: Prepare exact PR8 checkout
+      - name: Prepare exact PR8 parent
         shell: bash
         run: |
           set -euo pipefail
@@ -70,34 +70,37 @@ jobs:
           test "$remote_head" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
           git switch --detach "$remote_head"
           test -z "$(git status --short)"
-          printf '%s\n' "$remote_head" > /tmp/h011-pr8-parent.txt
-          git status --short > /tmp/h011-preapply-status.txt
+          printf '%s\n' "$remote_head" > /tmp/h011-materialization-parent.txt
 
-      - name: Apply exact patch and verify scope
+      - name: Apply exact patch and verify file identities
         shell: bash
         run: |
           set -euo pipefail
           git apply --check /tmp/h011-publisher-hardening.patch
           git apply /tmp/h011-publisher-hardening.patch
           git diff --check
-          git diff --name-only | tee /tmp/h011-materialized-names.txt
-          git diff --stat | tee /tmp/h011-materialized-stat.txt
-          git diff > /tmp/h011-materialized.diff
+          git diff --name-only | tee /tmp/h011-materialization-names.txt
+          git diff --stat | tee /tmp/h011-materialization-stat.txt
+          git diff > /tmp/h011-materialization.diff
           python - <<'PY'
           from pathlib import Path
           expected = [
               "polymarket/h011_v3_raw_transaction.py",
               "tests/h011_v3/test_h011_v3_publish_raw_scan.py",
           ]
-          observed = Path("/tmp/h011-materialized-names.txt").read_text(encoding="utf-8").splitlines()
+          observed = Path("/tmp/h011-materialization-names.txt").read_text(encoding="utf-8").splitlines()
           if observed != expected:
               raise SystemExit(f"scope mismatch: {observed} != {expected}")
           PY
+          file_hashes=$(sha256sum \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py)
+          printf '%s\n' "$file_hashes" | tee /tmp/h011-materialized-file-sha256.txt
+          grep -F "4d6b859c3ac5596c9d386ceb31dbfa5f53298f526dadcba9bc177a73622b3e99  polymarket/h011_v3_raw_transaction.py" /tmp/h011-materialized-file-sha256.txt
+          grep -F "2ef89875d3d8aad36674d77938006402a3c24310eb689de8082861b694d29696  tests/h011_v3/test_h011_v3_publish_raw_scan.py" /tmp/h011-materialized-file-sha256.txt
 
       - name: Compileall
-        shell: bash
         run: |
-          set -o pipefail
           python -m compileall \
             polymarket/h011_v3_raw_transaction.py \
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
@@ -152,7 +155,7 @@ jobs:
           print(f"accepted inherited out-of-scope failure: {allowed}")
           PY
 
-      - name: Final diff and residue gate
+      - name: Final scope and residue gate
         shell: bash
         run: |
           set -euo pipefail
@@ -172,35 +175,50 @@ jobs:
               raise SystemExit(f"residual transaction evidence: {forbidden}")
           print("no repository marker/temp residues")
           PY
-          sha256sum \
-            polymarket/h011_v3_raw_transaction.py \
-            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            > /tmp/h011-materialized-file-sha256.txt
 
-      - name: Stage full validated files for one-commit materialization
+      - name: Create exactly one candidate commit
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/materialized/polymarket /tmp/materialized/tests/h011_v3
-          cp polymarket/h011_v3_raw_transaction.py \
-            /tmp/materialized/polymarket/h011_v3_raw_transaction.py
-          cp tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            /tmp/materialized/tests/h011_v3/test_h011_v3_publish_raw_scan.py
+          git config user.name "SeneX Publisher Audit"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py
+          git diff --cached --check
+          git diff --cached --name-only | tee /tmp/h011-staged-names.txt
+          test "$(cat /tmp/h011-staged-names.txt)" = $'polymarket/h011_v3_raw_transaction.py\ntests/h011_v3/test_h011_v3_publish_raw_scan.py'
+          git commit -m "fix(h011-v3): harden publisher crash consistency"
+          candidate=$(git rev-parse HEAD)
+          parent=$(git rev-parse HEAD^)
+          test "$parent" = "8ea49b560a808a808bfe498e55a3f4d56603c7e7"
+          test "$(git rev-list --count "$parent..$candidate")" = "1"
+          printf '%s\n' "$candidate" | tee /tmp/h011-candidate-sha.txt
+          printf '%s\n' "$parent" > /tmp/h011-candidate-parent.txt
+          git show --format=fuller --stat "$candidate" > /tmp/h011-candidate-show.txt
+          git diff-tree --no-commit-id --name-only -r "$candidate" > /tmp/h011-candidate-names.txt
+          test "$(cat /tmp/h011-candidate-names.txt)" = $'polymarket/h011_v3_raw_transaction.py\ntests/h011_v3/test_h011_v3_publish_raw_scan.py'
 
-      - name: Upload materialization preflight evidence
+      - name: Publish candidate commit to isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/audit/h011-v3-publisher-sol-materialized-candidate
+
+      - name: Upload candidate evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: h011-publisher-materialization-preflight-${{ github.sha }}
+          name: h011-publisher-materialization-candidate-${{ github.sha }}
           path: |
             /tmp/h011-publisher-hardening.patch
             /tmp/h011-patch-sha256.txt
             /tmp/h011-source-zip-sha256.txt
-            /tmp/h011-pr8-parent.txt
-            /tmp/h011-preapply-status.txt
-            /tmp/h011-materialized-names.txt
-            /tmp/h011-materialized-stat.txt
-            /tmp/h011-materialized.diff
+            /tmp/h011-materialization-parent.txt
+            /tmp/h011-materialization-names.txt
+            /tmp/h011-materialization-stat.txt
+            /tmp/h011-materialization.diff
+            /tmp/h011-materialized-file-sha256.txt
             /tmp/h011-materialization-compileall.log
             /tmp/h011-materialization-publisher.log
             /tmp/h011-materialization-core.log
@@ -208,7 +226,10 @@ jobs:
             /tmp/h011-materialization-global.log
             /tmp/h011-materialization-diff-check.log
             /tmp/h011-materialization-residue.log
-            /tmp/h011-materialized-file-sha256.txt
-            /tmp/materialized/
+            /tmp/h011-staged-names.txt
+            /tmp/h011-candidate-sha.txt
+            /tmp/h011-candidate-parent.txt
+            /tmp/h011-candidate-show.txt
+            /tmp/h011-candidate-names.txt
           if-no-files-found: error
           retention-days: 7
