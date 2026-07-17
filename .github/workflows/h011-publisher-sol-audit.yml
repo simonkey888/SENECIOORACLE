@@ -9,6 +9,7 @@ on:
     branches:
       - feat/h011-v3-transaction-publisher
       - audit/h011-v3-publisher-sol
+      - feat/h011-v3-discovery-refresh
     paths:
       - "polymarket/h011_v3_raw_transaction.py"
       - "tests/h011_v3/**"
@@ -69,19 +70,39 @@ jobs:
         run: git diff --check
 
       - name: Run hostile crash audit
+        shell: bash
         run: |
+          set -o pipefail
           python -m pytest \
             tests/h011_v3/test_h011_v3_publish_crash_audit.py \
-            -q
+            -q 2>&1 | tee /tmp/h011-hostile-crash-audit.log
 
       - name: Run publisher regression suite
+        shell: bash
         run: |
+          set -o pipefail
           python -m pytest \
             tests/h011_v3/test_h011_v3_publish_raw_scan.py \
-            -q
+            -q 2>&1 | tee /tmp/h011-publisher-regression.log
 
       - name: Run complete H-011 V3 suite
-        run: python -m pytest tests/h011_v3/ -q
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/h011_v3/ -q \
+            2>&1 | tee /tmp/h011-complete-suite.log
+
+      - name: Upload publisher audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h011-publisher-sol-audit-${{ github.sha }}
+          path: |
+            /tmp/h011-hostile-crash-audit.log
+            /tmp/h011-publisher-regression.log
+            /tmp/h011-complete-suite.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Commit validated hardening to audit branch
         if: github.event_name == 'push' && steps.patch.outputs.applied == 'true'
