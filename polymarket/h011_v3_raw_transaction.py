@@ -1193,64 +1193,106 @@ def create_marker_no_replace_under_lock(
     marker_body: dict[str, Any],
     policy: MarkerValidationPolicy,
 ) -> Path:
-    """F1, F3 — Create a marker under lock. Refuses to replace existing.
+    """Create and durably verify a marker without replacing any destination.
 
-    G1: Opens directory as TrustedDirectory (but guard already holds the
-    trusted root fd, so we reuse guard.trusted.fd for dir_fd).
+    The temporary marker name is made durable before linking the canonical
+    name. The canonical hardlink is verified by bytes and inode identity both
+    before and after directory commit, and the source link is never followed
+    if it is raced into a symlink.
     """
     assert_guard_valid(guard, directory, policy.manifest_prefix)
     validate_bare_filename(marker_name)
     canonical_bytes = prepare_validated_marker_bytes(marker_body, policy)
+    canonical_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
     dir_fd = guard.trusted.fd
-    # Check marker does not exist (O_NOFOLLOW)
+
     try:
-        existing_fd = os.open(marker_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        existing_fd = os.open(
+            marker_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd
+        )
         os.close(existing_fd)
         raise FileExistsError(
-            f"marker already exists: {marker_name} — use update_existing_marker_atomic_under_lock"
+            f"marker already exists: {marker_name} — "
+            "use update_existing_marker_atomic_under_lock"
         )
     except FileNotFoundError:
         pass
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise PathSafetyError(f"existing marker path is a symlink: {marker_name}") from exc
+            raise PathSafetyError(
+                f"existing marker path is a symlink: {marker_name}"
+            ) from exc
         raise
+
     temp_name = f"{marker_name}.tmp.{uuid.uuid4().hex}"
-    temp_fd = os.open(
-        temp_name,
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-        0o644,
-        dir_fd=dir_fd,
-    )
-    file_obj = None
+    temp_fd = -1
     try:
-        file_obj = os.fdopen(temp_fd, "wb")
-        temp_fd = -1
-        with file_obj:
-            file_obj.write(canonical_bytes)
-            file_obj.flush()
-            os.fsync(file_obj.fileno())
+        temp_fd = os.open(
+            temp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+            0o644,
+            dir_fd=dir_fd,
+        )
+        _write_all_fd(temp_fd, canonical_bytes)
+        os.fsync(temp_fd)
+        temp_stat = os.fstat(temp_fd)
+        if not statmod.S_ISREG(temp_stat.st_mode):
+            raise PathSafetyError(
+                f"marker temp is not a regular file: {temp_name}"
+            )
     except BaseException as exc:
+        close_error: OSError | None = None
         if temp_fd >= 0:
             try:
                 os.close(temp_fd)
-            except OSError as close_exc:
-                temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
-                    dir_fd, temp_name)
-                raise MarkerCreateCleanupPending(
-                    f"marker creation failed before final link ({exc}); temp fd close "
-                    f"also failed ({close_exc}); cleanup={cleanup_error}",
-                    final_created=False,
-                    temp_unlinked=temp_unlinked,
-                    cleanup_durability_confirmed=confirmed,
-                    filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
-                ) from exc
+            except OSError as inner_exc:
+                close_error = inner_exc
+            temp_fd = -1
         temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
-            dir_fd, temp_name)
+            dir_fd, temp_name
+        )
+        if close_error is not None or not confirmed:
+            raise MarkerCreateCleanupPending(
+                f"marker temp preparation failed ({exc}); "
+                f"close_error={close_error}; cleanup={cleanup_error}",
+                final_created=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=confirmed,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from exc
+        _mark_precommit_failed_clean(exc)
+        raise
+    try:
+        os.close(temp_fd)
+    except OSError as exc:
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name
+        )
+        raise MarkerCreateCleanupPending(
+            f"marker temp close failed ({exc}); cleanup={cleanup_error}",
+            final_created=False,
+            temp_unlinked=temp_unlinked,
+            cleanup_durability_confirmed=confirmed,
+            filesystem_state=(
+                "PRE_COMMIT_FAILED_CLEAN"
+                if confirmed
+                else "PRE_COMMIT_CLEANUP_UNCONFIRMED"
+            ),
+        ) from exc
+    temp_fd = -1
+
+    # Make the temp directory entry durable. A crash before the canonical link
+    # can therefore be detected as an explicit marker-temp residue.
+    try:
+        _dir_fsync_via_fd(dir_fd)
+    except OSError as exc:
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name
+        )
         if not confirmed:
             raise MarkerCreateCleanupPending(
-                f"marker creation failed before final link ({exc}); "
-                f"pre-commit cleanup not confirmed: {cleanup_error}",
+                f"marker temp durability failed ({exc}); "
+                f"cleanup={cleanup_error}",
                 final_created=False,
                 temp_unlinked=temp_unlinked,
                 cleanup_durability_confirmed=False,
@@ -1260,14 +1302,48 @@ def create_marker_no_replace_under_lock(
         raise
 
     try:
-        os.link(temp_name, marker_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        temp_stat = _verify_published_file_fd(
+            dir_fd=dir_fd,
+            name=temp_name,
+            expected_bytes=canonical_bytes,
+            expected_sha256=canonical_sha256,
+        )
     except BaseException as exc:
         temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
-            dir_fd, temp_name)
+            dir_fd, temp_name
+        )
         if not confirmed:
             raise MarkerCreateCleanupPending(
-                f"marker final link failed ({exc}); pre-commit cleanup not "
-                f"confirmed: {cleanup_error}",
+                f"marker temp verification failed ({exc}); "
+                f"cleanup={cleanup_error}",
+                final_created=False,
+                temp_unlinked=temp_unlinked,
+                cleanup_durability_confirmed=False,
+                filesystem_state="PRE_COMMIT_CLEANUP_UNCONFIRMED",
+            ) from exc
+        _mark_precommit_failed_clean(exc)
+        raise
+
+    expected_identity = (
+        temp_stat.st_dev,
+        temp_stat.st_ino,
+        temp_stat.st_size,
+    )
+    try:
+        os.link(
+            temp_name,
+            marker_name,
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+            follow_symlinks=False,
+        )
+    except BaseException as exc:
+        temp_unlinked, confirmed, cleanup_error = _cleanup_temp_durably(
+            dir_fd, temp_name
+        )
+        if not confirmed:
+            raise MarkerCreateCleanupPending(
+                f"marker final link failed ({exc}); cleanup={cleanup_error}",
                 final_created=False,
                 temp_unlinked=temp_unlinked,
                 cleanup_durability_confirmed=False,
@@ -1289,10 +1365,57 @@ def create_marker_no_replace_under_lock(
         ) from exc
 
     try:
+        _verify_published_file_fd(
+            dir_fd=dir_fd,
+            name=marker_name,
+            expected_bytes=canonical_bytes,
+            expected_sha256=canonical_sha256,
+            expected_identity=expected_identity,
+        )
+    except BaseException as exc:
+        raise MarkerCreateCleanupPending(
+            f"canonical marker verification failed before directory commit: {exc}",
+            final_created=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
+        ) from exc
+
+    # First directory fsync is the canonical-marker commit point. Keep the
+    # temp hardlink until this succeeds so at least one verified name remains.
+    try:
+        _dir_fsync_via_fd(dir_fd)
+    except OSError as exc:
+        raise MarkerCreateCleanupPending(
+            f"canonical marker link exists but first directory fsync failed: {exc}",
+            final_created=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
+        ) from exc
+
+    try:
+        _verify_published_file_fd(
+            dir_fd=dir_fd,
+            name=marker_name,
+            expected_bytes=canonical_bytes,
+            expected_sha256=canonical_sha256,
+            expected_identity=expected_identity,
+        )
+    except BaseException as exc:
+        raise MarkerCreateCleanupPending(
+            f"canonical marker changed after directory commit: {exc}",
+            final_created=True,
+            temp_unlinked=False,
+            cleanup_durability_confirmed=False,
+            filesystem_state="COMMITTED_OLD_TEMP_PRESENT",
+        ) from exc
+
+    try:
         os.unlink(temp_name, dir_fd=dir_fd)
     except OSError as exc:
         raise MarkerCreateCleanupPending(
-            f"final marker link exists but temp unlink failed: {exc}",
+            f"canonical marker is committed but temp unlink failed: {exc}",
             final_created=True,
             temp_unlinked=False,
             cleanup_durability_confirmed=False,
@@ -1303,7 +1426,8 @@ def create_marker_no_replace_under_lock(
         _inject_fault(FAULT_CREATE_AFTER_TEMP_UNLINK)
     except BaseException as exc:
         raise MarkerCreateCleanupPending(
-            f"final marker exists and temp is absent, but directory fsync is pending: {exc}",
+            f"canonical marker is committed and temp is absent, but cleanup "
+            f"fsync is pending: {exc}",
             final_created=True,
             temp_unlinked=True,
             cleanup_durability_confirmed=False,
@@ -1314,11 +1438,29 @@ def create_marker_no_replace_under_lock(
         _dir_fsync_via_fd(dir_fd)
     except OSError as exc:
         raise MarkerCreateCleanupPending(
-            f"final marker exists and temp is absent, but directory fsync failed: {exc}",
+            f"canonical marker is committed and temp was unlinked; second "
+            f"directory fsync failed: {exc}",
             final_created=True,
             temp_unlinked=True,
             cleanup_durability_confirmed=False,
             filesystem_state="COMMITTED_OLD_TEMP_REMOVED_FSYNC_UNCONFIRMED",
+        ) from exc
+
+    try:
+        _verify_published_file_fd(
+            dir_fd=dir_fd,
+            name=marker_name,
+            expected_bytes=canonical_bytes,
+            expected_sha256=canonical_sha256,
+            expected_identity=expected_identity,
+        )
+    except BaseException as exc:
+        raise MarkerCreateCleanupPending(
+            f"canonical marker changed after committed-clean publication: {exc}",
+            final_created=True,
+            temp_unlinked=True,
+            cleanup_durability_confirmed=True,
+            filesystem_state="COMMITTED_CLEAN",
         ) from exc
 
     try:
@@ -2300,8 +2442,15 @@ def _read_validated_manifest_chain_under_lock(
         rf"([0-9a-f]{{8}}-[0-9a-f]{{4}}-4[0-9a-f]{{3}}-"
         rf"[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}})\.marker$"
     )
+    marker_temp_re = re.compile(
+        rf"^{re.escape(prefix)}_txn_(\d{{6}})_"
+        rf"([0-9a-f]{{8}}-[0-9a-f]{{4}}-4[0-9a-f]{{3}}-"
+        rf"[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}})"
+        rf"\.marker\.tmp\.[0-9a-f]{{32}}$"
+    )
     manifest_names: list[tuple[int, str]] = []
     marker_names: list[str] = []
+    marker_temp_names: list[str] = []
     for name in os.listdir(guard.trusted.fd):
         manifest_match = manifest_re.fullmatch(name)
         if manifest_match is not None:
@@ -2313,8 +2462,16 @@ def _read_validated_manifest_chain_under_lock(
         if marker_match is not None:
             marker_names.append(name)
             continue
+        marker_temp_match = marker_temp_re.fullmatch(name)
+        if marker_temp_match is not None:
+            marker_temp_names.append(name)
+            continue
         if name.startswith(f"{prefix}_txn_") and name.endswith(".marker"):
             raise MarkerValidationError(f"non-canonical transaction marker filename: {name}")
+        if name.startswith(f"{prefix}_txn_") and ".marker.tmp." in name:
+            raise MarkerValidationError(
+                f"non-canonical transaction marker temp filename: {name}"
+            )
 
     active_markers: list[tuple[str, str]] = []
     for name in sorted(marker_names):
@@ -2333,9 +2490,10 @@ def _read_validated_manifest_chain_under_lock(
                 f"transaction marker filename/body mismatch: {name} != {expected_name}"
             )
         active_markers.append((name, marker["status"]))
-    if active_markers:
+    if active_markers or marker_temp_names:
         raise RecoveryRequiredError(
-            f"transaction markers require recovery: {active_markers}"
+            "transaction marker evidence requires recovery: "
+            f"markers={active_markers} temps={sorted(marker_temp_names)}"
         )
 
     if not manifest_names:
