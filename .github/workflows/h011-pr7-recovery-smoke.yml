@@ -1,4 +1,5 @@
 name: H011 Recovery V2 Audit
+# Authoritative read-only gate for the hardened recovery branch.
 
 on:
   pull_request:
