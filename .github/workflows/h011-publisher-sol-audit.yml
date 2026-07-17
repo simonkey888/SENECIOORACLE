@@ -14,6 +14,7 @@ on:
       - "polymarket/h011_v3_raw_transaction.py"
       - "tests/h011_v3/**"
       - "tools/apply_h011_publisher_audit_patch.py"
+      - "tools/apply_h011_publisher_audit_regression_patch.py"
       - ".github/workflows/h011-publisher-sol-audit.yml"
 
 permissions:
@@ -51,13 +52,18 @@ jobs:
         id: patch
         shell: bash
         run: |
-          if [ -f tools/apply_h011_publisher_audit_patch.py ]; then
-            python tools/apply_h011_publisher_audit_patch.py
-            rm tools/apply_h011_publisher_audit_patch.py
-            echo "applied=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "applied=false" >> "$GITHUB_OUTPUT"
-          fi
+          applied=false
+          for patcher in \
+            tools/apply_h011_publisher_audit_patch.py \
+            tools/apply_h011_publisher_audit_regression_patch.py
+          do
+            if [ -f "$patcher" ]; then
+              python "$patcher"
+              rm "$patcher"
+              applied=true
+            fi
+          done
+          echo "applied=$applied" >> "$GITHUB_OUTPUT"
 
       - name: Compile transaction module and audit tests
         run: |
@@ -104,10 +110,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Commit validated hardening to audit branch
-        if: github.event_name == 'push' && steps.patch.outputs.applied == 'true'
+      - name: Materialize validated hardening on audit branch
+        if: >-
+          success() &&
+          github.event_name == 'pull_request' &&
+          github.head_ref == 'audit/h011-v3-publisher-sol-validation' &&
+          steps.patch.outputs.applied == 'true'
         shell: bash
         run: |
+          git diff -- \
+            polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
+            > /tmp/h011-publisher-hardening.patch
+          test -s /tmp/h011-publisher-hardening.patch
+
+          git switch --force-create \
+            audit/h011-v3-publisher-sol \
+            origin/audit/h011-v3-publisher-sol
+          git apply --check /tmp/h011-publisher-hardening.patch
+          git apply /tmp/h011-publisher-hardening.patch
+          git rm tools/apply_h011_publisher_audit_patch.py
+
           git status --short
           git diff --name-only
           git diff --stat
@@ -116,7 +139,8 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add \
             polymarket/h011_v3_raw_transaction.py \
+            tests/h011_v3/test_h011_v3_publish_raw_scan.py \
             tools/apply_h011_publisher_audit_patch.py
           git diff --cached --check
           git commit -m "fix(h011-v3): harden publisher crash consistency"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "HEAD:audit/h011-v3-publisher-sol"
