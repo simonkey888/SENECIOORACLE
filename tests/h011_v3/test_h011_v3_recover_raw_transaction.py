@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -409,3 +410,65 @@ def test_recovered_files_remain_read_only(
         raw_dir / "manifest_000000.json",
     ):
         assert stat.S_IMODE(path.stat().st_mode) == 0o444
+
+
+def test_orphan_marker_temp_blocks_instead_of_reporting_noop(
+    raw_dir: Path,
+    policy: MarkerValidationPolicy,
+):
+    orphan = raw_dir / (
+        "manifest_txn_000000_11111111-1111-4111-8111-111111111111"
+        ".marker.tmp.deadbeef"
+    )
+    orphan.write_bytes(b"orphan-marker-temp")
+    orphan.chmod(0o444)
+
+    with pytest.raises(RecoveryBlockedError) as raised:
+        _recover(raw_dir, policy)
+
+    assert raised.value.failure_stage == "R0_DISCOVERY"
+    assert raised.value.recoverable is False
+    assert orphan.read_bytes() == b"orphan-marker-temp"
+
+
+def test_marker_replacement_during_cleanup_is_not_deleted(
+    raw_dir: Path,
+    policy: MarkerValidationPolicy,
+    monkeypatch,
+):
+    _crash(
+        raw_dir,
+        policy,
+        rt.FAULT_PUBLISH_AFTER_STAGED_MARKER,
+        scan_id="marker-replacement",
+    )
+    marker_path = _marker_paths(raw_dir)[0]
+    original = rt.parse_marker(marker_path.read_bytes())
+    real_cleanup = recovery._cleanup_owned_temps
+
+    def replacing_cleanup(*, root_fd, marker_name, marker):
+        removed = real_cleanup(
+            root_fd=root_fd,
+            marker_name=marker_name,
+            marker=marker,
+        )
+        replacement = rt.parse_marker(marker_path.read_bytes())
+        replacement["ownership_token"] = str(uuid.uuid4())
+        replacement_bytes = rt.prepare_validated_marker_bytes(
+            replacement,
+            policy,
+        )
+        marker_path.chmod(0o644)
+        marker_path.write_bytes(replacement_bytes)
+        marker_path.chmod(0o444)
+        return removed
+
+    monkeypatch.setattr(recovery, "_cleanup_owned_temps", replacing_cleanup)
+
+    with pytest.raises(RecoveryBlockedError) as raised:
+        _recover(raw_dir, policy)
+
+    assert raised.value.failure_stage == "R8_MARKER_CLEANUP"
+    assert marker_path.is_file()
+    current = rt.parse_marker(marker_path.read_bytes())
+    assert current["ownership_token"] != original["ownership_token"]

@@ -259,12 +259,46 @@ def _canonical_marker_names(
     return sorted(valid), sorted(malformed)
 
 
+def _marker_temp_owners(
+    *, root_fd: int, prefix: str
+) -> tuple[dict[str, list[str]], list[str]]:
+    marker_pattern = (
+        rf"{re.escape(prefix)}_txn_(\d{{6}})_"
+        rf"[0-9a-f]{{8}}-[0-9a-f]{{4}}-4[0-9a-f]{{3}}-"
+        rf"[89ab][0-9a-f]{{3}}-[0-9a-f]{{12}}\.marker"
+    )
+    temp_re = re.compile(
+        rf"^(?P<owner>{marker_pattern})\.tmp\.[0-9a-f]+$"
+    )
+    owners: dict[str, list[str]] = {}
+    malformed: list[str] = []
+    for name in os.listdir(root_fd):
+        if not (
+            name.startswith(f"{prefix}_txn_")
+            and ".marker.tmp." in name
+        ):
+            continue
+        match = temp_re.fullmatch(name)
+        if match is None:
+            malformed.append(name)
+            continue
+        owners.setdefault(match.group("owner"), []).append(name)
+    return (
+        {owner: sorted(names) for owner, names in sorted(owners.items())},
+        sorted(malformed),
+    )
+
+
 def _load_marker(
     *, root_fd: int, name: str, policy: rt.MarkerValidationPolicy
 ) -> dict[str, Any]:
     raw, _ = _read_regular(root_fd, name)
     marker = rt.parse_marker(raw)
     rt.validate_marker(marker, policy)
+    if rt.canonical_json_bytes(marker) != raw:
+        raise rt.MarkerValidationError(
+            f"marker {name} is valid but not canonically encoded"
+        )
     expected = rt.marker_filename(
         policy.manifest_prefix,
         marker["sequence"],
@@ -598,20 +632,36 @@ def recover_raw_scan_transaction(
     actions: list[str] = []
 
     try:
-        marker_names, malformed = _canonical_marker_names(
+        marker_names, malformed_markers = _canonical_marker_names(
             root_fd=root_fd, prefix=policy.manifest_prefix
         )
-        if malformed:
+        marker_temp_owners, malformed_temps = _marker_temp_owners(
+            root_fd=root_fd, prefix=policy.manifest_prefix
+        )
+        if malformed_markers or malformed_temps:
             raise RecoveryBlockedError(
-                f"non-canonical transaction markers: {malformed}",
+                "non-canonical transaction marker evidence: "
+                f"markers={malformed_markers} temps={malformed_temps}",
                 failure_stage=stage,
                 marker_filename=None,
                 filesystem_snapshot={
-                    "malformed_markers": malformed,
+                    "malformed_markers": malformed_markers,
+                    "malformed_marker_temps": malformed_temps,
                     "root_names": sorted(os.listdir(root_fd)),
                 },
             )
         if not marker_names:
+            if marker_temp_owners:
+                raise RecoveryBlockedError(
+                    "orphan durable marker-temp evidence requires explicit "
+                    f"recovery: {marker_temp_owners}",
+                    failure_stage=stage,
+                    marker_filename=None,
+                    filesystem_snapshot={
+                        "orphan_marker_temps": marker_temp_owners,
+                        "root_names": sorted(os.listdir(root_fd)),
+                    },
+                )
             # A previous recovery attempt may have unlinked its marker before
             # confirming the directory fsync. Fsync makes no-marker durable.
             os.fsync(root_fd)
@@ -629,11 +679,27 @@ def recover_raw_scan_transaction(
                 marker_filename=None,
                 filesystem_snapshot={
                     "markers": marker_names,
+                    "marker_temps": marker_temp_owners,
                     "root_names": sorted(os.listdir(root_fd)),
                 },
             )
 
         marker_name = marker_names[0]
+        foreign_temp_owners = sorted(
+            owner for owner in marker_temp_owners if owner != marker_name
+        )
+        if foreign_temp_owners:
+            raise RecoveryBlockedError(
+                "marker-temp evidence belongs to another transaction: "
+                f"{foreign_temp_owners}",
+                failure_stage=stage,
+                marker_filename=marker_name,
+                filesystem_snapshot={
+                    "marker": marker_name,
+                    "marker_temps": marker_temp_owners,
+                    "root_names": sorted(os.listdir(root_fd)),
+                },
+            )
         marker = _load_marker(root_fd=root_fd, name=marker_name, policy=policy)
         recovered_from = marker["status"]
         pending_fd = _open_pending(root_fd)
@@ -737,13 +803,13 @@ def recover_raw_scan_transaction(
         current = _load_marker(
             root_fd=root_fd, name=marker_name, policy=policy
         )
-        if current["status"] != "COMMITTED" or current["resolution"] != "COMMITTED":
+        if marker["status"] != "COMMITTED" or marker["resolution"] != "COMMITTED":
             raise RawTransactionRecoveryError(
-                "marker is not durably COMMITTED before final cleanup"
+                "in-memory marker is not durably COMMITTED before final cleanup"
             )
-        if current["candidate_manifest"] != marker["candidate_manifest"]:
+        if current != marker:
             raise RawTransactionRecoveryError(
-                "marker candidate changed before final cleanup"
+                "marker changed before final cleanup"
             )
         os.unlink(marker_name, dir_fd=root_fd)
         actions.append("marker_removed")
