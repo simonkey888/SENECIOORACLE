@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - feat/h011-v3-transaction-publisher
+      - audit/h011-v3-publisher-sol
     paths:
       - "polymarket/h011_v3_raw_transaction.py"
       - "tests/h011_v3/**"
