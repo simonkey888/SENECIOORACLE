@@ -44,6 +44,14 @@ jobs:
           git diff --check "${{ github.event.pull_request.base.sha }}...$expected" \
             | tee /tmp/h011-runtime-diff-check.txt
 
+      - name: Package exact checkout for offline validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf /tmp/senex-exact-checkout.tar.gz .
+          sha256sum /tmp/senex-exact-checkout.tar.gz \
+            | tee /tmp/h011-runtime-source-sha256.txt
+
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -109,11 +117,11 @@ jobs:
             -e PYTHONUNBUFFERED=1 \
             senex-h011-runtime:${{ github.event.pull_request.head.sha }}
 
-          ready=0
+          health_ready=0
           for _ in $(seq 1 120); do
             if curl --fail --silent http://127.0.0.1:18080/healthz \
               -o /tmp/h011-runtime-health.json; then
-              ready=1
+              health_ready=1
               break
             fi
             if ! test "$(docker inspect -f '{{.State.Running}}' senex-h011-runtime)" = true; then
@@ -122,10 +130,23 @@ jobs:
             fi
             sleep 2
           done
-          test "$ready" = 1
+          test "$health_ready" = 1
 
-          curl --fail --silent http://127.0.0.1:18080/api/v3/state \
-            -o /tmp/h011-runtime-state.json
+          state_ready=0
+          for _ in $(seq 1 180); do
+            if curl --fail --silent http://127.0.0.1:18080/api/v3/state \
+              -o /tmp/h011-runtime-state.json; then
+              state_ready=1
+              break
+            fi
+            if ! test "$(docker inspect -f '{{.State.Running}}' senex-h011-runtime)" = true; then
+              docker logs senex-h011-runtime | tee /tmp/h011-runtime-container.log
+              exit 1
+            fi
+            sleep 2
+          done
+          test "$state_ready" = 1
+
           curl --fail --silent http://127.0.0.1:18080/api/v3/integrity \
             -o /tmp/h011-runtime-integrity.json
           docker logs senex-h011-runtime | tee /tmp/h011-runtime-container.log
@@ -170,6 +191,7 @@ jobs:
             /tmp/h011-runtime-*.txt
             /tmp/h011-runtime-*.log
             /tmp/h011-runtime-*.json
+            /tmp/senex-exact-checkout.tar.gz
             ${{ runner.temp }}/h011-runtime-results
           if-no-files-found: warn
           retention-days: 14
