@@ -1118,7 +1118,10 @@ def main():
                 canonical_tracker=canonical_tracker,
                 data_api_tracker=data_api_tracker,
             )
-            sys.exit(0 if result["scan"]["markets_processed"] > 0 else 1)
+            # A completed scan with zero eligible markets is an operational success,
+            # not a process failure. The snapshot and discovery status carry the
+            # semantic result.
+            sys.exit(0)
 
     else:
         # Legacy V2 pipeline
