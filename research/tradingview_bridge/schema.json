@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://senex.local/schema/senex-tradingview-context-v1.json",
+  "title": "SENEX TradingView Research Context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "authoritative",
+    "symbol",
+    "timeframe",
+    "captured_at",
+    "tradingview_app_version",
+    "tradingview_mcp_commit",
+    "capture_type",
+    "payload",
+    "payload_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "senex-tradingview-context-v1"
+    },
+    "source": {
+      "const": "tradingview_desktop_unofficial"
+    },
+    "authoritative": {
+      "const": false
+    },
+    "symbol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timeframe": {
+      "type": "string",
+      "minLength": 1
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tradingview_app_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tradingview_mcp_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "capture_type": {
+      "enum": ["ohlcv", "quote", "indicator", "pine", "screenshot"]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
