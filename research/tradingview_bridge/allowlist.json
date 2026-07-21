@@ -1,0 +1,38 @@
+{
+  "policy_version": "senex-tradingview-read-allowlist-v1",
+  "default": "deny",
+  "allowed_read_tools": [
+    "chart_get_state",
+    "quote_get",
+    "data_get_ohlcv",
+    "data_get_study_values",
+    "data_get_pine_lines",
+    "data_get_pine_labels",
+    "data_get_pine_tables",
+    "data_get_pine_boxes",
+    "capture_screenshot",
+    "replay_status"
+  ],
+  "blocked_tools": [
+    "ui_eval",
+    "ui_click",
+    "ui_keyboard",
+    "alert_create",
+    "alert_delete",
+    "pine_set_source",
+    "pine_save",
+    "watchlist_add",
+    "watchlist_remove",
+    "replay_trade",
+    "chart_set_symbol",
+    "chart_set_timeframe"
+  ],
+  "blocked_prefixes": [
+    "indicator_",
+    "drawing_",
+    "alert_",
+    "watchlist_",
+    "ui_",
+    "replay_trade"
+  ]
+}
