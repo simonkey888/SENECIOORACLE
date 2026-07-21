@@ -1,0 +1,32 @@
+{
+  "schema_version": "senex-tradingview-context-v1",
+  "source": "tradingview_desktop_unofficial",
+  "authoritative": false,
+  "symbol": "BINANCE:BTCUSDT",
+  "timeframe": "5",
+  "captured_at": "2026-07-21T12:05:00Z",
+  "tradingview_app_version": "unknown",
+  "tradingview_mcp_commit": "55534aab8c11f24655b7d8d4de82e6bece14c8b4",
+  "capture_type": "ohlcv",
+  "payload": {
+    "bars": [
+      {
+        "timestamp": "2026-07-21T12:00:00Z",
+        "open": 100000.0,
+        "high": 100120.0,
+        "low": 99950.0,
+        "close": 100080.0,
+        "volume": 12.5
+      },
+      {
+        "timestamp": "2026-07-21T12:05:00Z",
+        "open": 100080.0,
+        "high": 100200.0,
+        "low": 100020.0,
+        "close": 100150.0,
+        "volume": 0.0
+      }
+    ]
+  },
+  "payload_sha256": "9812120860048b55c21eb69c5fca259b10dcf7677d1719eb6fae37d536182ade"
+}
