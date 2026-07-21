@@ -1,0 +1,184 @@
+name: H011 Northflank Read-Only PR Audit
+
+on:
+  pull_request:
+    branches:
+      - feat/h011-v3-control-plane-coverage
+    paths:
+      - .github/workflows/h011-northflank-readonly-pr.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: ${{ github.event.pull_request.head.sha }}
+      NF_TOKEN_1: ${{ secrets.NORTHFLANK_API_TOKEN }}
+      NF_TOKEN_2: ${{ secrets.NORTHFLANK_TOKEN }}
+      NF_TOKEN_3: ${{ secrets.NF_TOKEN }}
+      NF_TOKEN_4: ${{ secrets.NF_API_TOKEN }}
+      NF_TOKEN_5: ${{ secrets.GPT_WORK_SENECIO_READONLY }}
+      NF_TOKEN_6: ${{ secrets.H011_BUILD_ONCE }}
+      NF_TEAM_ID: 6a32fd953f19ee4079ccf395
+      NF_PROJECT_ID: seneciobot
+      NF_SERVICE_ID: senecio-h011
+    steps:
+      - name: Checkout exact audit head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TARGET_SHA }}
+
+      - name: Verify exact isolated head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          test "${GITHUB_HEAD_REF}" = "audit/h011-northflank-readonly-inspection"
+          git merge-base --is-ancestor aeb50867738b7ae7199f621a730080e09465458e HEAD
+          changed="$(git diff --name-only aeb50867738b7ae7199f621a730080e09465458e...HEAD)"
+          test "$changed" = $'.github/workflows/h011-northflank-readonly-inspection.yml\n.github/workflows/h011-northflank-readonly-pr.yml'
+
+      - name: Northflank GET-only inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          import json, os, re, urllib.error, urllib.parse, urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          out = Path('evidence')
+          team = os.environ['NF_TEAM_ID']
+          project = os.environ['NF_PROJECT_ID']
+          service = os.environ['NF_SERVICE_ID']
+          base = 'https://api.northflank.com/v1'
+          candidates = [
+              ('NORTHFLANK_API_TOKEN', os.getenv('NF_TOKEN_1', '')),
+              ('NORTHFLANK_TOKEN', os.getenv('NF_TOKEN_2', '')),
+              ('NF_TOKEN', os.getenv('NF_TOKEN_3', '')),
+              ('NF_API_TOKEN', os.getenv('NF_TOKEN_4', '')),
+              ('GPT_WORK_SENECIO_READONLY', os.getenv('NF_TOKEN_5', '')),
+              ('H011_BUILD_ONCE', os.getenv('NF_TOKEN_6', '')),
+          ]
+          source, token = next(((n, v) for n, v in candidates if v), (None, None))
+          report = {
+              'captured_at': datetime.now(timezone.utc).isoformat(),
+              'target_sha': os.environ['TARGET_SHA'],
+              'mode': 'GET_ONLY',
+              'credential_source_name': source,
+              'northflank_access': bool(token),
+              'team_id': team,
+              'project_id': project,
+              'service_id': service,
+              'requests': {},
+          }
+
+          def clean_text(text):
+              text = re.sub(r'nf-[A-Za-z0-9._~-]+', '<redacted>', text)
+              text = re.sub(r'gh[pousr]_[A-Za-z0-9_]+', '<redacted>', text)
+              text = re.sub(r'(?i)(authorization:\\s*bearer\\s+)[^\\s]+', r'\\1<redacted>', text)
+              return text[:8000]
+
+          sensitive = {'password','passwd','token','accesstoken','apitoken','secret','secretvalue','credentials','authorization'}
+          name_only = {'runtimeenvironment','runtimefiles','buildarguments','buildfiles'}
+          def clean(value, key=''):
+              lower = key.lower()
+              if lower in sensitive:
+                  return '<redacted>'
+              if lower in name_only and isinstance(value, dict):
+                  return {'names': sorted(value.keys()), 'values': '<redacted>'}
+              if isinstance(value, dict):
+                  return {str(k): clean(v, str(k)) for k, v in value.items()}
+              if isinstance(value, list):
+                  return [clean(v) for v in value]
+              if isinstance(value, str):
+                  return clean_text(value)
+              return value
+
+          if not token:
+              report['access_error'] = 'NO_MATCHING_GITHUB_ACTIONS_SECRET'
+          else:
+              headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+              def get(path, query=None):
+                  url = base + path
+                  if query:
+                      url += '?' + urllib.parse.urlencode(query, doseq=True)
+                  req = urllib.request.Request(url, headers=headers, method='GET')
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as response:
+                          raw = response.read().decode('utf-8', errors='replace')
+                          try: body = json.loads(raw)
+                          except json.JSONDecodeError: body = {'text': clean_text(raw)}
+                          return {'status': response.status, 'body': clean(body)}
+                  except urllib.error.HTTPError as exc:
+                      raw = exc.read().decode('utf-8', errors='replace')
+                      try: body = json.loads(raw)
+                      except json.JSONDecodeError: body = {'text': clean_text(raw)}
+                      return {'status': exc.code, 'body': clean(body)}
+                  except Exception as exc:
+                      return {'status': 0, 'error': type(exc).__name__, 'message': clean_text(str(exc))}
+
+              prefix = f'/teams/{team}/projects/{project}'
+              calls = {
+                  'workspace': (f'/teams/{team}', None),
+                  'project': (prefix, None),
+                  'services': (f'{prefix}/services', {'per_page': 100}),
+                  'service': (f'{prefix}/services/{service}', None),
+                  'deployment': (f'{prefix}/services/{service}/deployment', None),
+                  'ports': (f'{prefix}/services/{service}/ports', None),
+                  'health_checks': (f'{prefix}/services/{service}/health-checks', None),
+                  'containers': (f'{prefix}/services/{service}/containers', None),
+                  'builds': (f'{prefix}/services/{service}/build', {'per_page': 100}),
+                  'runtime_environment_details': (f'{prefix}/services/{service}/runtime-environment/details', None),
+                  'runtime_logs': (f'{prefix}/services/{service}/logs', {'type':'runtime','queryType':'range','duration':604800,'lineLimit':500,'direction':'backward'}),
+                  'build_logs': (f'{prefix}/services/{service}/build-logs', {'queryType':'range','duration':604800,'lineLimit':300,'direction':'backward'}),
+                  'metrics': (f'{prefix}/services/{service}/metrics', {'queryType':'single','metricTypes':['diskUsage','cpu','memory']}),
+                  'volumes': (f'{prefix}/volumes', {'per_page': 100}),
+              }
+              for name, (path, query) in calls.items():
+                  report['requests'][name] = get(path, query)
+
+              volumes = report['requests'].get('volumes', {}).get('body', {}).get('data', [])
+              if isinstance(volumes, dict): volumes = volumes.get('volumes', [])
+              volume_ids = [str(v['id']) for v in volumes if isinstance(v, dict) and v.get('id')]
+              report['volume_details'] = {}
+              for volume_id in volume_ids:
+                  qid = urllib.parse.quote(volume_id)
+                  report['volume_details'][volume_id] = {
+                      'volume': get(f'{prefix}/volumes/{qid}'),
+                      'backups': get(f'{prefix}/volumes/{qid}/backups', {'per_page':100}),
+                  }
+              report['volume_ids'] = volume_ids
+
+          out.joinpath('northflank-readonly-report.json').write_text(json.dumps(report, indent=2, sort_keys=True), encoding='utf-8')
+          summary = [
+              f"NORTHFLANK_ACCESS={'YES' if report['northflank_access'] else 'NO'}",
+              f"CREDENTIAL_SOURCE={source or 'NONE'}",
+              f"PROJECT_ID={project}",
+              f"SERVICE_ID={service}",
+              f"VOLUME_IDS={','.join(report.get('volume_ids', [])) or 'NONE_DISCOVERED'}",
+          ]
+          for name, value in report.get('requests', {}).items():
+              summary.append(f"HTTP_{name.upper()}={value.get('status')}")
+          out.joinpath('northflank-readonly-summary.txt').write_text('\n'.join(summary) + '\n', encoding='utf-8')
+          PY
+
+      - name: Credential leakage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -RIE 'nf-eyJ|gh[pousr]_[A-Za-z0-9]|Authorization: Bearer' evidence
+          sha256sum evidence/* > evidence/SHA256SUMS
+
+      - name: Upload read-only audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h011-northflank-readonly-pr-${{ env.TARGET_SHA }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
