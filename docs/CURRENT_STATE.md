@@ -129,12 +129,43 @@ No merge, deploy, restart, Northflank mutation, volume mutation, secret access, 
 
 ```text
 PHASE_IIC_BRANCH_CREATED=YES
-INVARIANT_COMPATIBILITY_FIX=IN_PROGRESS
-RUNTIME_TRANSACTION_INTEGRATION=IN_PROGRESS
+INVARIANT_COMPATIBILITY_FIX=PASS
+GLOBAL_BASELINE_08701669=542_PASSED
+RUNTIME_TRANSACTION_INTEGRATION=IMPLEMENTED_LOCAL_VALIDATION_IN_PROGRESS
+COMMITTED_READER=IMPLEMENTED_LOCAL_VALIDATION_IN_PROGRESS
+STARTUP_RECOVERY=IMPLEMENTED_LOCAL_VALIDATION_IN_PROGRESS
 PRODUCTION_CHANGED=NO
 NORTHFLANK_CHANGED=NO
 ```
 
+## Phase II-C implementation status
+
+Implemented on the stacked branch worktree:
+
+- legacy invariant compatibility normalization and regression tests;
+- transactional `run_scan_v3` with one hardened stager/publisher/recovery path;
+- authoritative root `results/h011_v3/raw_chain_v1`;
+- committed manifest-chain reader and replay;
+- startup recovery and explicit runtime-state store;
+- Python PID-1 supervisor with liveness/readiness separation;
+- atomic derived snapshot cache publication;
+- manual isolated filesystem probe;
+- hostile same-volume process/container restart tests;
+- committed-reader API and visible dashboard error states.
+
+Exact-head baseline run `29821019238` passed before runtime integration:
+
+```text
+H-011: 515 passed
+global: 542 passed
+Docker build/start: PASS
+safety flags: PASS
+artifact: 8491371840
+digest: sha256:594ecaa1651be29340d7a74a5955c7b01a6ee6bfef01ba99028689a0f88dd875
+```
+
+Local focused Phase II-C tests pass. The local sandbox filesystem correctly fails the isolated `RENAME_EXCHANGE` probe, so hostile transaction/restart evidence must be produced by the Ubuntu/Docker CI gate.
+
 ## Next exact step
 
-Add regression coverage for invariant compatibility, then implement startup recovery, transactional publication, committed reader, Docker supervision, hostile restart validation, and exact-head CI on the Phase II-C branch.
+Publish the implementation commits to Draft PR #20, run the final exact-head Linux/Docker gate, correct only demonstrated failures, and preserve Northflank volume verification as the sole pre-deploy blocker.

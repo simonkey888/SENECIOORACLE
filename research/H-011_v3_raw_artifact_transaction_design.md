@@ -691,3 +691,147 @@ Acceptance requires:
 **Zero architectural decisions remain open.**
 
 `DESIGN DOC COMPLETO — LISTO PARA IMPLEMENTACIÓN MECÁNICA`
+
+---
+
+## 18. Phase II-C runtime integration contract
+
+Phase II-C binds the already-audited transaction core to the real V3 runtime without changing its marker, publisher, or recovery contract.
+
+### 18.1 Product and technical names
+
+```text
+Product: SENEX
+Technical system: SENECIO H-011 V3
+```
+
+Historical module names remain unchanged to preserve imports and audit evidence.
+
+### 18.2 Storage roots
+
+Authoritative transactional root:
+
+```text
+/app/polymarket/results/h011_v3/raw_chain_v1
+```
+
+Legacy read-only boundary:
+
+```text
+/app/polymarket/results/v3/raw
+/app/polymarket/results/v3/scans
+/app/polymarket/results/v3/state
+bundle_*.json
+YYYY-MM-DD.events.jsonl.gz
+v3_scan_*.jsonl
+```
+
+Legacy files are never imported, migrated, sequenced, or treated as committed evidence. New V3 scans do not create a legacy raw bundle or daily append artifact.
+
+### 18.3 Raw envelopes
+
+The canonical JSONL.gz artifact preserves observation order and contains `h011-raw-envelope-v1` objects for:
+
+- Gamma discovery evidence from `/events/keyset`;
+- canonical Gamma market payloads;
+- Data API trade responses;
+- CLOB leg 0 and leg 1 book responses;
+- fee metadata used by the execution simulation;
+- source errors;
+- explicit post-fetch rejection evidence.
+
+Calculated VWAP, net edge, control-plane invariants, funnel counts, snapshots, and final aggregate metrics are derived data and are not substituted for source responses.
+
+### 18.4 Runtime order
+
+```text
+validate paper-only configuration
+-> validate/open storage root
+-> acquire raw-chain lock
+-> run startup recovery
+-> verify committed steady state
+-> enable scanner and publication
+-> create one hardened RawScanStager
+-> append source evidence in observation order
+-> complete the market loop
+-> seal and transfer staging ownership
+-> acquire raw-chain lock
+-> recover pending transaction under the same lock
+-> publish artifact/sidecar/manifest
+-> verify steady state
+-> release lock
+-> build and atomically publish derived snapshot cache
+```
+
+No snapshot is published before the raw transaction reaches verified committed steady state.
+
+### 18.5 Runtime states
+
+```text
+STARTING
+RECOVERING
+RUNNING
+DEGRADED
+BLOCKED_RAW_INTEGRITY
+BLOCKED_STORAGE_UNVERIFIED
+SCANNER_FAILED
+STOPPING
+```
+
+Scanner and publication are disabled during recovery and in every blocked state. There is no legacy-writer fallback.
+
+### 18.6 Committed reader
+
+`h011_v3_committed_snapshot.py` validates:
+
+- contiguous sequence;
+- previous-manifest hash linkage;
+- canonical manifest bytes and manifest hash;
+- artifact SHA-256 and strict gzip/JSONL content;
+- exact sidecar bytes;
+- final mode `0444`;
+- condition IDs, event count, and canonical event hash;
+- no marker, marker-temp, pending, quarantine, or unowned chain residue.
+
+The last valid manifest is selected by sequence, never by mtime or lexicographic artifact name.
+
+`latest.json` remains a regenerable cache. It is served only when its `aggregate_metrics.raw_chain` binding matches the latest committed manifest.
+
+### 18.7 API and health
+
+The dashboard, `/api/v3/state`, `/api/v3/integrity`, and `/api/v3/replay` use the committed reader. `/livez` reports process liveness, `/readyz` reports runtime readiness, and `/healthz` combines runtime, chain, snapshot age, alerts, and invariant state.
+
+### 18.8 Filesystem probe
+
+`h011_v3_fs_probe.py` is manual and isolated. It creates only `senex_fs_probe_<uuid>` below an explicitly provided parent and tests:
+
+```text
+flock
+hardlink
+renameat2(RENAME_EXCHANGE)
+file fsync
+directory fsync
+O_NOFOLLOW
+chmod 0444
+inode stability
+same-filesystem behavior
+separate-process persistence
+owned cleanup
+```
+
+It is never run automatically against production. Northflank volume validation remains a mandatory pre-deploy gate.
+
+### 18.9 Process supervision
+
+The Docker image runs `h011_v3_runtime.py` as PID 1. It performs startup recovery, starts the HTTP process, supervises one scanner process at a time, forwards SIGTERM/SIGINT, disables publication on scanner or chain failure, and exposes diagnostic state without enabling orders.
+
+### 18.10 Safety invariants
+
+```text
+paper_only=true
+orders_enabled=false
+live_capital_locked=true
+legacy_mode=false
+```
+
+Phase II-C introduces no wallet, private key, order submission, fill, realized PnL, NAV, or capital path.
