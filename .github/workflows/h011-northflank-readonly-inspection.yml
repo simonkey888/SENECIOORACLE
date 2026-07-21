@@ -1,0 +1,281 @@
+name: H011 Northflank Read-Only Inspection
+
+on:
+  push:
+    branches:
+      - audit/h011-northflank-readonly-inspection
+    paths:
+      - .github/workflows/h011-northflank-readonly-inspection.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: h011-northflank-readonly-inspection
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NF_TOKEN_1: ${{ secrets.NORTHFLANK_API_TOKEN }}
+      NF_TOKEN_2: ${{ secrets.NORTHFLANK_TOKEN }}
+      NF_TOKEN_3: ${{ secrets.NF_TOKEN }}
+      NF_TOKEN_4: ${{ secrets.NF_API_TOKEN }}
+      NF_TOKEN_5: ${{ secrets.GPT_WORK_SENECIO_READONLY }}
+      NF_TOKEN_6: ${{ secrets.H011_BUILD_ONCE }}
+      NF_TEAM_ID: 6a32fd953f19ee4079ccf395
+      NF_PROJECT_ID: seneciobot
+      NF_SERVICE_ID: senecio-h011
+    steps:
+      - name: Checkout exact inspection head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Verify isolated branch and exact base ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "${GITHUB_REF_NAME}" = "audit/h011-northflank-readonly-inspection"
+          git merge-base --is-ancestor aeb50867738b7ae7199f621a730080e09465458e HEAD
+          test "$(git diff --name-only aeb50867738b7ae7199f621a730080e09465458e...HEAD)" = ".github/workflows/h011-northflank-readonly-inspection.yml"
+
+      - name: Execute authenticated GET-only inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from typing import Any
+
+          BASE = "https://api.northflank.com/v1"
+          TEAM_ID = os.environ["NF_TEAM_ID"]
+          PROJECT_ID = os.environ["NF_PROJECT_ID"]
+          SERVICE_ID = os.environ["NF_SERVICE_ID"]
+          OUT = Path("evidence")
+
+          candidates = [
+              ("NORTHFLANK_API_TOKEN", os.getenv("NF_TOKEN_1", "")),
+              ("NORTHFLANK_TOKEN", os.getenv("NF_TOKEN_2", "")),
+              ("NF_TOKEN", os.getenv("NF_TOKEN_3", "")),
+              ("NF_API_TOKEN", os.getenv("NF_TOKEN_4", "")),
+              ("GPT_WORK_SENECIO_READONLY", os.getenv("NF_TOKEN_5", "")),
+              ("H011_BUILD_ONCE", os.getenv("NF_TOKEN_6", "")),
+          ]
+          token_name, token = next(((name, value) for name, value in candidates if value), (None, None))
+
+          report: dict[str, Any] = {
+              "captured_at": datetime.now(timezone.utc).isoformat(),
+              "github_sha": os.environ.get("GITHUB_SHA"),
+              "mode": "GET_ONLY",
+              "team_id": TEAM_ID,
+              "project_id": PROJECT_ID,
+              "service_id": SERVICE_ID,
+              "credential_source_name": token_name,
+              "northflank_access": bool(token),
+              "requests": {},
+          }
+
+          if not token:
+              report["access_error"] = "NO_MATCHING_GITHUB_ACTIONS_SECRET"
+              OUT.joinpath("northflank-readonly-report.json").write_text(
+                  json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
+              )
+              OUT.joinpath("northflank-readonly-summary.txt").write_text(
+                  "NORTHFLANK_ACCESS=NO\nREASON=NO_MATCHING_GITHUB_ACTIONS_SECRET\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+              "User-Agent": "senex-northflank-readonly-audit/1",
+          }
+
+          secret_exact = {
+              "password", "passwd", "token", "accessToken", "apiToken",
+              "secret", "secretValue", "credentials", "authorization",
+              "runtimeEnvironment", "runtimeFiles", "buildArguments", "buildFiles",
+          }
+
+          def sanitise_text(text: str) -> str:
+              patterns = [
+                  r"nf-[A-Za-z0-9._~-]+",
+                  r"gh[pousr]_[A-Za-z0-9_]+",
+                  r"(?i)(authorization:\s*bearer\s+)[^\s]+",
+                  r"(?i)(api[_ -]?key\s*[=:]\s*)[^\s,;]+",
+              ]
+              clean = text
+              for pattern in patterns:
+                  clean = re.sub(pattern, lambda m: (m.group(1) if m.lastindex else "") + "<redacted>", clean)
+              return clean[:4000]
+
+          def sanitise(value: Any, key: str | None = None) -> Any:
+              if key in secret_exact or (key and key.lower() in {k.lower() for k in secret_exact}):
+                  if key in {"runtimeEnvironment", "runtimeFiles", "buildArguments", "buildFiles"} and isinstance(value, dict):
+                      return {"names": sorted(value.keys()), "values": "<redacted>"}
+                  return "<redacted>"
+              if isinstance(value, dict):
+                  return {str(k): sanitise(v, str(k)) for k, v in value.items()}
+              if isinstance(value, list):
+                  return [sanitise(v) for v in value]
+              if isinstance(value, str):
+                  return sanitise_text(value)
+              return value
+
+          def get(path: str, query: dict[str, Any] | None = None) -> dict[str, Any]:
+              if query:
+                  path = path + "?" + urllib.parse.urlencode(query, doseq=True)
+              url = BASE + path
+              request = urllib.request.Request(url, headers=headers, method="GET")
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      raw = response.read().decode("utf-8", errors="replace")
+                      try:
+                          body = json.loads(raw)
+                      except json.JSONDecodeError:
+                          body = {"text": sanitise_text(raw)}
+                      return {"status": response.status, "body": sanitise(body)}
+              except urllib.error.HTTPError as exc:
+                  raw = exc.read().decode("utf-8", errors="replace")
+                  try:
+                      body = json.loads(raw)
+                  except json.JSONDecodeError:
+                      body = {"text": sanitise_text(raw)}
+                  return {"status": exc.code, "body": sanitise(body)}
+              except Exception as exc:
+                  return {"status": 0, "error": type(exc).__name__, "message": sanitise_text(str(exc))}
+
+          prefix = f"/teams/{TEAM_ID}/projects/{PROJECT_ID}"
+          endpoints = {
+              "workspace": f"/teams/{TEAM_ID}",
+              "project": prefix,
+              "services": f"{prefix}/services",
+              "service": f"{prefix}/services/{SERVICE_ID}",
+              "deployment": f"{prefix}/services/{SERVICE_ID}/deployment",
+              "ports": f"{prefix}/services/{SERVICE_ID}/ports",
+              "health_checks": f"{prefix}/services/{SERVICE_ID}/health-checks",
+              "containers": f"{prefix}/services/{SERVICE_ID}/containers",
+              "builds": f"{prefix}/services/{SERVICE_ID}/build",
+              "runtime_environment_details": f"{prefix}/services/{SERVICE_ID}/runtime-environment/details",
+              "runtime_logs": f"{prefix}/services/{SERVICE_ID}/logs",
+              "build_logs": f"{prefix}/services/{SERVICE_ID}/build-logs",
+              "metrics": f"{prefix}/services/{SERVICE_ID}/metrics",
+              "volumes": f"{prefix}/volumes",
+          }
+
+          report["requests"]["workspace"] = get(endpoints["workspace"])
+          report["requests"]["project"] = get(endpoints["project"])
+          report["requests"]["services"] = get(endpoints["services"], {"per_page": 100})
+          report["requests"]["service"] = get(endpoints["service"])
+          report["requests"]["deployment"] = get(endpoints["deployment"])
+          report["requests"]["ports"] = get(endpoints["ports"])
+          report["requests"]["health_checks"] = get(endpoints["health_checks"])
+          report["requests"]["containers"] = get(endpoints["containers"])
+          report["requests"]["builds"] = get(endpoints["builds"], {"per_page": 100})
+          report["requests"]["runtime_environment_details"] = get(endpoints["runtime_environment_details"])
+          report["requests"]["runtime_logs"] = get(
+              endpoints["runtime_logs"],
+              {
+                  "type": "runtime",
+                  "queryType": "range",
+                  "duration": 604800,
+                  "lineLimit": 500,
+                  "direction": "backward",
+              },
+          )
+          report["requests"]["build_logs"] = get(
+              endpoints["build_logs"],
+              {
+                  "queryType": "range",
+                  "duration": 604800,
+                  "lineLimit": 300,
+                  "direction": "backward",
+              },
+          )
+          report["requests"]["metrics"] = get(
+              endpoints["metrics"],
+              {"queryType": "single", "metricTypes": ["diskUsage", "cpu", "memory"]},
+          )
+          volumes_result = get(endpoints["volumes"], {"per_page": 100})
+          report["requests"]["volumes"] = volumes_result
+
+          volume_ids: list[str] = []
+          body = volumes_result.get("body") if isinstance(volumes_result, dict) else None
+          if isinstance(body, dict):
+              data = body.get("data")
+              if isinstance(data, list):
+                  volume_ids = [str(item.get("id")) for item in data if isinstance(item, dict) and item.get("id")]
+              elif isinstance(data, dict):
+                  possible = data.get("volumes", data.get("data", []))
+                  if isinstance(possible, list):
+                      volume_ids = [str(item.get("id")) for item in possible if isinstance(item, dict) and item.get("id")]
+
+          report["volume_details"] = {}
+          for volume_id in volume_ids:
+              report["volume_details"][volume_id] = {
+                  "volume": get(f"{prefix}/volumes/{urllib.parse.quote(volume_id)}"),
+                  "backups": get(
+                      f"{prefix}/volumes/{urllib.parse.quote(volume_id)}/backups",
+                      {"per_page": 100},
+                  ),
+              }
+
+          OUT.joinpath("northflank-readonly-report.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
+          )
+
+          statuses = {
+              name: value.get("status")
+              for name, value in report["requests"].items()
+              if isinstance(value, dict)
+          }
+          summary = [
+              "NORTHFLANK_ACCESS=YES",
+              f"CREDENTIAL_SOURCE={token_name}",
+              f"TEAM_ID={TEAM_ID}",
+              f"PROJECT_ID={PROJECT_ID}",
+              f"SERVICE_ID={SERVICE_ID}",
+              f"VOLUME_IDS={','.join(volume_ids) if volume_ids else 'NONE_DISCOVERED'}",
+          ]
+          summary.extend(f"HTTP_{name.upper()}={status}" for name, status in statuses.items())
+          OUT.joinpath("northflank-readonly-summary.txt").write_text(
+              "\n".join(summary) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Prove report contains no obvious credential material
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -RIE 'nf-eyJ|gh[pousr]_[A-Za-z0-9]|Authorization: Bearer' evidence
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum evidence/* > evidence/SHA256SUMS
+
+      - name: Upload read-only inspection evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h011-northflank-readonly-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
