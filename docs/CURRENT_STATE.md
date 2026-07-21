@@ -266,3 +266,40 @@ The probe exists but must not be run against production without explicit infrast
 ## Next exact step
 
 Revalidate the branch head containing this canonical continuity commit with all exact-head and smoke gates. Keep PR #5 Draft. The next authorized technical action after that is an isolated Northflank volume/filesystem probe; no deploy decision is valid before that evidence exists.
+
+## Phase III-A experimental branch — TradingView Research Bridge
+
+This section exists only on `feat/h011-v3-tradingview-research-bridge`, stacked from the exact validated PR #5 head `aeb50867738b7ae7199f621a730080e09465458e`. It does not change PR #5.
+
+```text
+PHASE_IIIA=EXPERIMENTAL
+LOCAL_ONLY=true
+OPTIONAL=true
+RESEARCH_ONLY=true
+AUTHORITATIVE=false
+PRODUCTION_DEPENDENCY=false
+NORTHFLANK_DEPENDENCY=false
+RAW_CHAIN_INPUT=false
+RESOLUTION_SOURCE=false
+MERGED=NO
+DEPLOYED=NO
+REQUIRED_FOR_SENEX_RUNTIME=NO
+LIVE_TRADINGVIEW_VALIDATION=NOT_EXECUTED
+```
+
+The branch adds only an offline JSON adapter, schema, provenance model, read-only code-enforced allowlist, synthetic fixtures, tests, local-use documentation, and a read-only CI gate. It does not install Node.js or `tradingview-mcp` in the product image, does not open CDP in CI, and cannot write to SENEX results or `raw_chain_v1`.
+
+Upstream inspected:
+
+```text
+repository=https://github.com/tradesdontlie/tradingview-mcp
+commit=55534aab8c11f24655b7d8d4de82e6bece14c8b4
+version=1.0.0
+license=MIT with additional TradingView/terms notice
+```
+
+The real Northflank volume/filesystem blocker is unchanged, independent, and not a requirement for Phase III-A research validation.
+
+### Phase III-A next exact step
+
+Validate the Draft stacked PR exact head with schema, adapter, allowlist, path-isolation, provenance, architecture-isolation, existing H-011, and global suites. Keep the PR Draft and unmerged. Do not touch PR #5, production, Northflank, Docker productivo, runtime requirements, credentials, or the authoritative raw chain.
