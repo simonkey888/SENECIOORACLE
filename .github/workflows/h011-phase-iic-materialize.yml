@@ -64,32 +64,48 @@ jobs:
           gzip -dc /tmp/phase-iic-patches.mbox.gz > /tmp/phase-iic-patches.mbox
           test "$(grep -c '^From [0-9a-f]\{40\} ' /tmp/phase-iic-patches.mbox)" = "3"
 
-      - name: Apply three audited commits
+      - name: Reconstruct audited product commits
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "simonkey888"
           git config user.email "268390381+simonkey888@users.noreply.github.com"
+          pre_head="$(git rev-parse HEAD)"
           gzip -dc /tmp/phase-iic-patches.mbox.gz | git am --3way
-          test "$(git log --format='%s' -3 | sed -n '1p')" = "test(h011-v3): validate Phase II-C crash-safe integration"
-          test "$(git log --format='%s' -3 | sed -n '2p')" = "feat(h011-v3): supervise runtime and expose committed health"
-          test "$(git log --format='%s' -3 | sed -n '3p')" = "feat(h011-v3): integrate committed raw-chain runtime"
-          git diff --check 0870166928d8068abd91b2078d34266f2b8fef2e...HEAD
+          cp .github/workflows/h011-runtime-transaction-integration.yml /tmp/h011-runtime-transaction-integration.yml
+          git reset --mixed "$pre_head"
 
-      - name: Remove one-shot machinery
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm -r \
-            .github/phase-iic-patches.b64 \
-            .github/phase-iic-patches \
-            .github/workflows/h011-phase-iic-materialize.yml
-          git commit -m "chore(h011-v3): remove Phase II-C materializer"
-          test ! -e .github/phase-iic-patches.b64
-          test ! -e .github/phase-iic-patches
-          test ! -e .github/workflows/h011-phase-iic-materialize.yml
+          git add \
+            polymarket/control_plane/coverage.py \
+            polymarket/control_plane/state_snapshot.py \
+            polymarket/h011_v3_committed_snapshot.py \
+            polymarket/h011_v3_pipeline.py \
+            polymarket/h011_v3_runtime.py \
+            polymarket/vwap_detector_v2.py
+          git commit -m "feat(h011-v3): integrate committed raw-chain runtime"
 
-      - name: Push fast-forward branch
+          git add \
+            polymarket/Dockerfile.h011-v3 \
+            polymarket/dashboard_v3.py \
+            polymarket/h011_v3_fs_probe.py
+          git commit -m "feat(h011-v3): supervise runtime and expose committed health"
+
+          git add \
+            docs/CURRENT_STATE.md \
+            research/H-011_v3_raw_artifact_transaction_design.md \
+            tests/h011_v3/test_h011_v3_committed_snapshot.py \
+            tests/h011_v3/test_h011_v3_dashboard_committed.py \
+            tests/h011_v3/test_h011_v3_fs_probe.py \
+            tests/h011_v3/test_h011_v3_runtime_integration.py \
+            tests/h011_v3/test_run_scan_integration.py
+          git commit -m "test(h011-v3): validate Phase II-C crash-safe integration"
+
+          test -z "$(git status --porcelain --untracked-files=no)"
+          test -f /tmp/h011-runtime-transaction-integration.yml
+          test -z "$(git diff --name-only "$pre_head"...HEAD -- '.github/workflows/**')"
+          git diff --check "$pre_head"...HEAD
+
+      - name: Push product commits fast-forward
         shell: bash
         run: |
           set -euo pipefail
