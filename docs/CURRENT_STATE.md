@@ -5,7 +5,7 @@
 - Product: **SENEX**
 - Technical system: **SENECIO H-011 V3**
 - Repository: `simonkey888/SeneX-Prophet`
-- Runtime purpose: defensive market discovery, immutable evidence capture, integrity evaluation, replay, and paper-only shadow execution.
+- Purpose: defensive discovery, immutable evidence capture, integrity validation, replay, observability, and paper-only shadow execution for BTC Up/Down five-minute markets.
 
 ## Permanent safety flags
 
@@ -15,20 +15,24 @@ orders_enabled=false
 live_capital_locked=true
 ```
 
-No wallet, private key, real order, real fill, realized PnL, NAV, or real capital path is authorized or implemented by Phase II-C.
+No wallet, private key, real order, real fill, realized PnL, NAV, or real-capital path is authorized or enabled.
 
 ## Authoritative branches and pull requests
 
-- Product/base branch: `feat/h011-v3-discovery-refresh`
-- Product/base SHA: `2f8503533543832147caf4c8e97a0cc6f5af3cbc`
-- Main development branch: `feat/h011-v3-control-plane-coverage`
-- PR #5 head verified before and after Phase II-C: `495265f162fc2fc44bbcfc4707b1c38ecde2fd3a`
-- Phase II-C branch: `feat/h011-v3-runtime-transaction-integration`
-- Draft PR: `#20`
-- Phase II-C stacked base: `495265f162fc2fc44bbcfc4707b1c38ecde2fd3a`
-- Validated Phase II-C head before this evidence-only documentation commit: `7424b825194490076fe5e2bc195898b7656b9c7c`
+```text
+product/base branch: feat/h011-v3-discovery-refresh
+product/base SHA: 2f8503533543832147caf4c8e97a0cc6f5af3cbc
+main development branch: feat/h011-v3-control-plane-coverage
+PR #5: OPEN / DRAFT / UNMERGED
+PR #5 old head before Phase II-C merge: 495265f162fc2fc44bbcfc4707b1c38ecde2fd3a
+Phase II-C branch: feat/h011-v3-runtime-transaction-integration
+PR #20 source head: 3ffeddf29ea02ed691dc12f3f979d1be58a486d3
+PR #20 merge commit: 4c2a00db86d1740f0a53b6f62a523dabedfae21d
+PR #20: CLOSED / MERGED
+validated PR #5 head before this continuity commit: 7e4d8afeda02e1843e9e77730ff75d5fbd1394d5
+```
 
-PR #5 and PR #20 remain Draft and unmerged. No merge is authorized.
+PR #20 was merged into `feat/h011-v3-control-plane-coverage` using a merge commit. PR #5 remains Draft and was not merged into its product/base branch.
 
 ## Production and infrastructure
 
@@ -40,15 +44,15 @@ Known public service:
 - Integrity: `/api/v3/integrity`
 - Replay: `/api/v3/replay`
 
-Last verified production code SHA:
+Last known production code SHA:
 
 ```text
 2f8503533543832147caf4c8e97a0cc6f5af3cbc
 ```
 
-No Phase II-C code was deployed. Northflank, production, variables, secrets, domains, replicas, and volumes were not modified.
+Phase II-C has not been deployed. Northflank services, deployments, variables, secrets, domains, replicas, and volumes were not accessed or modified.
 
-Architecture remains:
+Authoritative delivery architecture remains:
 
 ```text
 GitHub -> GitHub Actions -> Python 3.11 Docker image
@@ -57,20 +61,21 @@ GitHub -> GitHub Actions -> Python 3.11 Docker image
 
 Cloudflare is not the authoritative runtime.
 
-## Phase II-C architecture result
+## Integrated Phase II-C architecture
 
-Implemented and validated:
+The PR #5 branch now contains:
 
-1. legacy `InvariantResult` compatibility normalization without changing UNKNOWN, severity, or the 31-invariant catalog;
-2. startup recovery before scanner/publication enablement;
-3. one hardened stager, publisher, recovery implementation, and authoritative raw chain;
-4. transactional integration in `run_scan_v3`;
-5. committed manifest-chain reader for state, integrity, and replay;
-6. atomic, regenerable `latest.json` cache bound to the committed chain;
-7. Python PID-1 process supervision, signals, shutdown, liveness, readiness, and operational state;
-8. manual isolated filesystem capability probe;
-9. Linux and Docker crash/restart validation on a shared temporary volume;
-10. exact-head read-only CI with pinned actions and uploaded evidence.
+1. compatibility normalization for legacy `InvariantResult` values without changing UNKNOWN semantics, severity, or the 31-invariant catalog;
+2. startup recovery before scanner and publication enablement;
+3. explicit fail-closed runtime states;
+4. one hardened stager, publisher, recovery implementation, and authoritative raw chain;
+5. transactional publication integrated into `run_scan_v3`;
+6. committed manifest-chain reader for state, integrity, and replay;
+7. `latest.json` as a regenerable cache bound to the latest committed manifest, never as authority;
+8. Python PID-1 supervision with signal forwarding, graceful shutdown, liveness, readiness, and scanner status;
+9. manual isolated filesystem capability probe;
+10. Linux and Docker same-volume crash/restart validation;
+11. exact-head, read-only Phase II-C evidence workflow with pinned action SHAs.
 
 ## Storage contract
 
@@ -80,7 +85,7 @@ Authoritative transactional root:
 /app/polymarket/results/h011_v3/raw_chain_v1
 ```
 
-Legacy paths remain non-authoritative and are never auto-migrated:
+Legacy paths remain non-authoritative and are never automatically migrated or mixed into the committed chain:
 
 ```text
 /app/polymarket/results/v3/raw
@@ -91,11 +96,9 @@ YYYY-MM-DD.events.jsonl.gz
 v3_scan_*.jsonl
 ```
 
-The last committed manifest sequence is selected by validated sequence and hash linkage, never by mtime, lexicographic artifact name, or a legacy bundle.
+The latest committed scan is selected by contiguous sequence, previous-manifest linkage, canonical manifest hash, artifact SHA-256, sidecar validation, permissions, and residue checks. It is never selected by mtime, filename ordering, or a legacy bundle.
 
-## Startup and fail-closed states
-
-Runtime states include:
+## Runtime states
 
 ```text
 STARTING
@@ -108,40 +111,73 @@ SCANNER_FAILED
 STOPPING
 ```
 
-Scanner and publication remain disabled during recovery and in blocked states. There is no silent legacy-writer fallback.
+Scanner and publication remain disabled during recovery and in blocked states. No silent legacy-writer fallback exists.
 
-## Final exact-head evidence
-
-Authoritative Phase II-C run:
+## Pre-merge Phase II-C evidence
 
 ```text
-run_id=29826014986
-job_id=88619418979
-validated_head=7424b825194490076fe5e2bc195898b7656b9c7c
+run_id=29826214658
+job_id=88620050451
+validated_head=3ffeddf29ea02ed691dc12f3f979d1be58a486d3
 conclusion=success
-artifact_id=8493332225
-artifact_digest=sha256:27061cd04f23cfccfe1322592dbfac0e03043bf94c3b47e846ef6f92bef119d5
+artifact_id=8493410423
+artifact_digest=sha256:c01046dd1f81eddbb2315d77afd289722a85b223936c884dc487ed8228bab707
+```
+
+## Post-merge exact-head evidence
+
+The integrated PR #5 branch was validated directly at its branch head, not at a synthetic merge ref:
+
+```text
+run_id=29830003367
+job_id=88632183483
+validated_head=7e4d8afeda02e1843e9e77730ff75d5fbd1394d5
+conclusion=success
+artifact_id=8494878560
+artifact_digest=sha256:748806668ba9fd5bfe40fca2bcaef9425fe607eda2c816764a02b86197c58d59
 ```
 
 Results:
 
 ```text
-focused Phase II-C tests: 29 passed
+Phase II-C focused suite: 29 passed
 transaction/publisher/recovery regression: 268 passed
-H-011 suite: 534 passed
+H-011 complete suite: 534 passed
 full global suite: 561 passed, 0 failed
 compileall: PASS
 host filesystem probe: PASS
 Docker build: PASS
 Docker module completeness: PASS
 container filesystem probe: PASS
-controlled runtime APIs: PASS
-SIGTERM shutdown: PASS
-crash/restart matrix: 7/7 PASS
+controlled container startup: PASS
+liveness: PASS
+readiness: PASS
+/api/v3/state: PASS
+/api/v3/integrity: PASS
+/api/v3/replay: PASS
+SIGTERM graceful shutdown: PASS
+crash matrix: 7/7 PASS
+restart matrix: 7/7 PASS
 unresolved marker/temp residue: 0
 ```
 
-Validated crash points:
+Runtime evidence:
+
+```text
+invariants.total=31
+invariants.pass=31
+invariants.fail=0
+invariants.unknown=0
+chain_verified=true
+replay_verified=true
+legacy_mode=false
+raw_store_available=true
+paper_only=true
+orders_enabled=false
+live_capital_locked=true
+```
+
+Validated crash/restart points:
 
 ```text
 PUBLISH_AFTER_STAGED_MARKER
@@ -153,73 +189,63 @@ PUBLISH_AFTER_STAGING_UNLINK
 PUBLISH_AFTER_MARKER_UNLINK
 ```
 
-Each case used a failed container/process followed by startup recovery in a second container on the same temporary volume. Final chain verification passed with no marker or pending residue.
-
-Runtime API evidence showed:
-
-```text
-chain_verified=true
-replay_verified=true
-legacy_mode=false
-raw_store_available=true
-snapshot_age_sec=<real numeric value>
-invariants.pass=31
-invariants.fail=0
-invariants.unknown=0
-```
-
-## Validated file hashes
-
-```text
-h011_v3_raw_transaction.py  4d6b859c3ac5596c9d386ceb31dbfa5f53298f526dadcba9bc177a73622b3e99
-h011_v3_raw_recovery.py     ed5126ef2f7993b58307d45494b212314e4a1f369b7821e87fc677739bae8eb0
-h011_v3_runtime.py          a6fc46808d16c09398cc53f57f74563160a21c775425719dce175800cd867f4d
-h011_v3_committed_snapshot.py 22708783d236ecf8e33ca8288c9de789c43398c08c5fe2584a533adb207d2da9
-h011_v3_pipeline.py         f7d7d5799aa13bbc6e503d1180d16a6b6efd63b71573ca4f194e3d7f8cffb2f6
-dashboard_v3.py             ab5ac5edad2f55259ac31bf5f4e1b8c955a1634c53e7d82f0740ddafb6e079f1
-Dockerfile.h011-v3          ff126c299d67b1ef73ba40b869f8a462be8c89554e3c5db2063f3b67891de571
-```
+Each case used an interrupted process/container followed by startup recovery in a second container over the same isolated temporary volume. Final chain verification passed without marker, marker-temp, pending, or unowned transaction residue.
 
 ## Historical baseline
 
-Pre-integration exact-head run `29821019238`:
-
 ```text
-H-011: 515 passed
-global: 542 passed
-Docker build/start: PASS
-safety flags: PASS
-artifact: 8491371840
-digest: sha256:594ecaa1651be29340d7a74a5955c7b01a6ee6bfef01ba99028689a0f88dd875
+run_id=29821019238
+H-011=515 passed
+global=542 passed, 0 failed
+Docker=PASS
+safety_flags=PASS
+artifact_id=8491371840
+artifact_digest=sha256:594ecaa1651be29340d7a74a5955c7b01a6ee6bfef01ba99028689a0f88dd875
 ```
 
-The inherited compatibility failure was eliminated and test counts increased without changing the transaction or recovery contracts.
+Phase II-C increased coverage while preserving the hardened transaction and recovery contracts.
 
 ## Current milestone
 
 ```text
-PHASE_IIC_BRANCH_CREATED=YES
-PR20_DRAFT=YES
-PR20_MERGED=NO
+PR20_STATE=CLOSED
+PR20_MERGED=YES
+PR20_MERGE_COMMIT=4c2a00db86d1740f0a53b6f62a523dabedfae21d
+PR5_STATE=OPEN
+PR5_DRAFT=YES
+PR5_MERGED=NO
 INVARIANT_COMPATIBILITY_FIX=PASS
 STARTUP_RECOVERY=PASS
 TRANSACTIONAL_PUBLISHER_RUNTIME=PASS
 COMMITTED_SNAPSHOT_READER=PASS
+PYTHON_PID1_RUNTIME=PASS
 DOCKER_RUNTIME_INTEGRATION=PASS
-CRASH_MATRIX=PASS
-RESTART_MATRIX=PASS
+CRASH_MATRIX=7/7_PASS
+RESTART_MATRIX=7/7_PASS
 GLOBAL_TESTS_ZERO_FAILED=YES
 TEMPORARY_MATERIALIZER_FILES=REMOVED
 PRODUCTION_CHANGED=NO
 NORTHFLANK_CHANGED=NO
-PR5_CHANGED=NO
 DEPLOY_EXECUTED=NO
 ```
 
 ## Open blocker
 
-The only remaining pre-deploy blocker is direct verification of the actual Northflank production volume and filesystem capabilities, mount path, persistence, and restart behavior. The probe exists but must not be run against production without explicit deployment/infrastructure authorization.
+The sole pre-deploy blocker is direct verification of the real Northflank volume and filesystem:
+
+- exact mount path;
+- persistence across restart and deployment;
+- `flock`;
+- hardlinks;
+- `renameat2(RENAME_EXCHANGE)`;
+- file and directory `fsync`;
+- `O_NOFOLLOW`;
+- final `0444` permissions and inode stability;
+- ownership and capacity;
+- backup and rollback behavior.
+
+The probe exists but must not be run against production without explicit infrastructure authorization.
 
 ## Next exact step
 
-Keep PR #20 Draft. Perform final independent source/diff audit and, only after separate explicit authorization, merge the stacked PR into `feat/h011-v3-control-plane-coverage` without deploying.
+Revalidate the branch head containing this canonical worklog update with the exact-head Phase II-C gate. After that, keep PR #5 Draft and obtain explicit authorization for the isolated Northflank volume/filesystem probe before any deploy decision.
