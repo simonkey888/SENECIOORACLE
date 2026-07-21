@@ -160,7 +160,7 @@ jobs:
           test -n "$artifact"
           test -f "${artifact}.sha256"
           test -n "$manifest"
-          expected="$(tr -d '[:space:]' < "${artifact}.sha256")"
+          expected="$(awk '{print $1}' "${artifact}.sha256")"
           actual="$(sha256sum "$artifact" | awk '{print $1}')"
           test "$expected" = "$actual"
           test -z "$(find "$root" -maxdepth 1 -type f \( -name '*.marker' -o -name '*.marker.tmp.*' \) -print -quit)"
