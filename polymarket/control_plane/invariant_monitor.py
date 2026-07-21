@@ -10,11 +10,14 @@ Do NOT add new invariant definitions here. All definitions live in coverage.py.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 from control_plane.coverage import (
     INVARIANT_CATALOG,
     CATALOG_VERSION,
     invariant_catalog_hash,
-    invariant_summary,
+    invariant_summary as coverage_invariant_summary,
     evaluate_all_invariants,
     ScanContext,
 )
@@ -23,15 +26,11 @@ from control_plane.coverage import (
 # Format: list of (id, description, severity) — matching the old format
 INVARIANTS = [(inv_id, desc, sev) for inv_id, desc, sev, _ in INVARIANT_CATALOG]
 
-# Old InvariantResult class — replaced by dict in coverage.py
-# but we provide a thin wrapper for any code that still references it
-from dataclasses import dataclass
-from typing import Any
-
 
 @dataclass(frozen=True)
 class InvariantResult:
     """Legacy compatibility — prefer dict results from coverage.evaluate_all_invariants."""
+
     invariant_id: str
     status: str
     severity: str
@@ -46,6 +45,29 @@ class InvariantResult:
             "reason": self.reason,
             "evidence_hashes": list(self.evidence_hashes),
         }
+
+
+def invariant_summary(results: list[InvariantResult | dict[str, Any]]) -> dict[str, int]:
+    """Summarize modern mappings and legacy ``InvariantResult`` instances.
+
+    ``control_plane.coverage`` remains the semantic authority. This shim only
+    normalizes the historical object representation before delegating, so
+    UNKNOWN, NOT_APPLICABLE, severities, and the 31-invariant catalog retain
+    their modern meanings.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    for result in results:
+        if isinstance(result, InvariantResult):
+            normalized.append(result.to_dict())
+        elif isinstance(result, dict):
+            normalized.append(result)
+        else:
+            raise TypeError(
+                "invariant results must be dict or InvariantResult, "
+                f"got {type(result).__name__}"
+            )
+    return coverage_invariant_summary(normalized)
 
 
 def check_invariants(scan_data: dict) -> list[InvariantResult]:
@@ -72,7 +94,7 @@ def check_invariants(scan_data: dict) -> list[InvariantResult]:
             source_health=scan_data.get("source_health", {}),
         )
     )
-    # Wrap in InvariantResult for backward compat
+    # Wrap in InvariantResult for backward compatibility.
     return [
         InvariantResult(
             invariant_id=r["invariant_id"],
