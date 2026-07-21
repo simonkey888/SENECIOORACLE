@@ -6,6 +6,7 @@ on:
       - feat/h011-v3-control-plane-coverage
     paths:
       - ".github/phase-iic-patches.b64"
+      - ".github/phase-iic-patches/**"
       - ".github/workflows/h011-phase-iic-materialize.yml"
 
 permissions:
@@ -34,17 +35,30 @@ jobs:
           test "$(git branch --show-current)" = "feat/h011-v3-runtime-transaction-integration"
           test "${{ github.event.pull_request.base.sha }}" = "495265f162fc2fc44bbcfc4707b1c38ecde2fd3a"
           git merge-base --is-ancestor 0870166928d8068abd91b2078d34266f2b8fef2e HEAD
-          expected=$'.github/phase-iic-patches.b64\n.github/workflows/h011-phase-iic-materialize.yml'
-          actual="$(git diff --name-only 0870166928d8068abd91b2078d34266f2b8fef2e...HEAD | sort)"
-          test "$actual" = "$expected"
-          test -f .github/phase-iic-patches.b64
-          test -f .github/workflows/h011-phase-iic-materialize.yml
+          python - <<'PY'
+          import subprocess
+          allowed = {
+              '.github/phase-iic-patches.b64',
+              '.github/workflows/h011-phase-iic-materialize.yml',
+              *{f'.github/phase-iic-patches/part{i:02d}' for i in range(9)},
+          }
+          actual = set(subprocess.check_output([
+              'git', 'diff', '--name-only',
+              '0870166928d8068abd91b2078d34266f2b8fef2e...HEAD',
+          ], text=True).splitlines())
+          unexpected = sorted(actual - allowed)
+          missing = sorted({f'.github/phase-iic-patches/part{i:02d}' for i in range(9)} - actual)
+          if unexpected or missing:
+              raise SystemExit(f'unexpected={unexpected} missing={missing}')
+          PY
 
       - name: Decode and verify patch series
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .github/phase-iic-patches.b64 > /tmp/phase-iic-patches.mbox.gz
+          cat .github/phase-iic-patches/part{00..08} > /tmp/phase-iic-patches.b64
+          echo "c589e8754d67f8bda402fb5d5b8b0a8d5536f04e18e03b6890fe37c48dc01614  /tmp/phase-iic-patches.b64" | sha256sum -c -
+          base64 -d /tmp/phase-iic-patches.b64 > /tmp/phase-iic-patches.mbox.gz
           echo "25f4d6d6e2742437d7ed9fbf316ea47e5497a24b0182cc90a00dc58ab4ca40e8  /tmp/phase-iic-patches.mbox.gz" | sha256sum -c -
           gzip -t /tmp/phase-iic-patches.mbox.gz
           gzip -dc /tmp/phase-iic-patches.mbox.gz > /tmp/phase-iic-patches.mbox
@@ -66,9 +80,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/phase-iic-patches.b64 .github/workflows/h011-phase-iic-materialize.yml
+          git rm -r \
+            .github/phase-iic-patches.b64 \
+            .github/phase-iic-patches \
+            .github/workflows/h011-phase-iic-materialize.yml
           git commit -m "chore(h011-v3): remove Phase II-C materializer"
           test ! -e .github/phase-iic-patches.b64
+          test ! -e .github/phase-iic-patches
           test ! -e .github/workflows/h011-phase-iic-materialize.yml
 
       - name: Push fast-forward branch
