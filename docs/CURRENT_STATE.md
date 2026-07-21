@@ -25,14 +25,14 @@ product/base SHA: 2f8503533543832147caf4c8e97a0cc6f5af3cbc
 main development branch: feat/h011-v3-control-plane-coverage
 PR #5: OPEN / DRAFT / UNMERGED
 PR #5 old head before Phase II-C merge: 495265f162fc2fc44bbcfc4707b1c38ecde2fd3a
-Phase II-C branch: feat/h011-v3-runtime-transaction-integration
+Phase II-C source branch: feat/h011-v3-runtime-transaction-integration
 PR #20 source head: 3ffeddf29ea02ed691dc12f3f979d1be58a486d3
 PR #20 merge commit: 4c2a00db86d1740f0a53b6f62a523dabedfae21d
 PR #20: CLOSED / MERGED
-validated PR #5 head before this continuity commit: 7e4d8afeda02e1843e9e77730ff75d5fbd1394d5
+validated PR #5 head before this continuity-only commit: 17d86f66f22675a7d16bf1e66070a22b909e78d1
 ```
 
-PR #20 was merged into `feat/h011-v3-control-plane-coverage` using a merge commit. PR #5 remains Draft and was not merged into its product/base branch.
+PR #20 was merged into `feat/h011-v3-control-plane-coverage` using a merge commit. PR #5 remains Draft and was not merged into `feat/h011-v3-discovery-refresh`.
 
 ## Production and infrastructure
 
@@ -63,7 +63,7 @@ Cloudflare is not the authoritative runtime.
 
 ## Integrated Phase II-C architecture
 
-The PR #5 branch now contains:
+The PR #5 branch contains:
 
 1. compatibility normalization for legacy `InvariantResult` values without changing UNKNOWN semantics, severity, or the 31-invariant catalog;
 2. startup recovery before scanner and publication enablement;
@@ -126,15 +126,15 @@ artifact_digest=sha256:c01046dd1f81eddbb2315d77afd289722a85b223936c884dc487ed822
 
 ## Post-merge exact-head evidence
 
-The integrated PR #5 branch was validated directly at its branch head, not at a synthetic merge ref:
+The integrated PR #5 branch was validated directly at its exact branch head, not at a synthetic merge ref:
 
 ```text
-run_id=29830003367
-job_id=88632183483
-validated_head=7e4d8afeda02e1843e9e77730ff75d5fbd1394d5
+run_id=29830860459
+job_id=88635003168
+validated_head=17d86f66f22675a7d16bf1e66070a22b909e78d1
 conclusion=success
-artifact_id=8494878560
-artifact_digest=sha256:748806668ba9fd5bfe40fca2bcaef9425fe607eda2c816764a02b86197c58d59
+artifact_id=8495223681
+artifact_digest=sha256:b6fb5198afe35d60f682fc8476577ee407ba5f93b36a2221c95c6687f7300f19
 ```
 
 Results:
@@ -191,6 +191,21 @@ PUBLISH_AFTER_MARKER_UNLINK
 
 Each case used an interrupted process/container followed by startup recovery in a second container over the same isolated temporary volume. Final chain verification passed without marker, marker-temp, pending, or unowned transaction residue.
 
+## CI compatibility repair after integration
+
+The inherited PR3 and PR5 smoke workflows assumed a legacy discovery artifact. Phase II-C intentionally removed that path as an authoritative output. The workflows were updated to validate the committed raw chain, exact-head checkout, controlled runtime APIs, pinned actions, security flags, sidecar checksum, and zero marker residue.
+
+Validated workflow-repair head:
+
+```text
+head=17d86f66f22675a7d16bf1e66070a22b909e78d1
+H011_PR3_DOCKER_SMOKE=PASS
+H011_PR5_CONTROL_PLANE_SMOKE=PASS
+H011_PR5_PHASE_IIC_EXACT_HEAD=PASS
+```
+
+No product transaction-core or recovery contract change was required.
+
 ## Historical baseline
 
 ```text
@@ -223,6 +238,8 @@ DOCKER_RUNTIME_INTEGRATION=PASS
 CRASH_MATRIX=7/7_PASS
 RESTART_MATRIX=7/7_PASS
 GLOBAL_TESTS_ZERO_FAILED=YES
+LEGACY_AUTHORITATIVE_WRITER=ABSENT
+SILENT_LEGACY_FALLBACK=ABSENT
 TEMPORARY_MATERIALIZER_FILES=REMOVED
 PRODUCTION_CHANGED=NO
 NORTHFLANK_CHANGED=NO
@@ -248,4 +265,4 @@ The probe exists but must not be run against production without explicit infrast
 
 ## Next exact step
 
-Revalidate the branch head containing this canonical worklog update with the exact-head Phase II-C gate. After that, keep PR #5 Draft and obtain explicit authorization for the isolated Northflank volume/filesystem probe before any deploy decision.
+Revalidate the branch head containing this canonical continuity commit with all exact-head and smoke gates. Keep PR #5 Draft. The next authorized technical action after that is an isolated Northflank volume/filesystem probe; no deploy decision is valid before that evidence exists.
