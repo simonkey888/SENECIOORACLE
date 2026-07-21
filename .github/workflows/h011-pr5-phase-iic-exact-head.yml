@@ -1,9 +1,9 @@
 name: H011 PR5 Phase II-C Exact Head
 
 on:
-  push:
+  pull_request:
     branches:
-      - feat/h011-v3-control-plane-coverage
+      - feat/h011-v3-discovery-refresh
     paths:
       - "polymarket/**"
       - "tests/**"
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: h011-pr5-phase-iic-${{ github.ref }}
+  group: h011-pr5-phase-iic-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -28,17 +28,17 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Verify exact head, base, and diff
         shell: bash
         run: |
           set -euo pipefail
           actual="$(git rev-parse HEAD)"
-          expected="${{ github.sha }}"
+          expected="${{ github.event.pull_request.head.sha }}"
           test "$actual" = "$expected"
-          test "${{ github.ref_name }}" = "feat/h011-v3-control-plane-coverage"
-          base="$(git merge-base origin/feat/h011-v3-discovery-refresh "$expected")"
+          test "${{ github.event.pull_request.base.ref }}" = "feat/h011-v3-discovery-refresh"
+          base="${{ github.event.pull_request.base.sha }}"
           test -n "$base"
           git log -1 --format='%H %P %s' | tee /tmp/h011-iic-head.txt
           git diff --name-status "$base...$expected" \
@@ -143,7 +143,7 @@ jobs:
           set -o pipefail
           docker build \
             -f polymarket/Dockerfile.h011-v3 \
-            -t senex-h011-iic:${{ github.sha }} \
+            -t senex-h011-iic:${{ github.event.pull_request.head.sha }} \
             . 2>&1 | tee /tmp/h011-iic-docker-build.log
 
       - name: Verify Docker module completeness
@@ -151,7 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm \
-            senex-h011-iic:${{ github.sha }} \
+            senex-h011-iic:${{ github.event.pull_request.head.sha }} \
             python3 -c 'import h011_v3_raw_transaction,h011_v3_raw_recovery,h011_v3_runtime,h011_v3_committed_snapshot,h011_v3_pipeline,dashboard_v3; print("module completeness PASS")' \
             | tee /tmp/h011-iic-docker-modules.log
 
@@ -162,7 +162,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/senex-container-fs"
           docker run --rm \
             -v "${RUNNER_TEMP}/senex-container-fs:/probe" \
-            senex-h011-iic:${{ github.sha }} \
+            senex-h011-iic:${{ github.event.pull_request.head.sha }} \
             python3 /app/polymarket/h011_v3_fs_probe.py /probe \
             | tee /tmp/h011-iic-container-fs-probe.json
           python - <<'PY'
@@ -179,8 +179,8 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/senex-runtime-volume"
           docker run --rm \
             -v "${RUNNER_TEMP}/senex-runtime-volume:/app/polymarket/results" \
-            -e SENECIO_CODE_SHA="${{ github.sha }}" \
-            senex-h011-iic:${{ github.sha }} \
+            -e SENECIO_CODE_SHA="${{ github.event.pull_request.head.sha }}" \
+            senex-h011-iic:${{ github.event.pull_request.head.sha }} \
             python3 /app/polymarket/h011_v3_runtime.py \
               --synthetic-publish --run-id docker-baseline-run --scan-id docker-baseline-scan \
             | tee /tmp/h011-iic-synthetic-publish.log
@@ -193,10 +193,10 @@ jobs:
             --name senex-h011-iic \
             -p 18080:8080 \
             -v "${RUNNER_TEMP}/senex-runtime-volume:/app/polymarket/results" \
-            -e SENECIO_CODE_SHA="${{ github.sha }}" \
+            -e SENECIO_CODE_SHA="${{ github.event.pull_request.head.sha }}" \
             -e H011_RUNTIME_DIAGNOSTIC_ONLY=true \
             -e PYTHONUNBUFFERED=1 \
-            senex-h011-iic:${{ github.sha }}
+            senex-h011-iic:${{ github.event.pull_request.head.sha }}
 
           ready=0
           for _ in $(seq 1 90); do
@@ -260,7 +260,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="senex-h011-iic:${{ github.sha }}"
+          image="senex-h011-iic:${{ github.event.pull_request.head.sha }}"
           : > /tmp/h011-iic-crash-matrix.log
           points=(
             PUBLISH_AFTER_STAGED_MARKER
@@ -360,7 +360,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: h011-pr5-phase-iic-${{ github.sha }}
+          name: h011-pr5-phase-iic-${{ github.event.pull_request.head.sha }}
           path: |
             /tmp/h011-iic-*.txt
             /tmp/h011-iic-*.log
