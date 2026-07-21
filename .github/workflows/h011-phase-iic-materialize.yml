@@ -1,0 +1,76 @@
+name: H011 Phase II-C Materialize
+
+on:
+  push:
+    branches:
+      - feat/h011-v3-runtime-transaction-integration
+    paths:
+      - ".github/phase-iic-patches.b64"
+      - ".github/workflows/h011-phase-iic-materialize.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h011-phase-iic-materialize
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout materialization head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          ref: feat/h011-v3-runtime-transaction-integration
+
+      - name: Verify exact bounded scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = "feat/h011-v3-runtime-transaction-integration"
+          git merge-base --is-ancestor 0870166928d8068abd91b2078d34266f2b8fef2e HEAD
+          expected=$'.github/phase-iic-patches.b64\n.github/workflows/h011-phase-iic-materialize.yml'
+          actual="$(git diff --name-only 0870166928d8068abd91b2078d34266f2b8fef2e...HEAD | sort)"
+          test "$actual" = "$expected"
+          test -f .github/phase-iic-patches.b64
+          test -f .github/workflows/h011-phase-iic-materialize.yml
+
+      - name: Decode and verify patch series
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/phase-iic-patches.b64 > /tmp/phase-iic-patches.mbox.gz
+          echo "25f4d6d6e2742437d7ed9fbf316ea47e5497a24b0182cc90a00dc58ab4ca40e8  /tmp/phase-iic-patches.mbox.gz" | sha256sum -c -
+          gzip -t /tmp/phase-iic-patches.mbox.gz
+          gzip -dc /tmp/phase-iic-patches.mbox.gz > /tmp/phase-iic-patches.mbox
+          test "$(grep -c '^From [0-9a-f]\{40\} ' /tmp/phase-iic-patches.mbox)" = "3"
+
+      - name: Apply three audited commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "simonkey888"
+          git config user.email "268390381+simonkey888@users.noreply.github.com"
+          gzip -dc /tmp/phase-iic-patches.mbox.gz | git am --3way
+          test "$(git log --format='%s' -3 | sed -n '1p')" = "test(h011-v3): validate Phase II-C crash-safe integration"
+          test "$(git log --format='%s' -3 | sed -n '2p')" = "feat(h011-v3): supervise runtime and expose committed health"
+          test "$(git log --format='%s' -3 | sed -n '3p')" = "feat(h011-v3): integrate committed raw-chain runtime"
+          git diff --check 0870166928d8068abd91b2078d34266f2b8fef2e...HEAD
+
+      - name: Remove one-shot machinery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/phase-iic-patches.b64 .github/workflows/h011-phase-iic-materialize.yml
+          git commit -m "chore(h011-v3): remove Phase II-C materializer"
+          test ! -e .github/phase-iic-patches.b64
+          test ! -e .github/workflows/h011-phase-iic-materialize.yml
+
+      - name: Push fast-forward branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:feat/h011-v3-runtime-transaction-integration
