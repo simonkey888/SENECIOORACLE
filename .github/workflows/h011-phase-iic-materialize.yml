@@ -1,9 +1,9 @@
 name: H011 Phase II-C Materialize
 
 on:
-  push:
+  pull_request:
     branches:
-      - feat/h011-v3-runtime-transaction-integration
+      - feat/h011-v3-control-plane-coverage
     paths:
       - ".github/phase-iic-patches.b64"
       - ".github/workflows/h011-phase-iic-materialize.yml"
@@ -12,11 +12,12 @@ permissions:
   contents: write
 
 concurrency:
-  group: h011-phase-iic-materialize
+  group: h011-phase-iic-materialize-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   materialize:
+    if: github.event.pull_request.head.ref == 'feat/h011-v3-runtime-transaction-integration'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -31,6 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git branch --show-current)" = "feat/h011-v3-runtime-transaction-integration"
+          test "${{ github.event.pull_request.base.sha }}" = "495265f162fc2fc44bbcfc4707b1c38ecde2fd3a"
           git merge-base --is-ancestor 0870166928d8068abd91b2078d34266f2b8fef2e HEAD
           expected=$'.github/phase-iic-patches.b64\n.github/workflows/h011-phase-iic-materialize.yml'
           actual="$(git diff --name-only 0870166928d8068abd91b2078d34266f2b8fef2e...HEAD | sort)"
