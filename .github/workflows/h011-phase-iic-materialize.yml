@@ -74,6 +74,7 @@ jobs:
           gzip -dc /tmp/phase-iic-patches.mbox.gz | git am --3way
           cp .github/workflows/h011-runtime-transaction-integration.yml /tmp/h011-runtime-transaction-integration.yml
           git reset --mixed "$pre_head"
+          git checkout "$pre_head" -- .github/workflows/h011-runtime-transaction-integration.yml
 
           git add \
             polymarket/control_plane/coverage.py \
