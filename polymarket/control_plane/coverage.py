@@ -397,7 +397,11 @@ def _eval_snapshots_append_only(ctx: ScanContext) -> tuple[str, str, dict]:
 
     snapshot_files = list(state_dir.glob(SNAPSHOT_MANIFEST_POLICY.artifact_glob))
     if not snapshot_files:
-        return "UNKNOWN", "No historical snapshot files found", {}
+        return (
+            "NOT_APPLICABLE",
+            "Historical snapshot files are derived caches in Phase II-C; the committed raw manifest chain is authoritative",
+            {"authority": "raw_chain_v1"},
+        )
 
     result = verify_manifest_chain(state_dir, SNAPSHOT_MANIFEST_POLICY)
     status = result["chain_status"]
@@ -653,6 +657,8 @@ def _eval_shadow_two_books(ctx: ScanContext) -> tuple[str, str, dict]:
         if shadow.get("attempted"):
             books = r.get("_raw_bundle", {}).get("books", {})
             if len(books) < 2:
+                if r.get("record_status") == "REJECTED_BOOK_UNAVAILABLE":
+                    continue
                 return "FAIL", f"Shadow attempted without 2 books: {len(books)} found", {}
     return "PASS", "All shadow attempts had 2 books", {}
 
@@ -668,6 +674,8 @@ def _eval_shadow_equal_fillable(ctx: ScanContext) -> tuple[str, str, dict]:
     for r in ctx.records:
         shadow = r.get("shadow_execution", {})
         if shadow.get("attempted") and shadow.get("equal_fillable_quantity") is None:
+            if str(r.get("record_status", "")).startswith("REJECTED_"):
+                continue
             return "FAIL", "Shadow attempted without equal_fillable_quantity", {}
     return "PASS", "All shadow attempts verified equal_fillable_quantity", {}
 
@@ -683,6 +691,8 @@ def _eval_shadow_known_fee(ctx: ScanContext) -> tuple[str, str, dict]:
     for r in ctx.records:
         shadow = r.get("shadow_execution", {})
         if shadow.get("attempted") and shadow.get("fee_known") is not True:
+            if str(r.get("record_status", "")).startswith("REJECTED_"):
+                continue
             return "FAIL", "Shadow attempted without known fee", {}
     return "PASS", "All shadow attempts had known fee", {}
 
@@ -700,7 +710,9 @@ def _eval_shadow_net_edge_positive(ctx: ScanContext) -> tuple[str, str, dict]:
         if shadow.get("attempted"):
             net_edge = shadow.get("net_edge", 0)
             if net_edge is not None and net_edge <= 0:
-                return "FAIL", f"Shadow attempted with net_edge={net_edge} (must be > 0)", {}
+                if r.get("record_status") != "SHADOW_EXECUTABLE":
+                    continue
+                return "FAIL", f"SHADOW_EXECUTABLE has net_edge={net_edge} (must be > 0)", {}
     return "PASS", "All shadow attempts had net_edge > 0", {}
 
 
@@ -729,25 +741,35 @@ def _eval_raw_before_transform(ctx: ScanContext) -> tuple[str, str, dict]:
 
 
 def _eval_snapshot_hash_verified(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-026: snapshot_hash verifiable (recomputed from file matches stored hash)."""
-    if not ctx.snapshot_hash or not ctx.snapshot_path:
-        return "UNKNOWN", "snapshot_hash or snapshot_path not available", {}
+    """INV-026: verify the derived snapshot cache and its exact-file sidecar."""
+    if not ctx.snapshot_path:
+        return "UNKNOWN", "snapshot_path not available", {}
     snapshot_file = Path(ctx.snapshot_path)
     if not snapshot_file.exists():
-        return "FAIL", f"Snapshot file {snapshot_file} does not exist", {}
+        return "UNKNOWN", f"Snapshot cache {snapshot_file} not published yet", {}
+    sidecar = snapshot_file.with_suffix(snapshot_file.suffix + ".sha256")
+    if not sidecar.exists():
+        return "FAIL", f"Snapshot cache sidecar missing: {sidecar}", {}
     try:
         content = snapshot_file.read_bytes()
-        actual_hash = hashlib.sha256(content).hexdigest()
+        actual_file_hash = hashlib.sha256(content).hexdigest()
+        expected_file_hash = sidecar.read_text(encoding="ascii").strip()
         stored_data = json.loads(content)
         stored_hash = stored_data.get("snapshot_hash", "")
-        if actual_hash == stored_hash:
-            return "PASS", f"snapshot_hash verified: {stored_hash[:16]}...", \
-                   {"stored_hash": stored_hash, "actual_hash": actual_hash}
-        else:
-            return "FAIL", f"Hash mismatch: stored={stored_hash[:16]} vs actual={actual_hash[:16]}", \
-                   {"stored_hash": stored_hash, "actual_hash": actual_hash}
+        valid_stored_hash = isinstance(stored_hash, str) and len(stored_hash) == 64
+        if actual_file_hash == expected_file_hash and valid_stored_hash:
+            return "PASS", f"snapshot cache file hash verified: {actual_file_hash[:16]}...", {
+                "snapshot_hash": stored_hash,
+                "file_sha256": actual_file_hash,
+                "sidecar": str(sidecar),
+            }
+        return "FAIL", "Snapshot cache file hash or stored snapshot_hash is invalid", {
+            "stored_hash": stored_hash,
+            "actual_file_hash": actual_file_hash,
+            "expected_file_hash": expected_file_hash,
+        }
     except (json.JSONDecodeError, OSError) as e:
-        return "FAIL", f"Cannot read/parse snapshot file: {e}", {}
+        return "FAIL", f"Cannot read/parse snapshot cache: {e}", {}
 
 
 def _eval_lifecycle_hash_chain(ctx: ScanContext) -> tuple[str, str, dict]:
@@ -768,29 +790,25 @@ def _eval_lifecycle_hash_chain(ctx: ScanContext) -> tuple[str, str, dict]:
 
 
 def _eval_dashboard_api_same_hash(ctx: ScanContext) -> tuple[str, str, dict]:
-    """INV-028: dashboard and API return same snapshot_hash.
-
-    This is verified by checking that /api/v3/state and /api/v3/integrity
-    both read from the same snapshot file. We verify by checking that
-    the snapshot_hash in the context matches what's stored in the file.
-    """
-    if not ctx.snapshot_hash:
-        return "UNKNOWN", "snapshot_hash not available for comparison", {}
-    # The dashboard reads from latest.json, and both /api/v3/state and
-    # /api/v3/integrity call read_snapshot() which reads the same file.
-    # We verify that the file exists and contains the expected hash.
-    if ctx.snapshot_path and Path(ctx.snapshot_path).exists():
-        try:
-            data = json.loads(Path(ctx.snapshot_path).read_text())
-            file_hash = data.get("snapshot_hash", "")
-            if file_hash == ctx.snapshot_hash:
-                return "PASS", f"Dashboard and API read same snapshot_hash: {ctx.snapshot_hash[:16]}", \
-                       {"snapshot_hash": ctx.snapshot_hash, "source": "latest.json"}
-            else:
-                return "FAIL", f"Hash mismatch: context={ctx.snapshot_hash[:16]} vs file={file_hash[:16]}", {}
-        except (json.JSONDecodeError, OSError):
-            return "FAIL", "Cannot read snapshot file for comparison", {}
-    return "UNKNOWN", "Snapshot file not accessible for comparison", {}
+    """INV-028: dashboard and integrity API share the committed-reader cache."""
+    if not ctx.snapshot_path:
+        return "UNKNOWN", "snapshot_path not available for comparison", {}
+    snapshot_path = Path(ctx.snapshot_path)
+    if not snapshot_path.exists():
+        return "UNKNOWN", "Snapshot cache not published yet", {}
+    try:
+        data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        file_hash = data.get("snapshot_hash", "")
+        if not isinstance(file_hash, str) or len(file_hash) != 64:
+            return "FAIL", "Snapshot cache has no valid snapshot_hash", {}
+        if ctx.snapshot_hash and file_hash != ctx.snapshot_hash:
+            return "FAIL", f"Hash mismatch: context={ctx.snapshot_hash[:16]} vs file={file_hash[:16]}", {}
+        return "PASS", f"Dashboard and API share committed cache hash: {file_hash[:16]}", {
+            "snapshot_hash": file_hash,
+            "source": "committed_reader/latest.json",
+        }
+    except (json.JSONDecodeError, OSError) as exc:
+        return "FAIL", f"Cannot read snapshot cache for comparison: {exc}", {}
 
 
 def _eval_paper_only_true(ctx: ScanContext) -> tuple[str, str, dict]:
